@@ -12,36 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[workspace]
-members = ["scopedb-client", "scopeql"]
-resolver = "2"
+[package]
+name = "scopedb-client"
+version = "0.2.0"
 
-[workspace.package]
+categories = ["database"]
+description = "A Rust client for ScopeDB"
+keywords = ["scopedb"]
+
 edition = "2024"
 homepage = "https://www.scopedb.io"
 license = "Apache-2.0"
 rust-version = "1.85.0"
 repository = "https://github.com/scopedb/scopedb-sdk"
 
-[workspace.dependencies]
-# Workspace dependencies
-scopedb-client = { path = "scopedb-client" }
-
-# Crates.io dependencies
-anstyle = { version = "1.0" }
-clap = { version = "4.5", features = ["derive"] }
-comfy-table = { version = "7.1.4", default-features = false }
-dirs = { version = "6.0" }
-exn = { version = "0.1.0-alpha.4" }
+[dependencies]
+anyhow = { version = "1.0.99" }
 fastrace = { version = "0.7" }
 fastrace-reqwest = { version = "0.2" }
 hex = { version = "0.4" }
-indicatif = { version = "0.18" }
 jiff = { version = "0.2", features = ["serde"] }
-logos = { version = "0.15.0" }
-mea = { version = "0.3.11" }
-nu-ansi-term = { version = "0.50" }
-reedline = { version = "0.41.0" }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
@@ -51,16 +41,14 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["unbounded_depth"] }
-thiserror = { version = "2.0" }
-tokio = { version = "1.44" }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 
-[workspace.lints.rust]
+[lints.rust]
 unknown_lints = "deny"
 unsafe_code = "deny"
 unused_must_use = "deny"
 
-[workspace.lints.clippy]
+[lints.clippy]
 dbg_macro = "deny"
 field_reassign_with_default = "allow"
 identity_op = "allow"
