@@ -31,10 +31,10 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ github.event_name != 'schedule' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -50,9 +50,9 @@ jobs:
 
   test:
     name: Build and test
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install MSRV toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -64,7 +64,7 @@ jobs:
 
   required:
     name: Required
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs:
       - check
