@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-22.04
     if: ${{ github.event_name != 'schedule' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -52,7 +52,7 @@ jobs:
     name: Build and test
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install MSRV toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
