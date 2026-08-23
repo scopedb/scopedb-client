@@ -13,43 +13,20 @@
 # limitations under the License.
 
 [workspace]
-members = ["xtask"]
+default-members = ["scopedb-client"]
+members = ["scopedb-client", "xtask"]
 resolver = "3"
 
-[workspace.dependencies]
-clap = { version = "4.6.5", features = ["derive"] }
-which = { version = "8.0.5" }
-
-[workspace.lints.rust]
-unknown_lints = "deny"
-unsafe_code = "deny"
-unused_must_use = "deny"
-
-[workspace.lints.clippy]
-dbg_macro = "deny"
-field_reassign_with_default = "allow"
-identity_op = "allow"
-manual_range_contains = "allow"
-new_without_default = "allow"
-
-[package]
-name = "scopedb-client"
-version = "0.3.3"
-
-categories = ["database"]
-description = "A Rust client for ScopeDB"
-keywords = ["scopedb"]
-
-documentation = "https://docs.rs/scopedb-client"
+[workspace.package]
 edition = "2024"
-exclude = ["/.cargo", "/xtask"]
 homepage = "https://www.scopedb.io"
 license = "Apache-2.0"
-rust-version = "1.91.0"
 repository = "https://github.com/scopedb/scopedb-client"
+rust-version = "1.91.0"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = { version = "1.0.99" }
+clap = { version = "4.6.5", features = ["derive"] }
 fastrace = { version = "0.7" }
 fastrace-reqwest = { version = "0.2" }
 hex = { version = "0.4" }
@@ -69,7 +46,17 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["unbounded_depth"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 uuid = { version = "1.17", features = ["v7", "serde"] }
+which = { version = "8.0.5" }
 zstd = { version = "0.13" }
 
-[lints]
-workspace = true
+[workspace.lints.rust]
+unknown_lints = "deny"
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+field_reassign_with_default = "allow"
+identity_op = "allow"
+manual_range_contains = "allow"
+new_without_default = "allow"

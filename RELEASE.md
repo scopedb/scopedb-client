@@ -15,11 +15,11 @@ Rust SDK releases are published from a clean `main` checkout after the release P
    cargo owner --list scopedb-client
    ```
 
-2. Update `Cargo.toml`, refresh and commit `Cargo.lock`, and update `CHANGELOG.md` and user-facing documentation in a release PR. The lockfile is tracked for the workspace's xtask binary even though `scopedb-client` itself is a library. Do not publish directly from a feature branch.
+2. Update `scopedb-client/Cargo.toml`, refresh and commit `Cargo.lock`, and update `CHANGELOG.md` and user-facing documentation in a release PR. The lockfile is tracked for the workspace's xtask binary even though `scopedb-client` itself is a library. Do not publish directly from a feature branch.
 
    ```sh
-   cargo +1.91.0 check
-   git diff -- Cargo.toml Cargo.lock
+   cargo +1.91.0 check --package scopedb-client
+   git diff -- scopedb-client/Cargo.toml Cargo.lock
    ```
 
 3. After the release PR merges, update local `main`, fetch the remote, and verify that the checkout is clean and points at exactly `origin/main`:
@@ -43,19 +43,19 @@ Rust SDK releases are published from a clean `main` checkout after the release P
 Run the same checks used by CI, build the documentation with warnings denied, and verify the exact package that Cargo will upload:
 
 ```sh
-manifest_version="$(cargo +1.91.0 pkgid | sed -E 's/.*[#@]([^#@]+)$/\1/')"
+manifest_version="$(cargo +1.91.0 pkgid --package scopedb-client | sed -E 's/.*[#@]([^#@]+)$/\1/')"
 test "$manifest_version" = "$scopedb_rust_version"
 cargo +1.91.0 x lint
 cargo +1.91.0 x check
 cargo +1.91.0 x test
-cargo +1.91.0 publish --dry-run --locked
-cargo +1.91.0 package --list --locked
+cargo +1.91.0 publish --package scopedb-client --dry-run --locked
+cargo +1.91.0 package --package scopedb-client --list --locked
 ```
 
 Publish once from that same clean commit:
 
 ```sh
-cargo +1.91.0 publish --locked
+cargo +1.91.0 publish --package scopedb-client --locked
 ```
 
 Wait until the published version is visible before tagging:
