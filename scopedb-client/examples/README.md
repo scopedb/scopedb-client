@@ -10,11 +10,11 @@ The commands below run from the repository root.
 
 These examples can run against a reachable ScopeDB endpoint without modifying data.
 
-| Example | Shows | Run |
-| --- | --- | --- |
-| [`statement.rs`](statement.rs) | Query shorthand and object result rows | `cargo run --example statement` |
-| [`catalog.rs`](catalog.rs) | Automatic REST catalog pagination and full resources | `cargo run --example catalog` |
-| [`table.rs`](table.rs) | Quoted table identifiers and full table descriptions | `cargo run --example table` |
+| Example                        | Shows                                                | Run                             |
+| ------------------------------ | ---------------------------------------------------- | ------------------------------- |
+| [`statement.rs`](statement.rs) | Query shorthand and object result rows               | `cargo run --example statement` |
+| [`catalog.rs`](catalog.rs)     | Automatic REST catalog pagination and full resources | `cargo run --example catalog`   |
+| [`table.rs`](table.rs)         | Quoted table identifiers and full table descriptions | `cargo run --example table`     |
 
 ## Before running a write example
 
@@ -53,13 +53,13 @@ $env:SCOPEDB_TABLE = "sdk_example_events"
 
 ## Choose a write journey
 
-| Example | Choose it when | Run |
-| --- | --- | --- |
-| [`append.rs`](append.rs) | The caller owns one exact NDJSON request boundary | `cargo run --example append` |
-| [`append_stream.rs`](append_stream.rs) | The SDK should asynchronously batch rows with strict delivery | `cargo run --example append_stream` |
-| [`bulk_append.rs`](bulk_append.rs) | A backfill needs bounded memory and concurrent strict batches | `cargo run --example bulk_append` |
-| [`telemetry.rs`](telemetry.rs) | Logs or events need non-blocking, observable best-effort delivery | `cargo run --example telemetry` |
-| [`ingest_transform.rs`](ingest_transform.rs) | JSON records need a SQL transform before insertion | `cargo run --example ingest_transform` |
+| Example                                      | Choose it when                                                    | Run                                    |
+| -------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------- |
+| [`append.rs`](append.rs)                     | The caller owns one exact NDJSON request boundary                 | `cargo run --example append`           |
+| [`append_stream.rs`](append_stream.rs)       | The SDK should asynchronously batch rows with strict delivery     | `cargo run --example append_stream`    |
+| [`bulk_append.rs`](bulk_append.rs)           | A backfill needs bounded memory and concurrent strict batches     | `cargo run --example bulk_append`      |
+| [`telemetry.rs`](telemetry.rs)               | Logs or events need non-blocking, observable best-effort delivery | `cargo run --example telemetry`        |
+| [`ingest_transform.rs`](ingest_transform.rs) | JSON records need a SQL transform before insertion                | `cargo run --example ingest_transform` |
 
 `append.rs` sends exactly one NDJSON request. `append_stream.rs` uses the default `Stop` policy: `send()` and `send_all()` wait only for local admission, while a successful `flush()` or `shutdown()` is a remote commit barrier for the accepted prefix.
 

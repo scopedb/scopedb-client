@@ -254,13 +254,13 @@ The stream retries only the exact temporary HTTP batch explicitly reported as `R
 
 ### Choose a delivery path
 
-| Workload | Admission and delivery | Example |
-| --- | --- | --- |
-| One exact NDJSON payload | Caller owns the request boundary | [`append.rs`][append-example] |
-| Basic asynchronous batching | SDK owns batches; strict barriers | [`append_stream.rs`][append-stream-example] |
-| Backfill or file import | Bounded producer memory and concurrent strict batches | [`bulk_append.rs`][bulk-append-example] |
-| Long-running logs and events | Non-blocking continue mode with observable loss | [`telemetry.rs`][telemetry-example] |
-| SQL transformation before insert | Transform-oriented ingest stream | [`ingest_transform.rs`][ingest-transform-example] |
+| Workload                         | Admission and delivery                                | Example                                           |
+| -------------------------------- | ----------------------------------------------------- | ------------------------------------------------- |
+| One exact NDJSON payload         | Caller owns the request boundary                      | [`append.rs`][append-example]                     |
+| Basic asynchronous batching      | SDK owns batches; strict barriers                     | [`append_stream.rs`][append-stream-example]       |
+| Backfill or file import          | Bounded producer memory and concurrent strict batches | [`bulk_append.rs`][bulk-append-example]           |
+| Long-running logs and events     | Non-blocking continue mode with observable loss       | [`telemetry.rs`][telemetry-example]               |
+| SQL transformation before insert | Transform-oriented ingest stream                      | [`ingest_transform.rs`][ingest-transform-example] |
 
 ## Table helper
 
