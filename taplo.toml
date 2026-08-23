@@ -12,29 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set dotenv-load
+exclude = ["target/**"]
+include = ["Cargo.toml", "**/*.toml"]
 
-default:
-    just --list
-
-download-hawkeye:
-	dev/download-hawkeye.sh
-
-check-license: download-hawkeye
-	hawkeye check
-
-fmt-license: download-hawkeye
-	hawkeye format
-
-check-code:
-    cargo +nightly fmt --all --check
-    cargo +nightly clippy --tests --all-targets --all-features -- -D warnings
-
-check: check-license check-code
-
-fix: fmt-license
-    cargo +nightly clippy --tests --all-targets --all-features --fix --allow-staged --allow-dirty
-    cargo +nightly fmt --all
-
-test:
-    cargo test
+[formatting]
+align_entries = false
+allowed_blank_lines = 1
+array_auto_collapse = true
+array_auto_expand = true
+array_trailing_comma = true
+column_width = 80
+compact_arrays = true
+compact_inline_tables = false
+crlf = false
+indent_string = "  "
+indent_tables = false
+reorder_keys = true
+trailing_newline = true

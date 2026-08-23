@@ -40,9 +40,13 @@ jobs:
         with:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@just
-      - name: Check Rust SDK
-        run: just check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: typos-cli,taplo-cli,hawkeye
+      - name: Lint Rust SDK
+        run: cargo x lint
+      - name: Check feature matrix
+        run: cargo x check
 
   test:
     name: Build and test
@@ -53,10 +57,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
-      - uses: taiki-e/install-action@just
+      - uses: Swatinem/rust-cache@v2
       - name: Run full tests
         timeout-minutes: 10
-        run: just test
+        run: cargo x test --no-capture
 
   required:
     name: Required
