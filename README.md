@@ -388,13 +388,13 @@ The wire-level endpoint and payload reference is in
 Release history and the maintainer runbook are in
 [`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
 
-[append-example]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/examples/append.rs
-[append-stream-example]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/examples/append_stream.rs
-[bulk-append-example]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/examples/bulk_append.rs
-[catalog-example]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/examples/catalog.rs
-[changelog]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/CHANGELOG.md
-[example-guide]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/examples/README.md
-[ingest-transform-example]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/examples/ingest_transform.rs
-[release]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/RELEASE.md
-[rust-http-api]: https://github.com/scopedb/scopedb-sdk/blob/main/docs/rust-http-api.md
-[telemetry-example]: https://github.com/scopedb/scopedb-sdk/blob/main/rust/examples/telemetry.rs
+[append-example]: https://github.com/scopedb/scopedb-client/blob/main/examples/append.rs
+[append-stream-example]: https://github.com/scopedb/scopedb-client/blob/main/examples/append_stream.rs
+[bulk-append-example]: https://github.com/scopedb/scopedb-client/blob/main/examples/bulk_append.rs
+[catalog-example]: https://github.com/scopedb/scopedb-client/blob/main/examples/catalog.rs
+[changelog]: https://github.com/scopedb/scopedb-client/blob/main/CHANGELOG.md
+[example-guide]: https://github.com/scopedb/scopedb-client/blob/main/examples/README.md
+[ingest-transform-example]: https://github.com/scopedb/scopedb-client/blob/main/examples/ingest_transform.rs
+[release]: https://github.com/scopedb/scopedb-client/blob/main/RELEASE.md
+[rust-http-api]: https://github.com/scopedb/scopedb-client/blob/main/docs/rust-http-api.md
+[telemetry-example]: https://github.com/scopedb/scopedb-client/blob/main/examples/telemetry.rs

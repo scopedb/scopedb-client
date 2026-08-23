@@ -12,29 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set dotenv-load
+[header]
+builtin = "Apache-2.0"
 
-default:
-    just --list
+[files]
+includes = ['*.rs', '*.go', '*.java', '*.toml', '*.yml', '*.yaml', 'pom.xml']
 
-download-hawkeye:
-	dev/download-hawkeye.sh
-
-check-license: download-hawkeye
-	hawkeye check
-
-fmt-license: download-hawkeye
-	hawkeye format
-
-check-code:
-    cargo +nightly fmt --all --check
-    cargo +nightly clippy --tests --all-targets --all-features -- -D warnings
-
-check: check-license check-code
-
-fix: fmt-license
-    cargo +nightly clippy --tests --all-targets --all-features --fix --allow-staged --allow-dirty
-    cargo +nightly fmt --all
-
-test:
-    cargo test
+[props]
+copyright_owner = "ScopeDB, Inc."
+inception_year = 2024

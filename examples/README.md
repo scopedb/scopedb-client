@@ -11,7 +11,7 @@ syntax, use the canonical [Quickstart](https://docs.scopedb.io/guides/quickstart
 [query guide](https://docs.scopedb.io/guides/query-events), and
 [language reference](https://docs.scopedb.io/reference/).
 
-The commands below run from the [`rust/`](../) directory in a source checkout.
+The commands below run from the repository root.
 
 ## Read-only discovery
 

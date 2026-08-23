@@ -2,7 +2,9 @@
 
 Rust SDK releases are published from a clean `main` checkout after the release
 PR has merged. The crate version, changelog entry, Git tag, and crates.io
-version must all match.
+version must all match. Tags with the legacy `rust/vX.Y.Z` form were retained
+only to preserve release history from the former monorepo; new releases use
+`vX.Y.Z`.
 
 ## Prepare
 
@@ -45,7 +47,6 @@ Run the same checks used by CI, build the documentation with warnings denied,
 and verify the exact package that Cargo will upload:
 
 ```sh
-cd rust
 cargo +1.91.0 generate-lockfile
 manifest_version="$(cargo pkgid | sed -E 's/.*@([^@]+)$/\1/')"
 test "$manifest_version" = "$scopedb_rust_version"
@@ -71,13 +72,12 @@ cargo info "scopedb-client@$scopedb_rust_version"
 
 ## Tag and verify
 
-Create an annotated, SDK-scoped tag on the published commit and push it:
+Create an annotated tag on the published commit and push it:
 
 ```sh
-cd ..
-git tag -a "rust/v$scopedb_rust_version" \
+git tag -a "v$scopedb_rust_version" \
   -m "Release v$scopedb_rust_version for Rust SDK"
-git push origin "rust/v$scopedb_rust_version"
+git push origin "v$scopedb_rust_version"
 ```
 
 Create a GitHub release whose notes are the matching `CHANGELOG.md` entry.

@@ -4,6 +4,11 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+* Moved the SDK source from the `scopedb-sdk` monorepo to the standalone
+  `scopedb-client` repository.
+
 ## v0.3.2 (2026-08-22)
 
 ### Changed
