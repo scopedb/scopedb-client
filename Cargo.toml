@@ -28,20 +28,20 @@ anyhow = { version = "1.0.104" }
 cargo_metadata = { version = "0.23.1" }
 clap = { version = "4.6.6" }
 fastrace = { version = "0.7.19" }
-# reqwest is public API; upgrade it with fastrace-reqwest in a breaking release.
-fastrace-reqwest = { version = "0.2.0" }
+fastrace-reqwest = { version = "0.3.0" }
 hex = { version = "0.4.3" }
 httpdate = { version = "1.0.3" }
 jiff = { version = "0.2.35", features = ["serde"] }
 mea = { version = "0.6.7" }
-reqwest = { version = "0.12.28", default-features = false, features = [
+reqwest = { version = "0.13.4", default-features = false, features = [
   "json",
-  "rustls-tls",
+  "query",
+  "rustls",
   "charset",
   "http2",
   "gzip",
   "zstd",
-  "macos-system-configuration",
+  "system-proxy",
 ] }
 semver = { version = "1.0.28" }
 serde = { version = "1.0.229" }

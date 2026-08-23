@@ -4,6 +4,10 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+* Upgraded the re-exported reqwest API from 0.12 to 0.13. Custom HTTP clients must now use reqwest 0.13, and the default HTTPS client uses reqwest's platform certificate verification.
+
 ## v0.3.3 (2026-08-24)
 
 ### Changed
