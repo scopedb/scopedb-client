@@ -1,8 +1,6 @@
 # ScopeDB SDK for Rust
 
-`scopedb-client` is an async Rust client for ScopeDB. It supports statements,
-read-only REST catalog discovery, direct NDJSON table appends, bounded concurrent
-streaming writes, and transform-oriented JSON ingest.
+`scopedb-client` is an async Rust client for ScopeDB. It supports statements, read-only REST catalog discovery, direct NDJSON table appends, bounded concurrent streaming writes, and transform-oriented JSON ingest.
 
 ## Installation
 
@@ -15,9 +13,7 @@ cargo add tokio --features macros,rt-multi-thread
 
 ## Create a client
 
-Use the builder for the common API-key path. An API key is a server credential:
-keep it in a trusted process and never compile or return it to an untrusted
-client.
+Use the builder for the common API-key path. An API key is a server credential: keep it in a trusted process and never compile or return it to an untrusted client.
 
 ```rust,no_run
 use scopedb_client::Client;
@@ -28,27 +24,15 @@ let client = Client::builder("http://127.0.0.1:6543")
 # Ok::<(), scopedb_client::Error>(())
 ```
 
-Applications that own TLS, proxy, timeout, or pooling settings can pass a
-compatible HTTP client through `.http_client(...)`. `Client::new(endpoint,
-http_client)` remains available when authentication is already configured on
-that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to
-avoid dependency-version mismatches.
+Applications that own TLS, proxy, timeout, or pooling settings can pass a compatible HTTP client through `.http_client(...)`. `Client::new(endpoint, http_client)` remains available when authentication is already configured on that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to avoid dependency-version mismatches.
 
-Statement and transform-ingest JSON request bodies and streaming table append
-batches use zstd compression by default. The default HTTP client also
-negotiates compressed responses. Direct caller-encoded table appends remain
-identity-encoded.
+Statement and transform-ingest JSON request bodies and streaming table append batches use zstd compression by default. The default HTTP client also negotiates compressed responses. Direct caller-encoded table appends remain identity-encoded.
 
-The runnable examples read authentication from `SCOPEDB_API_KEY`. For backward
-compatibility, they fall back to `SCOPEDB_TOKEN` when the API key variable is
-unset or empty. The builder marks the resulting authorization header as
-sensitive so standard header and request `Debug` formatting redacts the
-credential.
+The runnable examples read authentication from `SCOPEDB_API_KEY`. For backward compatibility, they fall back to `SCOPEDB_TOKEN` when the API key variable is unset or empty. The builder marks the resulting authorization header as sensitive so standard header and request `Debug` formatting redacts the credential.
 
 ## ScopeQL
 
-This SDK sends ScopeQL statements to ScopeDB; the language is documented
-separately. Use these canonical entry points:
+This SDK sends ScopeQL statements to ScopeDB; the language is documented separately. Use these canonical entry points:
 
 - [Quickstart](https://docs.scopedb.io/guides/quickstart)
 - [Query guide](https://docs.scopedb.io/guides/query-events)
@@ -66,24 +50,13 @@ println!("{rows:?}");
 # }
 ```
 
-`raw_rows()` exposes the string-or-null wire cells without parsing.
-`to_values()` borrows the result while `into_values()` consumes it and moves
-owned string cells. `to_objects()` and `into_objects()` key values by output
-column name; they return an error when names are duplicated, so use the value
-form for intentionally duplicated columns. `first()` converts only the first
-row for point lookups and aggregates.
+`raw_rows()` exposes the string-or-null wire cells without parsing. `to_values()` borrows the result while `into_values()` consumes it and moves owned string cells. `to_objects()` and `into_objects()` key values by output column name; they return an error when names are duplicated, so use the value form for intentionally duplicated columns. `first()` converts only the first row for point lookups and aggregates.
 
-For lifecycle control, call `client.statement(scopeql).submit()` and retain the
-returned handle. `last_status()` reads the latest cached snapshot without a
-network request, `status().await` fetches one current status, `wait()` polls to
-a terminal result, and `cancel()` requests cancellation. The statement ID and
-initial status snapshot are available immediately after submission.
+For lifecycle control, call `client.statement(scopeql).submit()` and retain the returned handle. `last_status()` reads the latest cached snapshot without a network request, `status().await` fetches one current status, `wait()` polls to a terminal result, and `cancel()` requests cancellation. The statement ID and initial status snapshot are available immediately after submission.
 
 ## Browse the catalog
 
-Catalog iterators follow opaque continuation tokens automatically and fetch the
-next page only when needed. List methods remain available when the application
-needs explicit page boundaries; fetch methods return one full resource.
+Catalog iterators follow opaque continuation tokens automatically and fetch the next page only when needed. List methods remain available when the application needs explicit page boundaries; fetch methods return one full resource.
 
 ```rust
 use scopedb_client::CatalogListOptions;
@@ -110,15 +83,11 @@ println!("{} {} {}", database.name, schema.name, table.name);
 # }
 ```
 
-See [`examples/catalog.rs`][catalog-example] for complete database pagination
-and table metadata discovery.
+See [`examples/catalog.rs`][catalog-example] for complete database pagination and table metadata discovery.
 
 ## Streaming writes with NDJSON
 
-The table write API accepts newline-delimited JSON only: each line is one JSON
-row object. It does not accept a JSON array. The destination table must already
-exist. `Table` uses `scopedb` and `public` when the database or schema is not
-specified.
+The table write API accepts newline-delimited JSON only: each line is one JSON row object. It does not accept a JSON array. The destination table must already exist. `Table` uses `scopedb` and `public` when the database or schema is not specified.
 
 ### Direct append
 
@@ -173,11 +142,9 @@ if error.kind() == ErrorKind::AppendRowsFailed {
 # }
 ```
 
-`Unknown` is deliberately different from a rejection: replaying the same rows
-may insert duplicates.
+`Unknown` is deliberately different from a rejection: replaying the same rows may insert duplicates.
 
-All HTTP errors preserve the server message in `Error::message()` and expose
-operational metadata without message parsing:
+All HTTP errors preserve the server message in `Error::message()` and expose operational metadata without message parsing:
 
 ```rust
 # fn inspect(error: &scopedb_client::Error) {
@@ -189,15 +156,11 @@ eprintln!("retry_after = {:?}", error.retry_after());
 # }
 ```
 
-The asynchronous append stream honors `Retry-After` only for an exact temporary
-batch explicitly reported as `Rejected`; the delay is capped by `max_backoff`.
-Unknown outcomes remain non-retryable because replay can duplicate rows.
+The asynchronous append stream honors `Retry-After` only for an exact temporary batch explicitly reported as `Rejected`; the delay is capped by `max_backoff`. Unknown outcomes remain non-retryable because replay can duplicate rows.
 
 ### Asynchronous append stream
 
-Use `append_stream()` for continuous or large producers. The stream serializes
-records to NDJSON, batches by size or time, bounds pending bytes, and sends a
-bounded number of HTTP append requests concurrently.
+Use `append_stream()` for continuous or large producers. The stream serializes records to NDJSON, batches by size or time, bounds pending bytes, and sends a bounded number of HTTP append requests concurrently.
 
 ```rust
 use std::time::Duration;
@@ -232,30 +195,17 @@ stream.shutdown().await?;
 # }
 ```
 
-Each `AppendStream` request contains at most 8 MiB of uncompressed NDJSON and
-200,000 rows. The stream splits automatically at either limit. Direct
-caller-encoded appends retain the endpoint's 16 MiB limit.
+Each `AppendStream` request contains at most 8 MiB of uncompressed NDJSON and 200,000 rows. The stream splits automatically at either limit. Direct caller-encoded appends retain the endpoint's 16 MiB limit.
 
-`send()` and `send_all()` wait for local admission capacity only; they do not
-wait for a remote commit. Feed an iterator sequentially instead of spawning one
-task per row, which would move the unbounded backlog outside the stream.
-`flush()` and `shutdown()` are remote delivery barriers.
+`send()` and `send_all()` wait for local admission capacity only; they do not wait for a remote commit. Feed an iterator sequentially instead of spawning one task per row, which would move the unbounded backlog outside the stream. `flush()` and `shutdown()` are remote delivery barriers.
 
-Once a `flush()` future has enqueued its barrier, dropping that future does not
-cancel remote settlement. Keep it alive to receive the interval report; if a
-task is cancelled, inspect `stats().last_report` and lifetime counters before
-deciding how to reconcile the covered rows.
+Once a `flush()` future has enqueued its barrier, dropping that future does not cancel remote settlement. Keep it alive to receive the interval report; if a task is cancelled, inspect `stats().last_report` and lifetime counters before deciding how to reconcile the covered rows.
 
-The default `AppendFailurePolicy::Stop` is strict: the first failed batch stops
-admission, and a successful barrier confirms that its accepted prefix committed.
-Use `max_concurrent_batches(1)` if request submission order matters; concurrent
-batches have no defined commit order.
+The default `AppendFailurePolicy::Stop` is strict: the first failed batch stops admission, and a successful barrier confirms that its accepted prefix committed. Use `max_concurrent_batches(1)` if request submission order matters; concurrent batches have no defined commit order.
 
 ### Best-effort telemetry and logs
 
-Telemetry producers often cannot wait for admission or stop permanently after
-one unavailable batch. Opt into `Continue`, use `try_send()` on the hot path,
-and inspect settlement reports and lifetime stats.
+Telemetry producers often cannot wait for admission or stop permanently after one unavailable batch. Opt into `Continue`, use `try_send()` on the hot path, and inspect settlement reports and lifetime stats.
 
 ```rust
 use std::time::Duration;
@@ -288,34 +238,19 @@ if report.outcome != AppendDeliveryOutcome::Ok {
 # }
 ```
 
-`Ok(())` from `try_send()` still means local admission, not remote commit. It
-returns immediately with an error when serialization fails, the row is invalid
-or too large, the buffer is full, the circuit is open, or the stream is closed.
-Continue mode releases failed batches after accounting for them; it is not an
-in-memory retry queue.
+`Ok(())` from `try_send()` still means local admission, not remote commit. It returns immediately with an error when serialization fails, the row is invalid or too large, the buffer is full, the circuit is open, or the stream is closed. Continue mode releases failed batches after accounting for them; it is not an in-memory retry queue.
 
-The circuit breaker rejects non-blocking `try_send()` calls while open. The
-backpressured `send()` path can still admit rows within the configured memory
-budget; their dispatch waits for the circuit probe, so use `try_send()` on
-latency-sensitive logging and telemetry paths.
+The circuit breaker rejects non-blocking `try_send()` calls while open. The backpressured `send()` path can still admit rows within the configured memory budget; their dispatch waits for the circuit probe, so use `try_send()` on latency-sensitive logging and telemetry paths.
 
-A continue-mode report classifies rows as committed, failed, unknown, or locally
-dropped. For accepted rows in a completed report:
+A continue-mode report classifies rows as committed, failed, unknown, or locally dropped. For accepted rows in a completed report:
 
 ```text
 accepted_rows = committed_rows + failed_rows + unknown_rows
 ```
 
-`AppendDeliveryOutcome::Partial` means at least one row committed while another
-row failed, was dropped, or remains unknown. With no committed rows, the outcome
-is `Unknown` when any batch may have committed and `Failed` otherwise. Only a
-loss-free report is `Ok`.
+`AppendDeliveryOutcome::Partial` means at least one row committed while another row failed, was dropped, or remains unknown. With no committed rows, the outcome is `Unknown` when any batch may have committed and `Failed` otherwise. Only a loss-free report is `Ok`.
 
-The stream retries only the exact temporary HTTP batch explicitly reported as
-`Rejected`. A timeout, transport failure, or invalid success response is
-`Unknown` and is never automatically retried. An in-memory stream is not a
-durable queue; use an outbox when payloads must survive process failure or be
-available for reconciliation.
+The stream retries only the exact temporary HTTP batch explicitly reported as `Rejected`. A timeout, transport failure, or invalid success response is `Unknown` and is never automatically retried. An in-memory stream is not a durable queue; use an outbox when payloads must survive process failure or be available for reconciliation.
 
 ### Choose a delivery path
 
@@ -343,9 +278,7 @@ println!("columns = {}", description.columns.len());
 
 ## Transform-oriented ingest
 
-`IngestStream` remains useful when input JSON needs a SQL transform before
-insertion. Prefer `Table::append` or `Table::append_stream` when records already
-match the destination table.
+`IngestStream` remains useful when input JSON needs a SQL transform before insertion. Prefer `Table::append` or `Table::append_stream` when records already match the destination table.
 
 ```rust
 # async fn demo() -> Result<(), scopedb_client::Error> {
@@ -374,8 +307,7 @@ stream.shutdown().await?;
 
 ## Examples and development
 
-The [example guide][example-guide] includes setup, safety guards, delivery
-contracts, and runnable commands.
+The [example guide][example-guide] includes setup, safety guards, delivery contracts, and runnable commands.
 
 ```sh
 cargo check --examples
@@ -383,10 +315,7 @@ cargo test
 cargo clippy --all-targets --all-features
 ```
 
-The wire-level endpoint and payload reference is in
-[`docs/rust-http-api.md`][rust-http-api].
-Release history and the maintainer runbook are in
-[`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
+The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][rust-http-api]. Release history and the maintainer runbook are in [`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
 
 [append-example]: https://github.com/scopedb/scopedb-client/blob/main/examples/append.rs
 [append-stream-example]: https://github.com/scopedb/scopedb-client/blob/main/examples/append_stream.rs

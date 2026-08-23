@@ -1,13 +1,10 @@
 # Rust HTTP API reference
 
-This document describes the HTTP surface modeled by the Rust SDK and the
-delivery rules that its higher-level helpers preserve. Public endpoints are
-rooted at `/v1`.
+This document describes the HTTP surface modeled by the Rust SDK and the delivery rules that its higher-level helpers preserve. Public endpoints are rooted at `/v1`.
 
 ## REST catalog API
 
-Catalog endpoints are read-only. Every user-provided database, schema, and
-table name occupies one URL path segment; the SDK percent-encodes those segments.
+Catalog endpoints are read-only. Every user-provided database, schema, and table name occupies one URL path segment; the SDK percent-encodes those segments.
 
 ### Databases
 
@@ -37,8 +34,7 @@ All list endpoints accept:
 - `page_size`: optional integer from 1 through 1000; the default is 100
 - `page_token`: optional opaque token returned by the previous page
 
-The Rust SDK exposes these as `CatalogListOptions`. A list response has the same
-shape for every resource type:
+The Rust SDK exposes these as `CatalogListOptions`. A list response has the same shape for every resource type:
 
 ```json
 {
@@ -47,13 +43,9 @@ shape for every resource type:
 }
 ```
 
-`next_page_token` is omitted when there is no next page. Clients must pass it
-back unchanged and must not parse or synthesize it.
+`next_page_token` is omitted when there is no next page. Clients must pass it back unchanged and must not parse or synthesize it.
 
-`Client::iterate_databases`, `iterate_schemas`, and `iterate_tables` follow the
-token automatically, fetch pages lazily, and reject a repeated token instead of
-looping forever. The `list_*` methods expose one explicit page when an
-application needs page boundaries.
+`Client::iterate_databases`, `iterate_schemas`, and `iterate_tables` follow the token automatically, fetch pages lazily, and reject a repeated token instead of looping forever. The `list_*` methods expose one explicit page when an application needs page boundaries.
 
 ### Resource shapes
 
@@ -114,8 +106,7 @@ Fetching one table returns its full public specification:
 
 ## Streaming write API
 
-The streaming write API appends rows that already match an existing table. It
-supports NDJSON only.
+The streaming write API appends rows that already match an existing table. It supports NDJSON only.
 
 ### `POST /v1/databases/{database}/schemas/{schema}/tables/{table}/rows`
 
@@ -132,9 +123,7 @@ Request body:
 {"id":2,"name":"second"}
 ```
 
-Each line is one complete JSON row object. A JSON array is not a valid
-replacement for multiple NDJSON lines. The body must not be empty. One request
-is limited to 16 MiB and 200,000 rows.
+Each line is one complete JSON row object. A JSON array is not a valid replacement for multiple NDJSON lines. The body must not be empty. One request is limited to 16 MiB and 200,000 rows.
 
 A committed response is:
 
@@ -145,9 +134,7 @@ A committed response is:
 }
 ```
 
-The Rust SDK accepts success only when `append_state` is `committed` and the
-inserted row count is valid. A malformed or contradictory success response has
-an unknown commit outcome.
+The Rust SDK accepts success only when `append_state` is `committed` and the inserted row count is valid. A malformed or contradictory success response has an unknown commit outcome.
 
 ### Structured append errors
 
@@ -174,27 +161,20 @@ An append failure uses this payload when the outcome is known:
 - `rejected`: no request row committed
 - `unknown`: the commit outcome cannot be determined
 
-`row_index` is zero-based within the submitted NDJSON request. The server may
-truncate the row-error list; `row_errors_truncated` preserves that fact.
+`row_index` is zero-based within the submitted NDJSON request. The server may truncate the row-error list; `row_errors_truncated` preserves that fact.
 
-Transport errors, response-body read failures, attempt timeouts, and malformed
-responses are classified as `unknown`, because the request may have reached the
-commit path. Replaying an unknown payload may insert duplicates.
+Transport errors, response-body read failures, attempt timeouts, and malformed responses are classified as `unknown`, because the request may have reached the commit path. Replaying an unknown payload may insert duplicates.
 
-The asynchronous append stream retries only the same HTTP batch when both of
-these conditions hold:
+The asynchronous append stream retries only the same HTTP batch when both of these conditions hold:
 
 1. The structured response explicitly says `append_state: "rejected"`.
 2. The HTTP failure is temporary.
 
-It never automatically retries an unknown batch. Direct `Table::append` and
-`Client::append_rows` return the structured error to the caller and do not own a
-retry loop.
+It never automatically retries an unknown batch. Direct `Table::append` and `Client::append_rows` return the structured error to the caller and do not own a retry loop.
 
 ### Client-side batching and barriers
 
-`Table::append_stream` is a client-side batching layer over the rows endpoint;
-it is not a separate HTTP endpoint.
+`Table::append_stream` is a client-side batching layer over the rows endpoint; it is not a separate HTTP endpoint.
 
 - Every accepted Rust value is serialized to exactly one NDJSON line.
 - `send` and `send_all` wait for local admission capacity, not a remote commit.
@@ -205,17 +185,11 @@ it is not a separate HTTP endpoint.
 - `flush` settles all rows accepted before its barrier.
 - `shutdown` closes admission and settles the final accepted prefix.
 
-The older `batch_bytes`, `max_in_flight_requests`, and `max_pending_bytes`
-builder names remain source-compatible deprecated aliases.
+The older `batch_bytes`, `max_in_flight_requests`, and `max_pending_bytes` builder names remain source-compatible deprecated aliases.
 
-With the default `Stop` failure policy, a failed batch makes the stream terminal
-and barriers return an error. With `Continue`, rejected and unknown batches are
-accounted for and released so later batches can proceed. Continue-mode barriers
-return an `AppendDeliveryReport`; they do not imply that every row committed.
+With the default `Stop` failure policy, a failed batch makes the stream terminal and barriers return an error. With `Continue`, rejected and unknown batches are accounted for and released so later batches can proceed. Continue-mode barriers return an `AppendDeliveryReport`; they do not imply that every row committed.
 
-Concurrent batches do not have a defined commit order. Set the in-flight limit
-to one when requests must be submitted serially. Neither policy provides a
-stream-wide transaction, rollback, durable replay queue, or idempotency.
+Concurrent batches do not have a defined commit order. Set the in-flight limit to one when requests must be submitted serially. Neither policy provides a stream-wide transaction, rollback, durable replay queue, or idempotency.
 
 ## Statement API
 
@@ -241,24 +215,15 @@ Request fields:
 - `max_parallelism`: optional
 - `format`: `json` for the public Rust SDK
 
-The response is a tagged statement-state payload: `pending`, `running`,
-`finished`, `failed`, or `cancelled`. Statement failure and cancellation are
-in-band states, so HTTP success does not imply statement success.
+The response is a tagged statement-state payload: `pending`, `running`, `finished`, `failed`, or `cancelled`. Statement failure and cancellation are in-band states, so HTTP success does not imply statement success.
 
 ### `GET /v1/statements/{statement_id}?format=json`
 
-Fetches the latest state for a submitted statement and returns the same state
-payload family as statement submission. `StatementHandle::status().await`
-performs at most one fetch and updates the snapshot returned by
-`StatementHandle::last_status`; terminal snapshots are returned without another
-request. `StatementHandle::wait` polls with bounded exponential delay until a
-terminal state. The older `fetch_once` and `fetch` names remain deprecated
-aliases for `status` and `wait`, respectively.
+Fetches the latest state for a submitted statement and returns the same state payload family as statement submission. `StatementHandle::status().await` performs at most one fetch and updates the snapshot returned by `StatementHandle::last_status`; terminal snapshots are returned without another request. `StatementHandle::wait` polls with bounded exponential delay until a terminal state. The older `fetch_once` and `fetch` names remain deprecated aliases for `status` and `wait`, respectively.
 
 ### `POST /v1/statements/{statement_id}/cancel`
 
-Cancels a pending or running statement. The response contains the post-cancel
-terminal status view:
+Cancels a pending or running statement. The response contains the post-cancel terminal status view:
 
 ```json
 {
@@ -317,8 +282,7 @@ The Rust SDK uses committed ingest with JSON-line data. A successful response is
 }
 ```
 
-This endpoint is useful when each input record needs a SQL transform. For rows
-already shaped like a table, use the streaming write API.
+This endpoint is useful when each input record needs a SQL transform. For rows already shaped like a table, use the streaming write API.
 
 ## Generic error responses
 
@@ -330,13 +294,6 @@ Non-append non-2xx responses generally use:
 }
 ```
 
-The SDK distinguishes transport or deserialization errors, non-2xx server
-errors, structured append outcomes, and in-band statement terminal states.
-Server messages remain unchanged in `Error::message()`. When available,
-`http_status()`, `request_id()`, and `retry_after()` expose response metadata;
-`is_retryable()` includes an explicit `retryable` value from direct or nested
-error envelopes before falling back to HTTP status classification.
+The SDK distinguishes transport or deserialization errors, non-2xx server errors, structured append outcomes, and in-band statement terminal states. Server messages remain unchanged in `Error::message()`. When available, `http_status()`, `request_id()`, and `retry_after()` expose response metadata; `is_retryable()` includes an explicit `retryable` value from direct or nested error envelopes before falling back to HTTP status classification.
 
-`Retry-After` accepts delta seconds and HTTP dates. Streaming writes use it only
-for a temporary append explicitly reported as `rejected`, and cap the delay at
-the configured maximum backoff. Unknown append outcomes are never retried.
+`Retry-After` accepts delta seconds and HTTP dates. Streaming writes use it only for a temporary append explicitly reported as `rejected`, and cap the delay at the configured maximum backoff. Unknown append outcomes are never retried.

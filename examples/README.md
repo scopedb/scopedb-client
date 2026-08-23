@@ -1,22 +1,14 @@
 # ScopeDB Rust SDK examples
 
-Start with a quickstart, then choose a write pattern whose delivery tradeoffs
-match the workload. Every example uses only the public `scopedb-client` API.
-The shared client helper uses `Client::builder(...).api_key(...)`, so copied
-examples do not need a direct reqwest dependency. API keys belong only in a
-trusted process; never return one to an untrusted client.
+Start with a quickstart, then choose a write pattern whose delivery tradeoffs match the workload. Every example uses only the public `scopedb-client` API. The shared client helper uses `Client::builder(...).api_key(...)`, so copied examples do not need a direct reqwest dependency. API keys belong only in a trusted process; never return one to an untrusted client.
 
-These examples focus on SDK integration and assume valid ScopeQL. For language
-syntax, use the canonical [Quickstart](https://docs.scopedb.io/guides/quickstart),
-[query guide](https://docs.scopedb.io/guides/query-events), and
-[language reference](https://docs.scopedb.io/reference/).
+These examples focus on SDK integration and assume valid ScopeQL. For language syntax, use the canonical [Quickstart](https://docs.scopedb.io/guides/quickstart), [query guide](https://docs.scopedb.io/guides/query-events), and [language reference](https://docs.scopedb.io/reference/).
 
 The commands below run from the repository root.
 
 ## Read-only discovery
 
-These examples can run against a reachable ScopeDB endpoint without modifying
-data.
+These examples can run against a reachable ScopeDB endpoint without modifying data.
 
 | Example | Shows | Run |
 | --- | --- | --- |
@@ -26,9 +18,7 @@ data.
 
 ## Before running a write example
 
-Every write example refuses to start unless `SCOPEDB_TABLE` names an existing,
-disposable table. Do not point these examples at production unless the writes
-are intentional.
+Every write example refuses to start unless `SCOPEDB_TABLE` names an existing, disposable table. Do not point these examples at production unless the writes are intentional.
 
 The append, stream, telemetry, and transform examples can share this schema:
 
@@ -71,47 +61,26 @@ $env:SCOPEDB_TABLE = "sdk_example_events"
 | [`telemetry.rs`](telemetry.rs) | Logs or events need non-blocking, observable best-effort delivery | `cargo run --example telemetry` |
 | [`ingest_transform.rs`](ingest_transform.rs) | JSON records need a SQL transform before insertion | `cargo run --example ingest_transform` |
 
-`append.rs` sends exactly one NDJSON request. `append_stream.rs` uses the
-default `Stop` policy: `send()` and `send_all()` wait only for local admission,
-while a successful `flush()` or `shutdown()` is a remote commit barrier for the
-accepted prefix.
+`append.rs` sends exactly one NDJSON request. `append_stream.rs` uses the default `Stop` policy: `send()` and `send_all()` wait only for local admission, while a successful `flush()` or `shutdown()` is a remote commit barrier for the accepted prefix.
 
-`bulk_append.rs` keeps producer memory bounded and sends multiple HTTP batches
-concurrently. It does not add durable resume, idempotency, transactionality, or
-whole-job rollback. Earlier concurrent batches may have committed even when a
-later batch fails.
+`bulk_append.rs` keeps producer memory bounded and sends multiple HTTP batches concurrently. It does not add durable resume, idempotency, transactionality, or whole-job rollback. Earlier concurrent batches may have committed even when a later batch fails.
 
-`telemetry.rs` opts into `AppendFailurePolicy::Continue` and uses `try_send()`
-on the request path. It keeps working after a failed batch, but does not retain
-the batch for replay. The shutdown report makes rejected, ambiguous, and local
-loss observable.
+`telemetry.rs` opts into `AppendFailurePolicy::Continue` and uses `try_send()` on the request path. It keeps working after a failed batch, but does not retain the batch for replay. The shutdown report makes rejected, ambiguous, and local loss observable.
 
-When the continue-mode circuit is open, `try_send()` rejects immediately while
-the backpressured `send()` path can queue within the configured byte budget and
-wait for a later probe.
+When the continue-mode circuit is open, `try_send()` rejects immediately while the backpressured `send()` path can queue within the configured byte budget and wait for a later probe.
 
 ## Delivery contract
 
-- The table append API accepts NDJSON only: one JSON row object per line,
-  not a JSON array.
-- `send()`, `send_all()`, and `Ok(())` from `try_send()` mean local admission;
-  they do not confirm a remote commit.
+- The table append API accepts NDJSON only: one JSON row object per line, not a JSON array.
+- `send()`, `send_all()`, and `Ok(())` from `try_send()` mean local admission; they do not confirm a remote commit.
 - A successful strict barrier confirms that its accepted prefix committed.
-- A continue-mode barrier is settlement. Always inspect its
-  `AppendDeliveryReport`.
-- The stream retries only an exact temporary HTTP batch explicitly reported as
-  `rejected`.
-- A timeout, transport failure, or invalid success response is `unknown`. The
-  rows may already exist remotely, so never blindly replay that payload.
-- `shutdown()` closes admission and settles accepted rows. It is not an abort or
-  rollback; stop and join producer tasks before calling it.
-- Dropping an enqueued `flush()` future does not cancel its remote settlement;
-  keep the future alive to receive the interval report and use `stats()` for
-  post-cancellation diagnostics.
-- Concurrent batches do not have a defined commit order. Use
-  `max_concurrent_batches(1)` when requests must be submitted serially.
-- An in-memory stream is not a durable queue. Audit or billing writes need an
-  application-owned outbox and a reconciliation path for unknown outcomes.
+- A continue-mode barrier is settlement. Always inspect its `AppendDeliveryReport`.
+- The stream retries only an exact temporary HTTP batch explicitly reported as `rejected`.
+- A timeout, transport failure, or invalid success response is `unknown`. The rows may already exist remotely, so never blindly replay that payload.
+- `shutdown()` closes admission and settles accepted rows. It is not an abort or rollback; stop and join producer tasks before calling it.
+- Dropping an enqueued `flush()` future does not cancel its remote settlement; keep the future alive to receive the interval report and use `stats()` for post-cancellation diagnostics.
+- Concurrent batches do not have a defined commit order. Use `max_concurrent_batches(1)` when requests must be submitted serially.
+- An in-memory stream is not a durable queue. Audit or billing writes need an application-owned outbox and a reconciliation path for unknown outcomes.
 
 ## Check the examples
 
