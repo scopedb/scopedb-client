@@ -12,26 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[package]
-name = "x"
-publish = false
+[default.extend-words]
 
-edition.workspace = true
-homepage.workspace = true
-license.workspace = true
-repository.workspace = true
-rust-version.workspace = true
-
-[dependencies]
-cargo_metadata = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
-semver = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-ureq = { workspace = true, default-features = false, features = [
-  "json",
-  "rustls",
-] }
-which = { workspace = true }
-
-[lints]
-workspace = true
+[files]
+extend-exclude = []

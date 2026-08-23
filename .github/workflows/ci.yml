@@ -42,10 +42,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: hawkeye
+          tool: typos-cli,taplo-cli,hawkeye
       - name: Lint Rust SDK
         run: cargo x lint
-      - name: Check Rust SDK
+      - name: Check feature matrix
         run: cargo x check
 
   test:
@@ -60,7 +60,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run full tests
         timeout-minutes: 10
-        run: cargo x test
+        run: cargo x test --no-capture
 
   required:
     name: Required

@@ -45,9 +45,10 @@ Run the same checks used by CI, build the documentation with warnings denied, an
 ```sh
 manifest_version="$(cargo +1.91.0 pkgid --package scopedb-client | sed -E 's/.*[#@]([^#@]+)$/\1/')"
 test "$manifest_version" = "$scopedb_rust_version"
-cargo +1.91.0 x lint
-cargo +1.91.0 x check
-cargo +1.91.0 x test
+cargo x lint
+cargo x check
+cargo x test --no-capture
+cargo x semver --release-version "$scopedb_rust_version"
 cargo +1.91.0 publish --package scopedb-client --dry-run --locked
 cargo +1.91.0 package --package scopedb-client --list --locked
 ```

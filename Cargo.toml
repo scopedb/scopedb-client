@@ -26,7 +26,8 @@ rust-version = "1.91.0"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.99" }
-clap = { version = "4.6.5", features = ["derive"] }
+cargo_metadata = { version = "0.23.1" }
+clap = { version = "4.6.5" }
 fastrace = { version = "0.7" }
 fastrace-reqwest = { version = "0.2" }
 hex = { version = "0.4" }
@@ -42,9 +43,11 @@ reqwest = { version = "0.12", default-features = false, features = [
   "zstd",
   "macos-system-configuration",
 ] }
-serde = { version = "1.0", features = ["derive"] }
+semver = { version = "1.0.28" }
+serde = { version = "1.0" }
 serde_json = { version = "1.0", features = ["unbounded_depth"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+ureq = { version = "3.3.0", default-features = false }
 uuid = { version = "1.17", features = ["v7", "serde"] }
 which = { version = "8.0.5" }
 zstd = { version = "0.13" }

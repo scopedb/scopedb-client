@@ -9,9 +9,9 @@ Run repository checks from the workspace root:
 ```sh
 cargo x lint
 cargo x check
-cargo x test
+cargo x test --no-capture
 ```
 
-Use `cargo x lint --fix` to apply Clippy, rustfmt, and license-header fixes. Run `cargo x --help` to list all development tasks.
+Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fixes. Run `cargo x --help` to list all development tasks.
 
 Release history and the maintainer runbook are in [`CHANGELOG.md`](CHANGELOG.md) and [`RELEASE.md`](RELEASE.md).

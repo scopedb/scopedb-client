@@ -13,7 +13,7 @@
 # limitations under the License.
 
 [alias]
-x = "run --locked --package x --"
+x = "run --package x --"
 
 [env]
 CARGO_WORKSPACE_DIR = { value = "", relative = true }
