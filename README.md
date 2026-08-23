@@ -310,10 +310,12 @@ stream.shutdown().await?;
 The [example guide][example-guide] includes setup, safety guards, delivery contracts, and runnable commands.
 
 ```sh
-cargo check --examples
-cargo test
-cargo clippy --all-targets --all-features
+cargo x lint
+cargo x check
+cargo x test
 ```
+
+Use `cargo x lint --fix` to apply Clippy, rustfmt, and license-header fixes. Run `cargo x --help` to list the development tasks.
 
 The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][rust-http-api]. Release history and the maintainer runbook are in [`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
 

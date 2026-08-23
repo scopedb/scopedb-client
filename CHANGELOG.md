@@ -9,6 +9,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 ### Changed
 
 * Pointed the crate repository metadata and packaged documentation links at the standalone `scopedb-client` repository. The public API and runtime behavior are unchanged.
+* Replaced the Justfile-based development workflow with a Rust xtask exposed through `cargo x`, and began tracking the workspace lockfile for reproducible development and CI tooling.
 
 ## v0.3.2 (2026-08-22)
 

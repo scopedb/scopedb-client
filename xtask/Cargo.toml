@@ -12,29 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set dotenv-load
+[package]
+name = "x"
+version = "0.0.0"
+publish = false
 
-default:
-    just --list
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.91.0"
 
-download-hawkeye:
-	dev/download-hawkeye.sh
+[dependencies]
+clap = { workspace = true }
+which = { workspace = true }
 
-check-license: download-hawkeye
-	hawkeye check
-
-fmt-license: download-hawkeye
-	hawkeye format
-
-check-code:
-    cargo +nightly fmt --all --check
-    cargo +nightly clippy --tests --all-targets --all-features -- -D warnings
-
-check: check-license check-code
-
-fix: fmt-license
-    cargo +nightly clippy --tests --all-targets --all-features --fix --allow-staged --allow-dirty
-    cargo +nightly fmt --all
-
-test:
-    cargo test
+[lints]
+workspace = true

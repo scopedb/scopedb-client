@@ -12,6 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+[workspace]
+members = ["xtask"]
+resolver = "3"
+
+[workspace.dependencies]
+clap = { version = "4.6.5", features = ["derive"] }
+which = { version = "8.0.5" }
+
+[workspace.lints.rust]
+unknown_lints = "deny"
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+field_reassign_with_default = "allow"
+identity_op = "allow"
+manual_range_contains = "allow"
+new_without_default = "allow"
+
 [package]
 name = "scopedb-client"
 version = "0.3.3"
@@ -22,6 +42,7 @@ keywords = ["scopedb"]
 
 documentation = "https://docs.rs/scopedb-client"
 edition = "2024"
+exclude = ["/.cargo", "/xtask"]
 homepage = "https://www.scopedb.io"
 license = "Apache-2.0"
 rust-version = "1.91.0"
@@ -50,14 +71,5 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 uuid = { version = "1.17", features = ["v7", "serde"] }
 zstd = { version = "0.13" }
 
-[lints.rust]
-unknown_lints = "deny"
-unsafe_code = "deny"
-unused_must_use = "deny"
-
-[lints.clippy]
-dbg_macro = "deny"
-field_reassign_with_default = "allow"
-identity_op = "allow"
-manual_range_contains = "allow"
-new_without_default = "allow"
+[lints]
+workspace = true
