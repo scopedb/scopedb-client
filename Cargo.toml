@@ -13,7 +13,6 @@
 # limitations under the License.
 
 [workspace]
-default-members = ["scopedb-client"]
 members = ["scopedb-client", "xtask"]
 resolver = "3"
 
