@@ -8,7 +8,7 @@ Rust SDK releases are published from a clean `main` checkout after the release P
 
    ```sh
    export scopedb_rust_version=0.3.3
-   if cargo info "scopedb-client@$scopedb_rust_version" >/dev/null 2>&1; then
+   if cargo info --registry crates-io "scopedb-client@$scopedb_rust_version" >/dev/null 2>&1; then
      echo "scopedb-client $scopedb_rust_version already exists" >&2
      exit 1
    fi
@@ -32,7 +32,7 @@ Rust SDK releases are published from a clean `main` checkout after the release P
    test -z "$(git status --porcelain)"
    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
    export scopedb_rust_version=0.3.3
-   if cargo info "scopedb-client@$scopedb_rust_version" >/dev/null 2>&1; then
+   if cargo info --registry crates-io "scopedb-client@$scopedb_rust_version" >/dev/null 2>&1; then
      echo "scopedb-client $scopedb_rust_version already exists" >&2
      exit 1
    fi
@@ -62,7 +62,7 @@ cargo +1.91.0 publish --package scopedb-client --locked
 Wait until the published version is visible before tagging:
 
 ```sh
-cargo info "scopedb-client@$scopedb_rust_version"
+cargo info --registry crates-io "scopedb-client@$scopedb_rust_version"
 ```
 
 ## Tag and verify
