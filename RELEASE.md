@@ -12,7 +12,7 @@ only to preserve release history from the former monorepo; new releases use
    not already present on crates.io:
 
    ```sh
-   export scopedb_rust_version=0.3.2
+   export scopedb_rust_version=0.3.3
    if cargo info "scopedb-client@$scopedb_rust_version" >/dev/null 2>&1; then
      echo "scopedb-client $scopedb_rust_version already exists" >&2
      exit 1
@@ -34,7 +34,7 @@ only to preserve release history from the former monorepo; new releases use
    test "$(git branch --show-current)" = main
    test -z "$(git status --porcelain)"
    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-   export scopedb_rust_version=0.3.2
+   export scopedb_rust_version=0.3.3
    if cargo info "scopedb-client@$scopedb_rust_version" >/dev/null 2>&1; then
      echo "scopedb-client $scopedb_rust_version already exists" >&2
      exit 1
@@ -48,7 +48,7 @@ and verify the exact package that Cargo will upload:
 
 ```sh
 cargo +1.91.0 generate-lockfile
-manifest_version="$(cargo pkgid | sed -E 's/.*@([^@]+)$/\1/')"
+manifest_version="$(cargo +1.91.0 pkgid | sed -E 's/.*[#@]([^#@]+)$/\1/')"
 test "$manifest_version" = "$scopedb_rust_version"
 cargo +nightly fmt --all --check
 cargo +nightly clippy --locked --tests --all-targets --all-features -- -D warnings
