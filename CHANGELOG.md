@@ -8,6 +8,10 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 * Upgraded the re-exported reqwest API from 0.12 to 0.13. Custom HTTP clients must now use reqwest 0.13, and the default HTTPS client uses reqwest's platform certificate verification.
 
+### Changed
+
+* Direct caller-encoded table appends now use the same zstd compression and 8 MiB uncompressed request limit as streaming append batches.
+
 ## v0.3.3 (2026-08-24)
 
 ### Changed

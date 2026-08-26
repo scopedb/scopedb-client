@@ -58,6 +58,7 @@ use crate::statement::StatementHandle;
 const JSON_CONTENT_ENCODING: &str = "zstd";
 const UNCOMPRESSED_CONTENT_LENGTH: &str = "X-ScopeDB-Uncompressed-Content-Length";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+pub(crate) const MAX_APPEND_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -296,7 +297,7 @@ impl Client {
         .await
     }
 
-    /// Appends newline-delimited JSON rows to a table.
+    /// Appends at most 8 MiB of uncompressed newline-delimited JSON to a table.
     pub async fn append_rows(
         &self,
         database: &str,
@@ -304,18 +305,7 @@ impl Client {
         table: &str,
         ndjson: impl Into<String>,
     ) -> Result<AppendRowsResult, Error> {
-        self.append_rows_request(database, schema, table, ndjson.into(), false)
-            .await
-    }
-
-    pub(crate) async fn append_rows_compressed(
-        &self,
-        database: &str,
-        schema: &str,
-        table: &str,
-        ndjson: impl Into<String>,
-    ) -> Result<AppendRowsResult, Error> {
-        self.append_rows_request(database, schema, table, ndjson.into(), true)
+        self.append_rows_request(database, schema, table, ndjson.into())
             .await
     }
 
@@ -325,8 +315,13 @@ impl Client {
         schema: &str,
         table: &str,
         ndjson: String,
-        compressed: bool,
     ) -> Result<AppendRowsResult, Error> {
+        if ndjson.len() > MAX_APPEND_BODY_BYTES {
+            return Err(append_rejected_error(format!(
+                "append payload requires {} bytes, exceeds the {MAX_APPEND_BODY_BYTES}-byte append limit",
+                ndjson.len()
+            )));
+        }
         let expected_rows = ndjson
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -340,24 +335,19 @@ impl Client {
             table,
             "rows",
         ])?;
-        let body = if compressed {
+        let body =
             zstd::stream::encode_all(ndjson.as_bytes(), ZSTD_COMPRESSION_LEVEL).map_err(|err| {
                 Error::new(
                     ErrorKind::Unexpected,
                     "failed to compress table append request body",
                 )
                 .set_source(err)
-            })?
-        } else {
-            ndjson.into_bytes()
-        };
-        let mut request = self
+            })?;
+        let request = self
             .request(Method::POST, url)
             .headers(traceparent_headers())
-            .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson");
-        if compressed {
-            request = request.header(reqwest::header::CONTENT_ENCODING, JSON_CONTENT_ENCODING);
-        }
+            .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
+            .header(reqwest::header::CONTENT_ENCODING, JSON_CONTENT_ENCODING);
         let response = request.body(body).send().await.map_err(|err| {
             append_unknown_error("failed to send table append request").set_source(err)
         })?;
@@ -656,6 +646,14 @@ fn append_unknown_error(message: impl Into<String>) -> Error {
             row_errors_truncated: false,
         })
         .set_persistent()
+}
+
+fn append_rejected_error(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::AppendRowsFailed, message).set_append_details(AppendErrorDetails {
+        append_state: AppendState::Rejected,
+        row_errors: Vec::new(),
+        row_errors_truncated: false,
+    })
 }
 
 #[cfg(test)]
