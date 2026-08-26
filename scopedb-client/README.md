@@ -156,6 +156,18 @@ eprintln!("retry_after = {:?}", error.retry_after());
 # }
 ```
 
+When a statement reaches the failed state, `Error::statement_details()`
+preserves the server-provided code, message, and optional code-specific JSON:
+
+```rust
+# fn inspect(error: &scopedb_client::Error) {
+if let Some(details) = error.statement_details() {
+    eprintln!("statement failed with {}: {}", details.code, details.message);
+    eprintln!("details = {:?}", details.details);
+}
+# }
+```
+
 The asynchronous append stream honors `Retry-After` only for an exact temporary batch explicitly reported as `Rejected`; the delay is capped by `max_backoff`. Unknown outcomes remain non-retryable because replay can duplicate rows.
 
 ### Asynchronous append stream

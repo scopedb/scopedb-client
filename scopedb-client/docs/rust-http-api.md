@@ -202,7 +202,6 @@ Submits a statement for execution.
   "statement_id": "uuid-v7-or-user-provided",
   "statement": "SELECT 1",
   "exec_timeout": "PT1S",
-  "max_parallelism": 16,
   "format": "json"
 }
 ```
@@ -212,7 +211,6 @@ Request fields:
 - `statement_id`: optional from the SDK perspective
 - `statement`: required
 - `exec_timeout`: optional
-- `max_parallelism`: optional
 - `format`: `json` for the public Rust SDK
 
 The response is a tagged statement-state payload: `pending`, `running`, `finished`, `failed`, or `cancelled`. Statement failure and cancellation are in-band states, so HTTP success does not imply statement success.

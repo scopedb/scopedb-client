@@ -29,7 +29,6 @@ cargo_metadata = { version = "0.23.1" }
 clap = { version = "4.6.6" }
 fastrace = { version = "0.7.19" }
 fastrace-reqwest = { version = "0.3.0" }
-hex = { version = "0.4.3" }
 httpdate = { version = "1.0.3" }
 jiff = { version = "0.2.35", features = ["serde"] }
 mea = { version = "0.6.7" }

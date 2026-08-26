@@ -18,6 +18,7 @@ use std::time::Duration;
 use reqwest::StatusCode;
 
 use crate::protocol::AppendErrorDetails;
+use crate::protocol::StatementErrorDetails;
 
 /// ErrorKind is all kinds of Error of ScopeDB client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -107,6 +108,7 @@ pub struct Error {
     status: ErrorStatus,
     context: Vec<(&'static str, String)>,
     append_details: Option<AppendErrorDetails>,
+    statement_details: Option<Box<StatementErrorDetails>>,
     http_metadata: Option<Box<HttpErrorMetadata>>,
 
     source: Option<anyhow::Error>,
@@ -162,6 +164,7 @@ impl fmt::Debug for Error {
             de.field("status", &self.status);
             de.field("context", &self.context);
             de.field("append_details", &self.append_details);
+            de.field("statement_details", &self.statement_details);
             de.field("http_metadata", &self.http_metadata);
             de.field("source", &self.source);
             return de.finish();
@@ -215,6 +218,7 @@ impl Error {
             status: ErrorStatus::Permanent,
             context: Vec::default(),
             append_details: None,
+            statement_details: None,
             http_metadata: None,
             source: None,
         }
@@ -245,6 +249,16 @@ impl Error {
 
     pub(crate) fn set_append_details(mut self, details: AppendErrorDetails) -> Self {
         self.append_details = Some(details);
+        self
+    }
+
+    /// Return structured statement failure details, when available.
+    pub fn statement_details(&self) -> Option<&StatementErrorDetails> {
+        self.statement_details.as_deref()
+    }
+
+    pub(crate) fn set_statement_details(mut self, details: StatementErrorDetails) -> Self {
+        self.statement_details = Some(Box::new(details));
         self
     }
 
