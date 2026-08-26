@@ -387,6 +387,7 @@ async fn run_batch_worker<F>(
 {
     let mut rows = Vec::new();
     let mut current_bytes = 0usize;
+    let mut queued_head = None;
     let mut ticker = tokio::time::interval(flush_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -396,14 +397,25 @@ async fn run_batch_worker<F>(
                 if rows.is_empty() {
                     continue;
                 }
-                if let Err(err) = flush_pending(&mut rows, &mut current_bytes, retry, &mut flush_fn).await {
+                let queue = RetryMergeQueue {
+                    receiver: &mut rx,
+                    queued_head: &mut queued_head,
+                    batch_bytes,
+                };
+                if let Err(err) = flush_pending(&mut rows, &mut current_bytes, retry, &mut flush_fn, Some(queue)).await {
                     *fatal.lock().await = Some(FatalState::from_error(&err));
                     break;
                 }
             }
-            command = rx.recv() => {
+            command = async {
+                if let Some(command) = queued_head.take() {
+                    Ok(command)
+                } else {
+                    rx.recv().await
+                }
+            } => {
                 let Ok(command) = command else {
-                    if let Err(err) = flush_pending(&mut rows, &mut current_bytes, retry, &mut flush_fn).await {
+                    if let Err(err) = flush_pending(&mut rows, &mut current_bytes, retry, &mut flush_fn, None).await {
                         *fatal.lock().await = Some(FatalState::from_error(&err));
                     }
                     break;
@@ -411,6 +423,24 @@ async fn run_batch_worker<F>(
 
                 match command {
                     BatchCommand::Record(record) => {
+                        let additional_bytes = record
+                            .payload
+                            .len()
+                            .saturating_add(usize::from(!rows.is_empty()));
+                        if !rows.is_empty()
+                            && current_bytes.saturating_add(additional_bytes) > batch_bytes
+                            && let Err(err) = flush_pending(
+                                &mut rows,
+                                &mut current_bytes,
+                                retry,
+                                &mut flush_fn,
+                                None,
+                            )
+                            .await
+                        {
+                            *fatal.lock().await = Some(FatalState::from_error(&err));
+                            break;
+                        }
                         if !rows.is_empty() {
                             current_bytes = current_bytes.saturating_add(1);
                         }
@@ -423,6 +453,11 @@ async fn run_batch_worker<F>(
                                 &mut current_bytes,
                                 retry,
                                 &mut flush_fn,
+                                Some(RetryMergeQueue {
+                                    receiver: &mut rx,
+                                    queued_head: &mut queued_head,
+                                    batch_bytes,
+                                }),
                             )
                             .await
                         {
@@ -431,7 +466,18 @@ async fn run_batch_worker<F>(
                         }
                     }
                     BatchCommand::Flush(ack) => {
-                        let result = flush_pending(&mut rows, &mut current_bytes, retry, &mut flush_fn).await;
+                        let result = flush_pending(
+                            &mut rows,
+                            &mut current_bytes,
+                            retry,
+                            &mut flush_fn,
+                            Some(RetryMergeQueue {
+                                receiver: &mut rx,
+                                queued_head: &mut queued_head,
+                                batch_bytes,
+                            }),
+                        )
+                        .await;
                         if let Err(err) = &result {
                             *fatal.lock().await = Some(FatalState::from_error(err));
                         }
@@ -441,7 +487,18 @@ async fn run_batch_worker<F>(
                         }
                     }
                     BatchCommand::Shutdown(ack) => {
-                        let result = flush_pending(&mut rows, &mut current_bytes, retry, &mut flush_fn).await;
+                        let result = flush_pending(
+                            &mut rows,
+                            &mut current_bytes,
+                            retry,
+                            &mut flush_fn,
+                            Some(RetryMergeQueue {
+                                receiver: &mut rx,
+                                queued_head: &mut queued_head,
+                                batch_bytes,
+                            }),
+                        )
+                        .await;
                         if let Err(err) = &result {
                             *fatal.lock().await = Some(FatalState::from_error(err));
                         }
@@ -456,11 +513,50 @@ async fn run_batch_worker<F>(
     pending_bytes.close();
 }
 
+struct RetryMergeQueue<'a> {
+    receiver: &'a mut mpsc::BoundedReceiver<BatchCommand>,
+    queued_head: &'a mut Option<BatchCommand>,
+    batch_bytes: usize,
+}
+
+impl RetryMergeQueue<'_> {
+    fn merge(&mut self, rows: &mut Vec<BufferedRecord>, current_bytes: &mut usize) {
+        if self.queued_head.is_some() {
+            return;
+        }
+
+        loop {
+            let Ok(command) = self.receiver.try_recv() else {
+                return;
+            };
+            match command {
+                BatchCommand::Record(record) => {
+                    let additional_bytes = record
+                        .payload
+                        .len()
+                        .saturating_add(usize::from(!rows.is_empty()));
+                    if current_bytes.saturating_add(additional_bytes) > self.batch_bytes {
+                        *self.queued_head = Some(BatchCommand::Record(record));
+                        return;
+                    }
+                    *current_bytes = current_bytes.saturating_add(additional_bytes);
+                    rows.push(record);
+                }
+                command => {
+                    *self.queued_head = Some(command);
+                    return;
+                }
+            }
+        }
+    }
+}
+
 async fn flush_pending<F>(
     rows: &mut Vec<BufferedRecord>,
     current_bytes: &mut usize,
     retry: RetryConfig,
     flush_fn: &mut F,
+    mut merge_queue: Option<RetryMergeQueue<'_>>,
 ) -> Result<Option<IngestResult>, Error>
 where
     F: FnMut(String) -> BoxFutureIngest,
@@ -469,7 +565,7 @@ where
         return Ok(None);
     }
 
-    let payload = rows
+    let mut payload = rows
         .iter()
         .map(|row| row.payload.as_str())
         .collect::<Vec<_>>()
@@ -489,6 +585,17 @@ where
                 retries += 1;
                 if !backoff.is_zero() {
                     tokio::time::sleep(backoff).await;
+                }
+                if let Some(queue) = &mut merge_queue {
+                    let previous_rows = rows.len();
+                    queue.merge(rows, current_bytes);
+                    if rows.len() > previous_rows {
+                        payload = rows
+                            .iter()
+                            .map(|row| row.payload.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                    }
                 }
                 backoff = next_backoff(backoff, retry.max_backoff);
             }
@@ -580,6 +687,7 @@ mod tests {
                     })
                 })
             },
+            None,
         )
         .await
         .unwrap();
@@ -598,6 +706,7 @@ mod tests {
             &mut current_bytes,
             test_retry(),
             &mut |_payload| Box::pin(async move { Err(test_error("must not be called")) }),
+            None,
         )
         .await
         .unwrap();
@@ -622,6 +731,7 @@ mod tests {
             &mut current_bytes,
             test_retry(),
             &mut |_payload| Box::pin(async move { Err(test_error("flush failed")) }),
+            None,
         )
         .await
         .unwrap_err();
@@ -648,22 +758,28 @@ mod tests {
         let mut current_bytes = rows[0].payload.len();
         let attempts = Arc::new(AtomicUsize::new(0));
 
-        let result = flush_pending(&mut rows, &mut current_bytes, test_retry(), &mut {
-            let attempts = attempts.clone();
-            move |_payload| {
+        let result = flush_pending(
+            &mut rows,
+            &mut current_bytes,
+            test_retry(),
+            &mut {
                 let attempts = attempts.clone();
-                Box::pin(async move {
-                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                    if attempt < 2 {
-                        Err(temporary_error("retry me"))
-                    } else {
-                        Ok(IngestResult {
-                            num_rows_inserted: 1,
-                        })
-                    }
-                })
-            }
-        })
+                move |_payload| {
+                    let attempts = attempts.clone();
+                    Box::pin(async move {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt < 2 {
+                            Err(temporary_error("retry me"))
+                        } else {
+                            Ok(IngestResult {
+                                num_rows_inserted: 1,
+                            })
+                        }
+                    })
+                }
+            },
+            None,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -684,6 +800,7 @@ mod tests {
             &mut current_bytes,
             test_retry(),
             &mut |_payload| Box::pin(async move { Err(temporary_error("still rate limited")) }),
+            None,
         )
         .await
         .unwrap_err();
@@ -692,6 +809,134 @@ mod tests {
         assert!(err.to_string().contains("retry budget"));
         assert_eq!(rows.len(), 1);
         assert_eq!(current_bytes, rows[0].payload.len());
+    }
+
+    #[tokio::test]
+    async fn test_flush_pending_merges_only_fitting_queue_head_records() {
+        let first = "{\"a\":1}";
+        let second = "{\"a\":2}";
+        let mut rows = vec![test_record(first).await];
+        let mut current_bytes = first.len();
+        let (tx, mut rx) = mpsc::bounded(4);
+        tx.send(BatchCommand::Record(test_record(second).await))
+            .await
+            .unwrap();
+        let (barrier, _barrier_rx) = oneshot::channel();
+        tx.send(BatchCommand::Flush(barrier)).await.unwrap();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut queued_head = None;
+        let result = flush_pending(
+            &mut rows,
+            &mut current_bytes,
+            RetryConfig {
+                max_retries: 1,
+                initial_backoff: Duration::ZERO,
+                max_backoff: Duration::ZERO,
+            },
+            &mut {
+                let attempts = attempts.clone();
+                let payloads = payloads.clone();
+                move |payload| {
+                    let attempts = attempts.clone();
+                    let payloads = payloads.clone();
+                    Box::pin(async move {
+                        payloads.lock().unwrap().push(payload.clone());
+                        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                            Err(temporary_error("retry me"))
+                        } else {
+                            Ok(IngestResult {
+                                num_rows_inserted: payload.lines().count() as i64,
+                            })
+                        }
+                    })
+                }
+            },
+            Some(RetryMergeQueue {
+                receiver: &mut rx,
+                queued_head: &mut queued_head,
+                batch_bytes: first.len() + 1 + second.len(),
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.num_rows_inserted, 2);
+        assert_eq!(
+            payloads.lock().unwrap().as_slice(),
+            &[first.to_string(), format!("{first}\n{second}")]
+        );
+        assert!(matches!(queued_head, Some(BatchCommand::Flush(_))));
+    }
+
+    #[tokio::test]
+    async fn test_retry_merge_keeps_non_fitting_record_at_queue_head() {
+        let first = "{\"a\":1}";
+        let second = "{\"a\":2}";
+        let mut rows = vec![test_record(first).await];
+        let mut current_bytes = first.len();
+        let (tx, mut rx) = mpsc::bounded(1);
+        tx.send(BatchCommand::Record(test_record(second).await))
+            .await
+            .unwrap();
+        let mut queued_head = None;
+
+        RetryMergeQueue {
+            receiver: &mut rx,
+            queued_head: &mut queued_head,
+            batch_bytes: first.len(),
+        }
+        .merge(&mut rows, &mut current_bytes);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(current_bytes, first.len());
+        assert!(matches!(queued_head, Some(BatchCommand::Record(_))));
+    }
+
+    #[tokio::test]
+    async fn test_worker_seals_batch_before_next_record_exceeds_target() {
+        let first = "{\"a\":1}";
+        let second = "{\"a\":2}";
+        let (tx, rx) = mpsc::bounded(4);
+        tx.send(BatchCommand::Record(test_record(first).await))
+            .await
+            .unwrap();
+        tx.send(BatchCommand::Record(test_record(second).await))
+            .await
+            .unwrap();
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        tx.send(BatchCommand::Shutdown(shutdown)).await.unwrap();
+
+        let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        run_batch_worker(
+            rx,
+            first.len() + 1,
+            Duration::from_secs(60),
+            test_retry(),
+            Arc::new(Mutex::new(None)),
+            Arc::new(PendingBytesBudget::new(1024)),
+            {
+                let payloads = payloads.clone();
+                move |payload| {
+                    let payloads = payloads.clone();
+                    Box::pin(async move {
+                        payloads.lock().unwrap().push(payload.clone());
+                        Ok(IngestResult {
+                            num_rows_inserted: payload.lines().count() as i64,
+                        })
+                    })
+                }
+            },
+        )
+        .await;
+
+        shutdown_rx.await.unwrap().unwrap();
+        assert_eq!(
+            payloads.lock().unwrap().as_slice(),
+            &[first.to_string(), second.to_string()]
+        );
     }
 
     #[tokio::test]
