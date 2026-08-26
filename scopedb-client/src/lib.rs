@@ -57,6 +57,7 @@ pub use protocol::DatabaseResource;
 pub use protocol::IngestResult;
 pub use protocol::SchemaResource;
 pub use protocol::StatementCancelResult;
+pub use protocol::StatementErrorDetails;
 pub use protocol::StatementEstimatedProgress;
 pub use protocol::StatementProgress;
 pub use protocol::StatementStatus;

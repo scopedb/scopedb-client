@@ -407,9 +407,6 @@ pub struct StatementRequest {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec_timeout: Option<SignedDuration>,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_parallelism: Option<usize>,
     #[serde(flatten)]
     pub params: StatementRequestParams,
 }
@@ -476,6 +473,17 @@ pub struct StatementStatusFailed {
     pub created_at: jiff::Timestamp,
     pub progress: StatementEstimatedProgress,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<StatementErrorDetails>,
+}
+
+/// Structured failure returned for a failed statement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatementErrorDetails {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 #[non_exhaustive]
@@ -673,6 +681,7 @@ mod tests {
     use super::CatalogListOptions;
     use super::DataType;
     use super::ErrorStatus;
+    use super::StatementStatus;
     use super::TableResource;
     use super::parse_error_payload;
     use super::parse_retry_after;
@@ -687,6 +696,50 @@ mod tests {
         assert_eq!(payload.details.append_state, AppendState::Rejected);
         assert!(payload.details.row_errors.is_empty());
         assert!(!payload.details.row_errors_truncated);
+    }
+
+    #[test]
+    fn failed_statement_preserves_structured_error_details() {
+        let status: StatementStatus = serde_json::from_str(
+            r#"{
+                "status":"failed",
+                "statement_id":"01992f9b-8f54-7cd0-96b5-93ff4a218468",
+                "created_at":"2026-08-26T00:00:00Z",
+                "progress":{
+                    "total_percentage":100.0,
+                    "nanos_from_submitted":1,
+                    "nanos_from_started":1,
+                    "total_stages":1,
+                    "total_partitions":1,
+                    "total_rows":101,
+                    "total_compressed_bytes":0,
+                    "total_uncompressed_bytes":0,
+                    "scanned_stages":1,
+                    "scanned_partitions":1,
+                    "scanned_rows":101,
+                    "scanned_compressed_bytes":0,
+                    "scanned_uncompressed_bytes":0,
+                    "skipped_partitions":0,
+                    "skipped_rows":0,
+                    "skipped_compressed_bytes":0,
+                    "skipped_uncompressed_bytes":0
+                },
+                "message":"row limit exceeded",
+                "error":{
+                    "code":"row_limit_exceeded",
+                    "message":"row limit exceeded",
+                    "details":{"total_rows":101,"max_total_rows":100}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let StatementStatus::Failed(failed) = status else {
+            panic!("expected failed statement status");
+        };
+        let error = failed.error.unwrap();
+        assert_eq!(error.code, "row_limit_exceeded");
+        assert_eq!(error.details.unwrap()["max_total_rows"], 100);
     }
 
     #[test]

@@ -35,7 +35,6 @@ pub struct Statement {
     statement: String,
     statement_id: Option<Uuid>,
     exec_timeout: Option<SignedDuration>,
-    max_parallelism: Option<usize>,
     format: ResultFormat,
 }
 
@@ -50,18 +49,12 @@ impl Statement {
         self
     }
 
-    pub fn with_max_parallelism(mut self, max_parallelism: usize) -> Self {
-        self.max_parallelism = Some(max_parallelism);
-        self
-    }
-
     pub async fn submit(self) -> Result<StatementHandle, Error> {
         let Statement {
             client,
             statement,
             statement_id,
             exec_timeout,
-            max_parallelism,
             format,
         } = self;
 
@@ -70,7 +63,6 @@ impl Statement {
                 statement,
                 statement_id,
                 exec_timeout,
-                max_parallelism,
                 params: StatementRequestParams { format },
             })
             .await?;
@@ -96,7 +88,6 @@ impl Statement {
             statement,
             statement_id: None,
             exec_timeout: None,
-            max_parallelism: None,
             format: ResultFormat::Json,
         }
     }
@@ -178,10 +169,12 @@ impl StatementHandle {
                 match status {
                     StatementStatus::Finished(finished) => return Ok(finished.result_set()),
                     StatementStatus::Failed(failed) => {
-                        return Err(Error::new(
-                            ErrorKind::StatementFailed,
-                            failed.message.clone(),
-                        ));
+                        let mut error =
+                            Error::new(ErrorKind::StatementFailed, failed.message.clone());
+                        if let Some(details) = failed.error.clone() {
+                            error = error.set_statement_details(details);
+                        }
+                        return Err(error);
                     }
                     StatementStatus::Cancelled(cancelled) => {
                         return Err(Error::new(
@@ -245,6 +238,7 @@ impl StatementHandle {
                         created_at: response.created_at,
                         progress: crate::StatementEstimatedProgress::default(),
                         message: response.message.clone(),
+                        error: None,
                     })),
                     "cancelled" => Some(StatementStatus::Cancelled(
                         crate::StatementStatusCancelled {

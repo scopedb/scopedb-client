@@ -366,7 +366,7 @@ impl fmt::Debug for Value {
             Value::Interval(v) => format_interval(f, v),
             Value::Boolean(v) => write!(f, "{v}"),
             Value::String(v) => quote_string(f, v, '\''),
-            Value::Binary(v) => write!(f, "{}", hex::encode_upper(v)),
+            Value::Binary(v) => write!(f, "{v}"),
             Value::Array(v) => write!(f, "{v}"),
             Value::Object(v) => write!(f, "{v}"),
             Value::Any(v) => write!(f, "{v}"),
@@ -385,7 +385,7 @@ impl fmt::Display for Value {
             Value::Interval(v) => format_interval(f, v),
             Value::Boolean(v) => write!(f, "{v}"),
             Value::String(v) => write!(f, "{v}"),
-            Value::Binary(v) => write!(f, "{}", hex::encode_upper(v)),
+            Value::Binary(v) => write!(f, "{v}"),
             Value::Array(v) => write!(f, "{v}"),
             Value::Object(v) => write!(f, "{v}"),
             Value::Any(v) => write!(f, "{v}"),
@@ -551,5 +551,12 @@ mod tests {
             vec![],
         );
         assert!(result.first().unwrap().is_none());
+    }
+
+    #[test]
+    fn binary_display_preserves_the_wire_hex_string() {
+        let value = Value::Binary("00FF".to_string());
+        assert_eq!(value.to_string(), "00FF");
+        assert_eq!(format!("{value:?}"), "00FF");
     }
 }

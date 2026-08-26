@@ -7,10 +7,12 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 ### Breaking Changes
 
 * Upgraded the re-exported reqwest API from 0.12 to 0.13. Custom HTTP clients must now use reqwest 0.13, and the default HTTPS client uses reqwest's platform certificate verification.
+* Removed the statement `with_max_parallelism` option. Execution timeout remains the only exposed statement execution control.
 
 ### Changed
 
 * Direct caller-encoded table appends now use the same zstd compression and 8 MiB uncompressed request limit as streaming append batches.
+* Preserve structured failed-statement details on terminal errors and correct binary result formatting so wire-format hex strings are not encoded a second time.
 
 ## v0.3.3 (2026-08-24)
 
