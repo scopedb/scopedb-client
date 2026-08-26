@@ -68,7 +68,7 @@ impl Table {
             .map(|_| ())
     }
 
-    /// Appends newline-delimited JSON rows to this table.
+    /// Appends at most 8 MiB of uncompressed newline-delimited JSON to this table.
     pub async fn append(&self, ndjson: impl Into<String>) -> Result<AppendRowsResult, Error> {
         self.client
             .append_rows(

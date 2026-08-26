@@ -39,8 +39,8 @@ use crate::AppendState;
 use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
+use crate::client::MAX_APPEND_BODY_BYTES;
 
-const MAX_APPEND_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_APPEND_ROWS: usize = 200_000;
 const DEFAULT_BATCH_BYTES: usize = MAX_APPEND_BODY_BYTES;
 const DEFAULT_MAX_BATCH_ROWS: usize = MAX_APPEND_ROWS;
@@ -1743,7 +1743,7 @@ async fn append_batch(
     let mut retries = 0usize;
     let mut backoff = request.retry.initial_backoff;
     loop {
-        let append = request.client.append_rows_compressed(
+        let append = request.client.append_rows(
             &request.database,
             &request.schema,
             &request.table,
@@ -2336,6 +2336,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_append_uses_default_request_compression() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request));
+        let ndjson = "{\"id\":1}\n{\"id\":2}\n";
+
+        let result = server
+            .client()
+            .table("events")
+            .append(ndjson)
+            .await
+            .unwrap();
+
+        assert_eq!(result.num_rows_inserted, 2);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("content-encoding")
+                .map(String::as_str),
+            Some("zstd")
+        );
+        assert_eq!(requests[0].body, ndjson);
+    }
+
+    #[tokio::test]
+    async fn direct_append_rejects_a_body_over_eight_mibibytes_before_sending() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request));
+
+        let error = server
+            .client()
+            .table("events")
+            .append("x".repeat(MAX_APPEND_BODY_BYTES + 1))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::AppendRowsFailed);
+        assert_eq!(
+            error.append_details().map(|details| details.append_state),
+            Some(AppendState::Rejected)
+        );
+        assert!(error.message().contains("8388608-byte append limit"));
+        assert!(server.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn batches_ndjson_and_runs_requests_concurrently() {
         let server = MockServer::start(|_, request| {
             MockResponse::committed(request).with_delay(Duration::from_millis(30))
@@ -2429,7 +2474,13 @@ mod tests {
             requests[0].headers.get("authorization").map(String::as_str),
             Some("Bearer secret-api-key")
         );
-        assert!(!requests[0].headers.contains_key("content-encoding"));
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("content-encoding")
+                .map(String::as_str),
+            Some("zstd")
+        );
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ let client = Client::builder("http://127.0.0.1:6543")
 
 Applications that own TLS, proxy, timeout, or pooling settings can pass a compatible HTTP client through `.http_client(...)`. `Client::new(endpoint, http_client)` remains available when authentication is already configured on that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to avoid dependency-version mismatches.
 
-Statement and transform-ingest JSON request bodies and streaming table append batches use zstd compression by default. The default HTTP client also negotiates compressed responses. Direct caller-encoded table appends remain identity-encoded.
+Statement and transform-ingest JSON request bodies and all table append requests use zstd compression by default. The default HTTP client also negotiates compressed responses. Append limits are based on the uncompressed NDJSON body.
 
 The runnable examples read authentication from `SCOPEDB_API_KEY`. For backward compatibility, they fall back to `SCOPEDB_TOKEN` when the API key variable is unset or empty. The builder marks the resulting authorization header as sensitive so standard header and request `Debug` formatting redacts the credential.
 
@@ -195,7 +195,7 @@ stream.shutdown().await?;
 # }
 ```
 
-Each `AppendStream` request contains at most 8 MiB of uncompressed NDJSON and 200,000 rows. The stream splits automatically at either limit. Direct caller-encoded appends retain the endpoint's 16 MiB limit.
+Every table append request contains at most 8 MiB of uncompressed NDJSON and 200,000 rows. `AppendStream` splits automatically at either limit.
 
 `send()` and `send_all()` wait for local admission capacity only; they do not wait for a remote commit. Feed an iterator sequentially instead of spawning one task per row, which would move the unbounded backlog outside the stream. `flush()` and `shutdown()` are remote delivery barriers.
 
