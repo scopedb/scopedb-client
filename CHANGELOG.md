@@ -11,6 +11,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### Changed
 
+* `IngestStream` now seals a batch before the next record would exceed its target size and merges fitting queue-head records into temporary-error retries without crossing control barriers.
 * Direct caller-encoded table appends now use the same zstd compression and 8 MiB uncompressed request limit as streaming append batches.
 * Preserve structured failed-statement details on terminal errors and correct binary result formatting so wire-format hex strings are not encoded a second time.
 
