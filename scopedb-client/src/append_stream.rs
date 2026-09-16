@@ -42,7 +42,7 @@ use crate::ErrorKind;
 use crate::client::MAX_APPEND_BODY_BYTES;
 
 const MAX_APPEND_ROWS: usize = 200_000;
-const DEFAULT_BATCH_BYTES: usize = MAX_APPEND_BODY_BYTES;
+const DEFAULT_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MAX_BATCH_ROWS: usize = MAX_APPEND_ROWS;
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
@@ -309,14 +309,16 @@ impl AppendStreamBuilder {
         self
     }
 
-    /// Sets the target NDJSON payload size. One row may exceed this target up to 8 MiB.
+    /// Sets the target NDJSON payload size (default 4 MiB, maximum 8 MiB).
+    /// One row may exceed this target up to 8 MiB.
     #[deprecated(note = "use target_batch_bytes")]
     pub fn batch_bytes(mut self, batch_bytes: usize) -> Self {
         self.batch_bytes = batch_bytes;
         self
     }
 
-    /// Sets the target NDJSON payload size. One row may exceed this target up to 8 MiB.
+    /// Sets the target NDJSON payload size (default 4 MiB, maximum 8 MiB).
+    /// One row may exceed this target up to 8 MiB.
     pub fn target_batch_bytes(mut self, target_batch_bytes: usize) -> Self {
         self.batch_bytes = target_batch_bytes;
         self
@@ -2425,6 +2427,41 @@ mod tests {
             );
             assert_eq!(request.body.lines().count(), 1);
             assert!(request.body.starts_with('{'));
+        }
+    }
+
+    #[tokio::test]
+    async fn default_and_maximum_batch_targets() {
+        for target in [None, Some(8 * 1024 * 1024)] {
+            let server = MockServer::start(|_, request| MockResponse::committed(request));
+            let mut builder = server
+                .client()
+                .table("events")
+                .append_stream()
+                .flush_interval(Duration::from_secs(3600))
+                .max_concurrent_batches(1);
+            if let Some(target) = target {
+                builder = builder.target_batch_bytes(target);
+            }
+            let stream = builder.build().unwrap();
+            let row = serde_json::json!({"payload": "x".repeat(2 * 1024 * 1024)});
+            stream.send(&row).await.unwrap();
+            stream.send(&row).await.unwrap();
+            let report = stream.shutdown().await.unwrap();
+            assert_eq!(report.committed_rows, 2);
+            let row_counts = server
+                .requests()
+                .iter()
+                .map(|request| request.body.lines().count())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                row_counts,
+                if target.is_none() {
+                    vec![1, 1]
+                } else {
+                    vec![2]
+                }
+            );
         }
     }
 
