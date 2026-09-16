@@ -207,6 +207,8 @@ stream.shutdown().await?;
 # }
 ```
 
+`AppendStream` targets 4 MiB of uncompressed NDJSON per batch by default. Set `target_batch_bytes` to customize the target, up to 8 MiB. A single row may exceed the target but must fit within the 8 MiB request limit.
+
 Every table append request contains at most 8 MiB of uncompressed NDJSON and 200,000 rows. `AppendStream` splits automatically at either limit.
 
 `send()` and `send_all()` wait for local admission capacity only; they do not wait for a remote commit. Feed an iterator sequentially instead of spawning one task per row, which would move the unbounded backlog outside the stream. `flush()` and `shutdown()` are remote delivery barriers.
