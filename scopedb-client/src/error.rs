@@ -91,6 +91,12 @@ struct HttpErrorMetadata {
     retry_after: Option<Duration>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ErrorDiagnostics {
+    context: Vec<(&'static str, String)>,
+    source: Option<std::sync::Arc<anyhow::Error>>,
+}
+
 impl fmt::Display for ErrorStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -111,7 +117,7 @@ pub struct Error {
     statement_details: Option<Box<StatementErrorDetails>>,
     http_metadata: Option<Box<HttpErrorMetadata>>,
 
-    source: Option<anyhow::Error>,
+    source: Option<std::sync::Arc<anyhow::Error>>,
 }
 
 impl fmt::Display for Error {
@@ -204,7 +210,7 @@ impl fmt::Debug for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|v| v.as_ref())
+        self.source.as_ref().map(|v| v.as_ref().as_ref())
     }
 }
 
@@ -238,7 +244,20 @@ impl Error {
     pub fn set_source(mut self, src: impl Into<anyhow::Error>) -> Self {
         debug_assert!(self.source.is_none(), "the source error has been set");
 
-        self.source = Some(src.into());
+        self.source = Some(std::sync::Arc::new(src.into()));
+        self
+    }
+
+    pub(crate) fn diagnostics(&self) -> ErrorDiagnostics {
+        ErrorDiagnostics {
+            context: self.context.clone(),
+            source: self.source.clone(),
+        }
+    }
+
+    pub(crate) fn with_diagnostics(mut self, diagnostics: ErrorDiagnostics) -> Self {
+        self.context = diagnostics.context;
+        self.source = diagnostics.source;
         self
     }
 

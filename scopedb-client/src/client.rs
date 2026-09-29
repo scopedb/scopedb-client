@@ -298,6 +298,9 @@ impl Client {
     }
 
     /// Appends at most 8 MiB of uncompressed newline-delimited JSON to a table.
+    ///
+    /// Sends one request without automatic retries. An unknown outcome remains
+    /// non-retryable through [`Error::is_retryable`] because replay may duplicate rows.
     pub async fn append_rows(
         &self,
         database: &str,

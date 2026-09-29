@@ -37,7 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("accepted locally: {} rows", admitted.accepted_rows);
 
     // send_all() confirms only local admission. With the default strict policy,
-    // successful shutdown is the remote commit barrier for that accepted prefix.
+    // successful shutdown confirms at least one commit acknowledgement per row.
+    // Retrying an unknown outcome can insert duplicates.
     let report = stream.shutdown().await?;
     println!("committed remotely: {} rows", report.committed_rows);
 

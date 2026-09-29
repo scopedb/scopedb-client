@@ -110,6 +110,8 @@ pub struct AppendAdmissionResult {
 pub struct AppendDeliveryReport {
     pub outcome: AppendDeliveryOutcome,
     pub accepted_rows: u64,
+    /// Logical input rows acknowledged as committed at least once. Retrying an
+    /// unknown outcome may insert additional copies that this count cannot measure.
     pub committed_rows: u64,
     pub failed_rows: u64,
     pub unknown_rows: u64,
@@ -258,9 +260,14 @@ struct RetryConfig {
     max_retries: usize,
     initial_backoff: Duration,
     max_backoff: Duration,
+    rejected_only: bool,
 }
 
 /// Configures a bounded, concurrent table append stream.
+///
+/// By default, retries transient unknown outcomes as well as temporary rejections.
+/// This provides at-least-once delivery when a batch succeeds, and can insert
+/// duplicates. Use [`Self::rejected_only`] to disable unknown-outcome retries.
 pub struct AppendStreamBuilder {
     client: Client,
     database: String,
@@ -296,6 +303,7 @@ impl AppendStreamBuilder {
                 max_retries: DEFAULT_MAX_RETRIES,
                 initial_backoff: DEFAULT_INITIAL_BACKOFF,
                 max_backoff: DEFAULT_MAX_BACKOFF,
+                rejected_only: false,
             },
             failure_policy: AppendFailurePolicy::Stop,
             attempt_timeout: None,
@@ -369,6 +377,16 @@ impl AppendStreamBuilder {
 
     pub fn max_retries(mut self, max_retries: usize) -> Self {
         self.retry.max_retries = max_retries;
+        self
+    }
+
+    /// Retries only explicit temporary rejections when enabled.
+    ///
+    /// Defaults to `false`: transient unknown outcomes are also retried, which
+    /// can insert duplicates. This setting is independent of [`Self::failure_policy`]
+    /// and does not change single-request [`Client::append_rows`] calls.
+    pub fn rejected_only(mut self, rejected_only: bool) -> Self {
+        self.retry.rejected_only = rejected_only;
         self
     }
 
@@ -864,6 +882,10 @@ impl AppendStream {
 
     /// Dispatches rows admitted before this barrier and waits for their outcomes.
     ///
+    /// Committed rows have at least one successful acknowledgement; earlier
+    /// unknown attempts may also have committed. A failed barrier may include
+    /// successful batches, so replaying its entire input can duplicate rows.
+    ///
     /// Once enqueued, dropping this future does not cancel remote settlement.
     /// Keep the future alive to receive its interval report; the latest completed
     /// report also remains observable through [`Self::stats`].
@@ -1139,6 +1161,7 @@ struct StreamErrorSnapshot {
     http_status: Option<reqwest::StatusCode>,
     request_id: Option<String>,
     retry_after: Option<Duration>,
+    diagnostics: crate::error::ErrorDiagnostics,
 }
 
 impl StreamErrorSnapshot {
@@ -1158,11 +1181,13 @@ impl StreamErrorSnapshot {
             http_status: error.http_status(),
             request_id: error.request_id().map(str::to_string),
             retry_after: error.retry_after(),
+            diagnostics: error.diagnostics(),
         }
     }
 
     fn to_error(&self) -> Error {
-        let mut error = Error::new(self.kind, self.message.clone());
+        let mut error =
+            Error::new(self.kind, self.message.clone()).with_diagnostics(self.diagnostics.clone());
         if let Some(details) = self.append_details.clone() {
             error = error.set_append_details(details);
         }
@@ -1744,6 +1769,7 @@ async fn append_batch(
 ) -> (Result<AppendRowsResult, Error>, usize) {
     let mut retries = 0usize;
     let mut backoff = request.retry.initial_backoff;
+    let mut saw_unknown = false;
     loop {
         let append = request.client.append_rows(
             &request.database,
@@ -1763,32 +1789,81 @@ async fn append_batch(
             append.await
         };
 
-        match result {
+        let error = match result {
             Ok(result) => return (Ok(result), retries),
-            Err(error) if append_retryable(&error) && retries < request.retry.max_retries => {
-                let retry_delay = retry_delay(backoff, &error, request.retry.max_backoff);
-                if !retry_delay.is_zero() {
-                    tokio::time::sleep(retry_delay).await;
-                }
-                retries += 1;
-                backoff = next_backoff(backoff, request.retry.max_backoff);
-            }
-            Err(error) if append_retryable(&error) => {
-                return (
-                    Err(error.with_context("retries", retries).set_persistent()),
-                    retries,
-                );
-            }
-            Err(error) => return (Err(error), retries),
+            Err(error) => error,
+        };
+        saw_unknown |= error
+            .append_details()
+            .is_some_and(|details| details.append_state == AppendState::Unknown);
+        let retryable = append_retryable(&error, request.retry.rejected_only);
+        if !retryable || retries >= request.retry.max_retries {
+            let error = if retryable {
+                error.with_context("retries", retries).set_persistent()
+            } else {
+                error
+            };
+            return (Err(preserve_unknown_outcome(error, saw_unknown)), retries);
         }
+        let retry_delay = retry_delay(backoff, &error, request.retry.max_backoff);
+        if !retry_delay.is_zero() {
+            tokio::time::sleep(retry_delay).await;
+        }
+        retries += 1;
+        backoff = next_backoff(backoff, request.retry.max_backoff);
     }
 }
 
-fn append_retryable(error: &Error) -> bool {
-    error.is_temporary()
-        && error
+fn append_retryable(error: &Error, rejected_only: bool) -> bool {
+    match error.append_details().map(|details| details.append_state) {
+        Some(AppendState::Rejected) => error.is_temporary(),
+        Some(AppendState::Unknown) if !rejected_only => error.http_status().is_none_or(|status| {
+            status.is_success()
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status.is_server_error()
+        }),
+        _ => false,
+    }
+}
+
+fn preserve_unknown_outcome(error: Error, saw_unknown: bool) -> Error {
+    if !saw_unknown
+        || error
             .append_details()
-            .is_some_and(|details| details.append_state == AppendState::Rejected)
+            .is_some_and(|details| details.append_state == AppendState::Unknown)
+    {
+        return error;
+    }
+    // A later rejection cannot establish whether an earlier attempt committed.
+    let mut details = error
+        .append_details()
+        .cloned()
+        .unwrap_or(AppendErrorDetails {
+            append_state: AppendState::Unknown,
+            row_errors: Vec::new(),
+            row_errors_truncated: false,
+        });
+    details.append_state = AppendState::Unknown;
+    let mut unknown = Error::new(
+        ErrorKind::AppendRowsFailed,
+        format!(
+            "an earlier append attempt may have committed; last attempt: {}",
+            error.message()
+        ),
+    )
+    .set_append_details(details)
+    .set_persistent();
+    if let Some(status) = error.http_status() {
+        unknown = unknown.set_http_status(status);
+    }
+    if let Some(request_id) = error.request_id() {
+        unknown = unknown.set_request_id(request_id.to_string());
+    }
+    if let Some(retry_after) = error.retry_after() {
+        unknown = unknown.set_retry_after(retry_after);
+    }
+    unknown.set_source(error)
 }
 
 fn unknown_append_error<E>(message: impl Into<String>, source: Option<E>) -> Error
@@ -1969,6 +2044,8 @@ mod tests {
         status: u16,
         body: String,
         delay: Duration,
+        headers: Vec<(&'static str, String)>,
+        disconnect: bool,
     }
 
     impl MockResponse {
@@ -1977,6 +2054,8 @@ mod tests {
                 status,
                 body: body.into(),
                 delay: Duration::ZERO,
+                headers: Vec::new(),
+                disconnect: false,
             }
         }
 
@@ -1994,6 +2073,16 @@ mod tests {
 
         fn with_delay(mut self, delay: Duration) -> Self {
             self.delay = delay;
+            self
+        }
+
+        fn with_header(mut self, name: &'static str, value: &str) -> Self {
+            self.headers.push((name, value.to_string()));
+            self
+        }
+
+        fn without_ack(mut self) -> Self {
+            self.disconnect = true;
             self
         }
     }
@@ -2113,6 +2202,10 @@ mod tests {
         if !response.delay.is_zero() {
             thread::sleep(response.delay);
         }
+        if response.disconnect {
+            active.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
         let reason = match response.status {
             200 => "OK",
             400 => "Bad Request",
@@ -2120,11 +2213,17 @@ mod tests {
             503 => "Service Unavailable",
             _ => "Test Response",
         };
+        let headers = response
+            .headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
         let wire = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
             response.status,
             reason,
             response.body.len(),
+            headers,
             response.body
         );
         let _ = stream.write_all(wire.as_bytes());
@@ -2225,6 +2324,7 @@ mod tests {
                 max_retries: 0,
                 initial_backoff: Duration::ZERO,
                 max_backoff: Duration::ZERO,
+                rejected_only: false,
             },
             failure_policy: AppendFailurePolicy::Continue,
             attempt_timeout: Some(Duration::from_secs(1)),
@@ -2326,6 +2426,11 @@ mod tests {
             .set_http_status(reqwest::StatusCode::SERVICE_UNAVAILABLE)
             .set_request_id("request-123".to_string())
             .set_retry_after(Duration::from_secs(2))
+            .with_context("retries", 3)
+            .set_source(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "lost response",
+            ))
             .set_temporary();
         let restored = StreamErrorSnapshot::from_error(&error).to_error();
         assert_eq!(
@@ -2335,6 +2440,12 @@ mod tests {
         assert_eq!(restored.request_id(), Some("request-123"));
         assert_eq!(restored.retry_after(), Some(Duration::from_secs(2)));
         assert!(restored.is_temporary());
+        let cause = StdError::source(&restored)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(format!("{restored:?}").contains("retries: 3"));
     }
 
     #[tokio::test]
@@ -2521,6 +2632,312 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_delivery_retries_lost_ack_and_counts_logical_rows() {
+        for failure_policy in [AppendFailurePolicy::Stop, AppendFailurePolicy::Continue] {
+            let commits = Arc::new(AtomicUsize::new(0));
+            let server = MockServer::start({
+                let commits = commits.clone();
+                move |index, request| {
+                    commits.fetch_add(1, Ordering::AcqRel);
+                    let response = MockResponse::committed(request);
+                    if index == 0 {
+                        response.without_ack()
+                    } else {
+                        response
+                    }
+                }
+            });
+            let stream = server
+                .client()
+                .table("events")
+                .append_stream()
+                .failure_policy(failure_policy)
+                .initial_backoff(Duration::ZERO)
+                .build()
+                .unwrap();
+            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
+
+            let report = stream.shutdown().await.unwrap();
+
+            assert_eq!(commits.load(Ordering::Acquire), 2);
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].body, requests[1].body);
+            assert_eq!(report.outcome, AppendDeliveryOutcome::Ok);
+            assert_eq!(report.accepted_rows, 1);
+            assert_eq!(report.committed_rows, 1);
+            assert_eq!(report.committed_batches, 1);
+            assert_eq!(report.unknown_rows, 0);
+            assert_eq!(report.retries, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_append_does_not_retry_lost_ack() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request).without_ack());
+
+        let error = server
+            .client()
+            .table("events")
+            .append(r#"{"id":1}"#)
+            .await
+            .unwrap_err();
+
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(
+            error.append_details().unwrap().append_state,
+            AppendState::Unknown
+        );
+        assert!(!error.is_retryable());
+        assert!(StdError::source(&error).unwrap().is::<reqwest::Error>());
+    }
+
+    #[tokio::test]
+    async fn rejected_only_preserves_transport_cause_at_barrier() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request).without_ack());
+        let stream = server
+            .client()
+            .table("events")
+            .append_stream()
+            .rejected_only(true)
+            .build()
+            .unwrap();
+        stream.send(&serde_json::json!({"id": 1})).await.unwrap();
+
+        let error = stream.shutdown().await.unwrap_err();
+
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(
+            error.append_details().unwrap().append_state,
+            AppendState::Unknown
+        );
+        assert!(StdError::source(&error).unwrap().is::<reqwest::Error>());
+        assert_eq!(stream.stats().retries, 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_remains_unknown_after_terminal_rejection() {
+        for final_status in [422, 503] {
+            let server = MockServer::start(move |index, _| match index {
+                0 => MockResponse::json(503, r#"{"message":"ambiguous","append_state":"unknown"}"#),
+                1 => MockResponse::json(
+                    final_status,
+                    r#"{
+                    "message":"last rejection",
+                    "append_state":"rejected",
+                    "request_id":"last-attempt",
+                    "row_errors":[{"row_index":0,"column":"id","message":"invalid"}],
+                    "row_errors_truncated":true
+                }"#,
+                )
+                .with_header("Retry-After", "2"),
+                _ => panic!("unexpected retry request {index}"),
+            });
+            let stream = server
+                .client()
+                .table("events")
+                .append_stream()
+                .max_retries(1)
+                .initial_backoff(Duration::ZERO)
+                .build()
+                .unwrap();
+            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
+
+            let error = stream.shutdown().await.unwrap_err();
+
+            assert_eq!(server.requests().len(), 2);
+            assert_eq!(
+                error.append_details().unwrap().append_state,
+                AppendState::Unknown
+            );
+            assert!(
+                error
+                    .message()
+                    .contains("earlier append attempt may have committed")
+            );
+            assert_eq!(error.append_details().unwrap().row_errors[0].column, "id");
+            assert!(error.append_details().unwrap().row_errors_truncated);
+            assert_eq!(error.http_status().unwrap().as_u16(), final_status);
+            assert_eq!(error.request_id(), Some("last-attempt"));
+            assert_eq!(error.retry_after(), Some(Duration::from_secs(2)));
+            let cause = StdError::source(&error)
+                .unwrap()
+                .downcast_ref::<Error>()
+                .unwrap();
+            assert_eq!(cause.message(), "last rejection");
+            assert_eq!(
+                cause.append_details().unwrap().append_state,
+                AppendState::Rejected
+            );
+            assert_eq!(cause.append_details().unwrap().row_errors[0].column, "id");
+            if final_status == 503 {
+                assert!(format!("{cause:?}").contains("retries: 1"));
+            }
+            let stats = stream.stats();
+            assert_eq!(stats.unknown_rows, 1);
+            assert_eq!(stats.failed_rows, 0);
+            assert_eq!(stats.retries, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_retry_budget_preserves_one_unresolved_logical_batch() {
+        for max_retries in [0, 1] {
+            for disconnect in [false, true] {
+                let server = MockServer::start(move |index, request| {
+                    if disconnect {
+                        MockResponse::committed(request).without_ack()
+                    } else {
+                        MockResponse::json(
+                            503,
+                            format!(
+                                r#"{{
+                            "message":"still ambiguous",
+                            "append_state":"unknown",
+                            "request_id":"attempt-{index}"
+                        }}"#
+                            ),
+                        )
+                    }
+                });
+                let stream = server
+                    .client()
+                    .table("events")
+                    .append_stream()
+                    .max_retries(max_retries)
+                    .initial_backoff(Duration::ZERO)
+                    .build()
+                    .unwrap();
+                stream.send(&serde_json::json!({"id": 1})).await.unwrap();
+
+                let error = stream.shutdown().await.unwrap_err();
+
+                assert_eq!(server.requests().len(), max_retries + 1);
+                assert_eq!(
+                    error.append_details().unwrap().append_state,
+                    AppendState::Unknown
+                );
+                assert!(format!("{error:?}").contains(&format!("retries: {max_retries}")));
+                if disconnect {
+                    assert!(StdError::source(&error).unwrap().is::<reqwest::Error>());
+                } else {
+                    assert_eq!(
+                        error.http_status(),
+                        Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+                    );
+                    assert_eq!(
+                        error.request_id(),
+                        Some(format!("attempt-{max_retries}").as_str())
+                    );
+                }
+                let stats = stream.stats();
+                assert_eq!(stats.accepted_rows, 1);
+                assert_eq!(stats.unknown_rows, 1);
+                assert_eq!(stats.failed_rows, 0);
+                assert_eq!(stats.retries, max_retries as u64);
+                assert_eq!(stats.pending_rows, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_delivery_retries_transient_unknown_responses() {
+        for status in [200, 204, 408, 429, 500, 503] {
+            let server = MockServer::start(move |index, request| match index {
+                0 => MockResponse::json(status, "invalid response"),
+                1 => MockResponse::committed(request),
+                _ => panic!("unexpected retry request {index}"),
+            });
+            let stream = server
+                .client()
+                .table("events")
+                .append_stream()
+                .initial_backoff(Duration::ZERO)
+                .build()
+                .unwrap();
+            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
+
+            let report = stream.shutdown().await.unwrap();
+
+            assert_eq!(server.requests().len(), 2, "HTTP {status}");
+            assert_eq!(report.committed_rows, 1);
+            assert_eq!(report.retries, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn default_delivery_does_not_retry_permanent_unknown_responses() {
+        for status in [400, 401, 403, 404, 413, 422] {
+            let server = MockServer::start(move |_, _| {
+                MockResponse::json(status, r#"{"message":"permanent failure"}"#)
+            });
+            let stream = server
+                .client()
+                .table("events")
+                .append_stream()
+                .build()
+                .unwrap();
+            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
+
+            let error = stream.shutdown().await.unwrap_err();
+
+            assert_eq!(server.requests().len(), 1, "HTTP {status}");
+            assert_eq!(
+                error.append_details().unwrap().append_state,
+                AppendState::Unknown
+            );
+            assert_eq!(error.http_status().unwrap().as_u16(), status);
+            assert_eq!(stream.stats().retries, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn continue_barrier_settles_mixed_results_after_unknown_retry() {
+        let ambiguous_attempts = AtomicUsize::new(0);
+        let server = MockServer::start(move |_, request| {
+            let row: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            match row["id"].as_u64().unwrap() {
+                0 => MockResponse::committed(request),
+                1 if ambiguous_attempts.fetch_add(1, Ordering::AcqRel) == 0 => {
+                    MockResponse::json(503, r#"{"message":"ambiguous","append_state":"unknown"}"#)
+                }
+                _ => MockResponse::json(422, r#"{"message":"invalid","append_state":"rejected"}"#),
+            }
+        });
+        let stream = server
+            .client()
+            .table("events")
+            .append_stream()
+            .failure_policy(AppendFailurePolicy::Continue)
+            .circuit_breaker(None)
+            .max_batch_rows(1)
+            .initial_backoff(Duration::ZERO)
+            .build()
+            .unwrap();
+        stream
+            .send_all((0..3).map(|id| serde_json::json!({"id": id})))
+            .await
+            .unwrap();
+
+        let report = stream.flush().await.unwrap();
+
+        assert_eq!(server.requests().len(), 4);
+        assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
+        assert_eq!(report.accepted_rows, 3);
+        assert_eq!(report.committed_rows, 1);
+        assert_eq!(report.failed_rows, 1);
+        assert_eq!(report.unknown_rows, 1);
+        assert_eq!(report.retries, 1);
+        assert_eq!(
+            report.accepted_rows,
+            report.committed_rows + report.failed_rows + report.unknown_rows
+        );
+        assert_eq!(stream.stats().pending_rows, 0);
+        assert_eq!(stream.shutdown().await.unwrap().accepted_rows, 0);
+        assert_eq!(stream.stats().committed_rows, 1);
+    }
+
+    #[tokio::test]
     async fn continue_mode_retries_only_temporary_rejections() {
         let server = MockServer::start(|index, request| match index {
             0 => MockResponse::json(503, r#"{"message":"busy","append_state":"rejected"}"#),
@@ -2538,6 +2955,7 @@ mod tests {
             .target_batch_bytes(1)
             .max_concurrent_batches(1)
             .max_retries(4)
+            .rejected_only(true)
             .initial_backoff(Duration::ZERO)
             .max_backoff(Duration::ZERO)
             .build()
@@ -2566,7 +2984,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_timeout_is_not_retried() {
+    async fn rejected_only_does_not_retry_unknown_timeout() {
         let server = MockServer::start(|_, request| {
             MockResponse::committed(request).with_delay(Duration::from_millis(100))
         });
@@ -2578,6 +2996,7 @@ mod tests {
             .circuit_breaker(None)
             .target_batch_bytes(1)
             .max_retries(8)
+            .rejected_only(true)
             .attempt_timeout(Duration::from_millis(10))
             .build()
             .unwrap();
@@ -2642,6 +3061,7 @@ mod tests {
             .append_stream()
             .target_batch_bytes(1)
             .max_concurrent_batches(2)
+            .rejected_only(true)
             .build()
             .unwrap();
         stream

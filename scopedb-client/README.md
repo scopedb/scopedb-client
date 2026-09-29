@@ -168,11 +168,15 @@ if let Some(details) = error.statement_details() {
 # }
 ```
 
-The asynchronous append stream honors `Retry-After` only for an exact temporary batch explicitly reported as `Rejected`; the delay is capped by `max_backoff`. Unknown outcomes remain non-retryable because replay can duplicate rows.
+Direct `append()` and `append_rows()` calls send one request without automatic retries. For these calls, unknown outcomes remain non-retryable through `Error::is_retryable()` because replay can duplicate rows. The asynchronous append stream applies its own delivery policy, described below. For eligible retries it honors `Retry-After`, capped by `max_backoff`.
 
 ### Asynchronous append stream
 
 Use `append_stream()` for continuous or large producers. The stream serializes records to NDJSON, batches by size or time, bounds pending bytes, and sends a bounded number of HTTP append requests concurrently.
+
+By default, the stream retries temporary rejections and transient unknown outcomes, using the exact same batch. A successfully acknowledged batch has at-least-once delivery: if an earlier attempt committed but its response was lost, retrying can insert duplicates. Unknown outcomes caused by transport failures, invalid success responses, HTTP 408, HTTP 429, or HTTP 5xx are retried; permanent HTTP errors are not. Retry attempts are finite, so admission alone does not guarantee delivery.
+
+To retain the earlier conservative behavior, set `.rejected_only(true)` on the builder. This retries only temporary errors explicitly reported as `Rejected`, and leaves an unknown outcome for the application to reconcile. The setting applies independently of `AppendFailurePolicy::Stop` or `Continue`.
 
 ```rust
 use std::time::Duration;
@@ -215,7 +219,7 @@ Every table append request contains at most 8 MiB of uncompressed NDJSON and 200
 
 Once a `flush()` future has enqueued its barrier, dropping that future does not cancel remote settlement. Keep it alive to receive the interval report; if a task is cancelled, inspect `stats().last_report` and lifetime counters before deciding how to reconcile the covered rows.
 
-The default `AppendFailurePolicy::Stop` is strict: the first failed batch stops admission, and a successful barrier confirms that its accepted prefix committed. Use `max_concurrent_batches(1)` if request submission order matters; concurrent batches have no defined commit order.
+The default `AppendFailurePolicy::Stop` is strict: the first batch that exhausts retries or cannot be retried stops admission, and a successful barrier confirms that its accepted prefix was acknowledged as committed at least once. A failed barrier can include other batches that already committed; do not replay its entire input without reconciliation. Use `max_concurrent_batches(1)` for serial request submission; concurrent batches have no defined commit order.
 
 ### Best-effort telemetry and logs
 
@@ -264,7 +268,9 @@ accepted_rows = committed_rows + failed_rows + unknown_rows
 
 `AppendDeliveryOutcome::Partial` means at least one row committed while another row failed, was dropped, or remains unknown. With no committed rows, the outcome is `Unknown` when any batch may have committed and `Failed` otherwise. Only a loss-free report is `Ok`.
 
-The stream retries only the exact temporary HTTP batch explicitly reported as `Rejected`. A timeout, transport failure, or invalid success response is `Unknown` and is never automatically retried. An in-memory stream is not a durable queue; use an outbox when payloads must survive process failure or be available for reconciliation.
+`committed_rows` counts logical input rows with at least one successful acknowledgement, not the number of copies inserted. An unknown attempt followed by a successful retry counts as committed once. If an unknown attempt is followed only by failures, the batch remains unknown even when the last attempt was explicitly rejected. Error metadata and row details describe the last attempt; that rejection does not prove that earlier attempts did not commit.
+
+An in-memory stream is not a durable queue; use an outbox when payloads must survive process failure or be available for reconciliation.
 
 ### Choose a delivery path
 
