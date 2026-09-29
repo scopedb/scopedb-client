@@ -165,12 +165,11 @@ An append failure uses this payload when the outcome is known:
 
 Transport errors, response-body read failures, attempt timeouts, and malformed responses are classified as `unknown`, because the request may have reached the commit path. Replaying an unknown payload may insert duplicates.
 
-The asynchronous append stream retries only the same HTTP batch when both of these conditions hold:
+By default, the asynchronous append stream retries the same HTTP batch after temporary rejections and transient unknown outcomes. Unknown outcomes are eligible when no HTTP status is available or when the response is HTTP 2xx, 408, 429, or 5xx. A successful batch has at-least-once delivery: retrying an earlier unknown attempt can insert duplicates. Permanent HTTP errors stop retries.
 
-1. The structured response explicitly says `append_state: "rejected"`.
-2. The HTTP failure is temporary.
+The same retry rules apply with either the `Stop` or `Continue` failure policy. Direct `Table::append` and `Client::append_rows` return the structured error to the caller without a retry loop; their unknown errors remain non-retryable through `Error::is_retryable()`.
 
-It never automatically retries an unknown batch. Direct `Table::append` and `Client::append_rows` return the structured error to the caller and do not own a retry loop.
+If any attempt was unknown, a final rejected attempt cannot prove that the batch never committed. The final batch outcome stays unknown unless a later attempt succeeds. Its HTTP metadata and row-error details describe the last attempt, and the original final error remains available as its cause.
 
 ### Client-side batching and barriers
 
@@ -188,6 +187,8 @@ It never automatically retries an unknown batch. Direct `Table::append` and `Cli
 The older `batch_bytes`, `max_in_flight_requests`, and `max_pending_bytes` builder names remain source-compatible deprecated aliases.
 
 With the default `Stop` failure policy, a failed batch makes the stream terminal and barriers return an error. With `Continue`, rejected and unknown batches are accounted for and released so later batches can proceed. Continue-mode barriers return an `AppendDeliveryReport`; they do not imply that every row committed.
+
+A successful strict barrier confirms at least one commit acknowledgement for every covered row. `committed_rows` counts logical input rows, not copies inserted by retries. A failed barrier may include successful batches; replaying the entire covered input can duplicate rows.
 
 Concurrent batches do not have a defined commit order. Set the in-flight limit to one when requests must be submitted serially. Neither policy provides a stream-wide transaction, rollback, durable replay queue, or idempotency.
 
@@ -292,6 +293,6 @@ Non-append non-2xx responses generally use:
 }
 ```
 
-The SDK distinguishes transport or deserialization errors, non-2xx server errors, structured append outcomes, and in-band statement terminal states. Server messages remain unchanged in `Error::message()`. When available, `http_status()`, `request_id()`, and `retry_after()` expose response metadata; `is_retryable()` includes an explicit `retryable` value from direct or nested error envelopes before falling back to HTTP status classification.
+The SDK distinguishes transport or deserialization errors, non-2xx server errors, structured append outcomes, and in-band statement terminal states. Direct server errors preserve their messages in `Error::message()`. When available, `http_status()`, `request_id()`, and `retry_after()` expose response metadata; `is_retryable()` includes an explicit `retryable` value from direct or nested error envelopes before falling back to HTTP status classification. Unknown append errors conservatively return false; append streams apply the separate delivery policy above.
 
-`Retry-After` accepts delta seconds and HTTP dates. Streaming writes use it only for a temporary append explicitly reported as `rejected`, and cap the delay at the configured maximum backoff. Unknown append outcomes are never retried.
+`Retry-After` accepts delta seconds and HTTP dates. Append streams use it for eligible batch retries and cap the delay at the configured maximum backoff.
