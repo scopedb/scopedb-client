@@ -1,6 +1,6 @@
 # ScopeDB Rust SDK examples
 
-Start with a quickstart, then choose a write pattern whose delivery tradeoffs match the workload. Every example uses only the public `scopedb-client` API. The shared client helper uses `Client::builder(...).api_key(...)`, so copied examples do not need a direct reqwest dependency. API keys belong only in a trusted process; never return one to an untrusted client.
+Start with a quickstart, then choose the example for your task. Every example uses only the public `scopedb-client` API. The shared client helper uses `Client::builder(...).api_key(...)`, so copied examples do not need a direct reqwest dependency. API keys belong only in a trusted process; never return one to an untrusted client.
 
 These examples focus on SDK integration and assume valid ScopeQL. For language syntax, use the canonical [Quickstart](https://docs.scopedb.io/guides/quickstart), [query guide](https://docs.scopedb.io/guides/query-events), and [language reference](https://docs.scopedb.io/reference/).
 
@@ -51,36 +51,21 @@ export SCOPEDB_TABLE=sdk_example_events
 $env:SCOPEDB_TABLE = "sdk_example_events"
 ```
 
-## Choose a write journey
+## Choose a write example
 
-| Example                                      | Choose it when                                                    | Run                                    |
-| -------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------- |
-| [`append.rs`](append.rs)                     | The caller owns one exact NDJSON request boundary                 | `cargo run --example append`           |
-| [`append_stream.rs`](append_stream.rs)       | The SDK should asynchronously batch rows with strict delivery     | `cargo run --example append_stream`    |
-| [`bulk_append.rs`](bulk_append.rs)           | A backfill needs bounded memory and concurrent strict batches     | `cargo run --example bulk_append`      |
-| [`telemetry.rs`](telemetry.rs)               | Logs or events need non-blocking, observable best-effort delivery | `cargo run --example telemetry`        |
-| [`ingest_transform.rs`](ingest_transform.rs) | JSON records need a SQL transform before insertion                | `cargo run --example ingest_transform` |
+| Example | Shows | Run |
+| --- | --- | --- |
+| [`append.rs`](append.rs) | Write NDJSON | `cargo run --example append` |
+| [`append_stream.rs`](append_stream.rs) | Send rows with a stream | `cargo run --example append_stream` |
+| [`bulk_append.rs`](bulk_append.rs) | Import many rows | `cargo run --example bulk_append` |
+| [`telemetry.rs`](telemetry.rs) | Write logs or events | `cargo run --example telemetry` |
+| [`ingest_transform.rs`](ingest_transform.rs) | Transform rows with SQL before writing | `cargo run --example ingest_transform` |
 
-`append.rs` sends exactly one NDJSON request. `append_stream.rs` uses the default `Stop` policy: `send()` and `send_all()` wait only for local admission, while a successful `flush()` or `shutdown()` confirms that the accepted prefix was acknowledged as committed at least once. Stream retries may insert duplicates.
+`append.rs` writes prepared NDJSON with `table.append()`. Each line is one JSON object.
 
-`bulk_append.rs` keeps producer memory bounded and sends multiple HTTP batches concurrently. It does not add durable resume, idempotency, transactionality, or whole-job rollback. Earlier concurrent batches may have committed even when a later batch fails.
+`append_stream.rs` and `bulk_append.rs` create a stream with `table.append_stream().build()`. Use `send()` for one row or `send_all()` for an iterator of rows. These calls add data to the SDK's pending writes. Call `shutdown()` when finished to wait for writing to complete and close the stream. Use `flush()` if you want to wait for pending writes and then keep using the stream.
 
-`telemetry.rs` opts into `AppendFailurePolicy::Continue` and uses `try_send()` on the request path. It keeps working after a failed batch, but does not retain the batch for replay. The shutdown report makes rejected, ambiguous, and local loss observable.
-
-When the continue-mode circuit is open, `try_send()` rejects immediately while the backpressured `send()` path can queue within the configured byte budget and wait for a later probe.
-
-## Delivery contract
-
-- The table append API accepts NDJSON only: one JSON row object per line, not a JSON array.
-- `send()`, `send_all()`, and `Ok(())` from `try_send()` mean local admission; they do not confirm a remote commit.
-- A successful strict barrier confirms that its accepted prefix was acknowledged as committed at least once. Committed counters count logical input rows, not inserted copies.
-- A continue-mode barrier is settlement. Always inspect its `AppendDeliveryReport`.
-- The stream retries the exact batch after temporary rejections and transient unknown outcomes.
-- A timeout, transport failure, or invalid success response is `unknown`. The rows may already exist remotely, so automatic retries can insert duplicates. A later rejection cannot rule out an earlier commit.
-- `shutdown()` closes admission and settles accepted rows. It is not an abort or rollback; stop and join producer tasks before calling it.
-- Dropping an enqueued `flush()` future does not cancel its remote settlement; keep the future alive to receive the interval report and use `stats()` for post-cancellation diagnostics.
-- Concurrent batches do not have a defined commit order. Use `max_concurrent_batches(1)` when requests must be submitted serially.
-- An in-memory stream is not a durable queue. Audit or billing writes need an application-owned outbox and a reconciliation path for unknown outcomes.
+`telemetry.rs` configures `.failure_policy(AppendFailurePolicy::Continue)` so the stream keeps running after a batch fails. It uses `try_send()` to add a row without waiting. Check its return value, and read the report returned by `shutdown()` for the write results.
 
 ## Check the examples
 
