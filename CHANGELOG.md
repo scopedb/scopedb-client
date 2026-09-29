@@ -6,7 +6,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### Breaking Changes
 
-* `AppendStream` now retries transient unknown outcomes by default, matching the Go and JavaScript SDKs. A successfully acknowledged batch has at-least-once delivery and retries may insert duplicates. Set `.rejected_only(true)` to retain the previous behavior. Direct append calls still send one request and conservatively classify unknown outcomes as non-retryable.
+* `AppendStream` now retries transient unknown outcomes, matching the Go and JavaScript SDKs. A successfully acknowledged batch has at-least-once delivery and retries may insert duplicates. Direct append calls still send one request and conservatively classify unknown outcomes as non-retryable.
 * Upgraded the re-exported reqwest API from 0.12 to 0.13. Custom HTTP clients must now use reqwest 0.13, and the default HTTPS client uses reqwest's platform certificate verification.
 * Removed the statement `with_max_parallelism` option. Execution timeout remains the only exposed statement execution control.
 

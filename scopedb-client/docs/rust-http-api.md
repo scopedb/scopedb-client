@@ -167,7 +167,7 @@ Transport errors, response-body read failures, attempt timeouts, and malformed r
 
 By default, the asynchronous append stream retries the same HTTP batch after temporary rejections and transient unknown outcomes. Unknown outcomes are eligible when no HTTP status is available or when the response is HTTP 2xx, 408, 429, or 5xx. A successful batch has at-least-once delivery: retrying an earlier unknown attempt can insert duplicates. Permanent HTTP errors stop retries.
 
-Set `.rejected_only(true)` to retain conservative retries: the structured response must explicitly say `append_state: "rejected"` and the failure must be temporary. This choice is independent of the stream's `Stop` or `Continue` failure policy. Direct `Table::append` and `Client::append_rows` return the structured error to the caller without a retry loop; their unknown errors remain non-retryable through `Error::is_retryable()`.
+The same retry rules apply with either the `Stop` or `Continue` failure policy. Direct `Table::append` and `Client::append_rows` return the structured error to the caller without a retry loop; their unknown errors remain non-retryable through `Error::is_retryable()`.
 
 If any attempt was unknown, a final rejected attempt cannot prove that the batch never committed. The final batch outcome stays unknown unless a later attempt succeeds. Its HTTP metadata and row-error details describe the last attempt, and the original final error remains available as its cause.
 

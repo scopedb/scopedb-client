@@ -260,14 +260,13 @@ struct RetryConfig {
     max_retries: usize,
     initial_backoff: Duration,
     max_backoff: Duration,
-    rejected_only: bool,
 }
 
 /// Configures a bounded, concurrent table append stream.
 ///
-/// By default, retries transient unknown outcomes as well as temporary rejections.
+/// Retries transient unknown outcomes as well as temporary rejections.
 /// This provides at-least-once delivery when a batch succeeds, and can insert
-/// duplicates. Use [`Self::rejected_only`] to disable unknown-outcome retries.
+/// duplicates.
 pub struct AppendStreamBuilder {
     client: Client,
     database: String,
@@ -303,7 +302,6 @@ impl AppendStreamBuilder {
                 max_retries: DEFAULT_MAX_RETRIES,
                 initial_backoff: DEFAULT_INITIAL_BACKOFF,
                 max_backoff: DEFAULT_MAX_BACKOFF,
-                rejected_only: false,
             },
             failure_policy: AppendFailurePolicy::Stop,
             attempt_timeout: None,
@@ -377,16 +375,6 @@ impl AppendStreamBuilder {
 
     pub fn max_retries(mut self, max_retries: usize) -> Self {
         self.retry.max_retries = max_retries;
-        self
-    }
-
-    /// Retries only explicit temporary rejections when enabled.
-    ///
-    /// Defaults to `false`: transient unknown outcomes are also retried, which
-    /// can insert duplicates. This setting is independent of [`Self::failure_policy`]
-    /// and does not change single-request [`Client::append_rows`] calls.
-    pub fn rejected_only(mut self, rejected_only: bool) -> Self {
-        self.retry.rejected_only = rejected_only;
         self
     }
 
@@ -1796,7 +1784,7 @@ async fn append_batch(
         saw_unknown |= error
             .append_details()
             .is_some_and(|details| details.append_state == AppendState::Unknown);
-        let retryable = append_retryable(&error, request.retry.rejected_only);
+        let retryable = append_retryable(&error);
         if !retryable || retries >= request.retry.max_retries {
             let error = if retryable {
                 error.with_context("retries", retries).set_persistent()
@@ -1814,10 +1802,10 @@ async fn append_batch(
     }
 }
 
-fn append_retryable(error: &Error, rejected_only: bool) -> bool {
+fn append_retryable(error: &Error) -> bool {
     match error.append_details().map(|details| details.append_state) {
         Some(AppendState::Rejected) => error.is_temporary(),
-        Some(AppendState::Unknown) if !rejected_only => error.http_status().is_none_or(|status| {
+        Some(AppendState::Unknown) => error.http_status().is_none_or(|status| {
             status.is_success()
                 || status == reqwest::StatusCode::REQUEST_TIMEOUT
                 || status == reqwest::StatusCode::TOO_MANY_REQUESTS
@@ -2324,7 +2312,6 @@ mod tests {
                 max_retries: 0,
                 initial_backoff: Duration::ZERO,
                 max_backoff: Duration::ZERO,
-                rejected_only: false,
             },
             failure_policy: AppendFailurePolicy::Continue,
             attempt_timeout: Some(Duration::from_secs(1)),
@@ -2693,13 +2680,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_only_preserves_transport_cause_at_barrier() {
+    async fn zero_retry_budget_preserves_transport_cause_at_barrier() {
         let server = MockServer::start(|_, request| MockResponse::committed(request).without_ack());
         let stream = server
             .client()
             .table("events")
             .append_stream()
-            .rejected_only(true)
+            .max_retries(0)
             .build()
             .unwrap();
         stream.send(&serde_json::json!({"id": 1})).await.unwrap();
@@ -2938,12 +2925,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continue_mode_retries_only_temporary_rejections() {
+    async fn continue_mode_retries_temporary_rejections_and_unknown_outcomes() {
         let server = MockServer::start(|index, request| match index {
             0 => MockResponse::json(503, r#"{"message":"busy","append_state":"rejected"}"#),
             1 => MockResponse::committed(request),
             2 => MockResponse::json(503, r#"{"message":"ambiguous","append_state":"unknown"}"#),
-            3 => MockResponse::json(422, r#"{"message":"bad row","append_state":"rejected"}"#),
+            3 | 4 => MockResponse::json(422, r#"{"message":"bad row","append_state":"rejected"}"#),
             _ => panic!("unexpected retry request {index}"),
         });
         let stream = server
@@ -2955,7 +2942,6 @@ mod tests {
             .target_batch_bytes(1)
             .max_concurrent_batches(1)
             .max_retries(4)
-            .rejected_only(true)
             .initial_backoff(Duration::ZERO)
             .max_backoff(Duration::ZERO)
             .build()
@@ -2967,7 +2953,11 @@ mod tests {
             .unwrap();
         let report = stream.shutdown().await.unwrap();
 
-        assert_eq!(server.requests().len(), 4);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].body, requests[1].body);
+        assert_eq!(requests[2].body, requests[3].body);
+        assert_ne!(requests[3].body, requests[4].body);
         assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
         assert_eq!(report.accepted_rows, 3);
         assert_eq!(report.committed_rows, 1);
@@ -2976,7 +2966,7 @@ mod tests {
         assert_eq!(report.committed_batches, 1);
         assert_eq!(report.failed_batches, 1);
         assert_eq!(report.unknown_batches, 1);
-        assert_eq!(report.retries, 1);
+        assert_eq!(report.retries, 2);
         assert_eq!(
             report.accepted_rows,
             report.committed_rows + report.failed_rows + report.unknown_rows
@@ -2984,7 +2974,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_only_does_not_retry_unknown_timeout() {
+    async fn zero_retry_budget_reports_unknown_timeout() {
         let server = MockServer::start(|_, request| {
             MockResponse::committed(request).with_delay(Duration::from_millis(100))
         });
@@ -2995,8 +2985,7 @@ mod tests {
             .failure_policy(AppendFailurePolicy::Continue)
             .circuit_breaker(None)
             .target_batch_bytes(1)
-            .max_retries(8)
-            .rejected_only(true)
+            .max_retries(0)
             .attempt_timeout(Duration::from_millis(10))
             .build()
             .unwrap();
@@ -3061,7 +3050,7 @@ mod tests {
             .append_stream()
             .target_batch_bytes(1)
             .max_concurrent_batches(2)
-            .rejected_only(true)
+            .max_retries(0)
             .build()
             .unwrap();
         stream

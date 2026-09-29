@@ -61,7 +61,7 @@ $env:SCOPEDB_TABLE = "sdk_example_events"
 | [`telemetry.rs`](telemetry.rs)               | Logs or events need non-blocking, observable best-effort delivery | `cargo run --example telemetry`        |
 | [`ingest_transform.rs`](ingest_transform.rs) | JSON records need a SQL transform before insertion                | `cargo run --example ingest_transform` |
 
-`append.rs` sends exactly one NDJSON request. `append_stream.rs` uses the default `Stop` policy: `send()` and `send_all()` wait only for local admission, while a successful `flush()` or `shutdown()` confirms that the accepted prefix was acknowledged as committed at least once. Stream retries may insert duplicates; `.rejected_only(true)` retains the earlier conservative retry policy.
+`append.rs` sends exactly one NDJSON request. `append_stream.rs` uses the default `Stop` policy: `send()` and `send_all()` wait only for local admission, while a successful `flush()` or `shutdown()` confirms that the accepted prefix was acknowledged as committed at least once. Stream retries may insert duplicates.
 
 `bulk_append.rs` keeps producer memory bounded and sends multiple HTTP batches concurrently. It does not add durable resume, idempotency, transactionality, or whole-job rollback. Earlier concurrent batches may have committed even when a later batch fails.
 
@@ -75,7 +75,7 @@ When the continue-mode circuit is open, `try_send()` rejects immediately while t
 - `send()`, `send_all()`, and `Ok(())` from `try_send()` mean local admission; they do not confirm a remote commit.
 - A successful strict barrier confirms that its accepted prefix was acknowledged as committed at least once. Committed counters count logical input rows, not inserted copies.
 - A continue-mode barrier is settlement. Always inspect its `AppendDeliveryReport`.
-- By default the stream retries the exact batch after temporary rejections and transient unknown outcomes. Set `.rejected_only(true)` to retry only explicit temporary rejections.
+- The stream retries the exact batch after temporary rejections and transient unknown outcomes.
 - A timeout, transport failure, or invalid success response is `unknown`. The rows may already exist remotely, so automatic retries can insert duplicates. A later rejection cannot rule out an earlier commit.
 - `shutdown()` closes admission and settles accepted rows. It is not an abort or rollback; stop and join producer tasks before calling it.
 - Dropping an enqueued `flush()` future does not cancel its remote settlement; keep the future alive to receive the interval report and use `stats()` for post-cancellation diagnostics.

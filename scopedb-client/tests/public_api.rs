@@ -50,7 +50,6 @@ fn application_api_surface_compiles(client: &scopedb_client::Client) {
     let _description = table.describe();
     let _stream = table
         .append_stream()
-        .rejected_only(true)
         .target_batch_bytes(1024)
         .max_batch_rows(100)
         .max_buffered_bytes(4096)

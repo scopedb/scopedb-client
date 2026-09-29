@@ -176,7 +176,7 @@ Use `append_stream()` for continuous or large producers. The stream serializes r
 
 By default, the stream retries temporary rejections and transient unknown outcomes, using the exact same batch. A successfully acknowledged batch has at-least-once delivery: if an earlier attempt committed but its response was lost, retrying can insert duplicates. Unknown outcomes caused by transport failures, invalid success responses, HTTP 408, HTTP 429, or HTTP 5xx are retried; permanent HTTP errors are not. Retry attempts are finite, so admission alone does not guarantee delivery.
 
-To retain the earlier conservative behavior, set `.rejected_only(true)` on the builder. This retries only temporary errors explicitly reported as `Rejected`, and leaves an unknown outcome for the application to reconcile. The setting applies independently of `AppendFailurePolicy::Stop` or `Continue`.
+The same retry rules apply with either `AppendFailurePolicy::Stop` or `Continue`.
 
 ```rust
 use std::time::Duration;
