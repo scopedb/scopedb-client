@@ -85,66 +85,98 @@ println!("{} {} {}", database.name, schema.name, table.name);
 
 See [`examples/catalog.rs`][catalog-example] for complete database pagination and table metadata discovery.
 
-## Streaming writes with NDJSON
+## Writing rows
 
-The table write API accepts newline-delimited JSON only: each line is one JSON row object. It does not accept a JSON array. The destination table must already exist. `Table` uses `scopedb` and `public` when the database or schema is not specified.
+The destination table must already exist. `Table` uses `scopedb` and `public` when the database or schema is not specified.
 
-### Direct append
+### Write with a stream
 
-Use direct append when the caller already owns one exact NDJSON request boundary.
+Use `append_stream()` to send Rust values. The SDK converts them to NDJSON and writes them in batches automatically.
 
 ```rust
-use scopedb_client::Client;
-
 # async fn demo() -> Result<(), scopedb_client::Error> {
-# let client = Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
-let table = client
-    .table("events")
-    .with_database("scopedb")
-    .with_schema("public");
+# let client = scopedb_client::Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
+let stream = client.table("events").append_stream().build()?;
 
-let ndjson = [
-    serde_json::json!({"id": 1, "name": "first"}),
+stream.send(&serde_json::json!({"id": 1, "name": "first"})).await?;
+stream.send_all([
     serde_json::json!({"id": 2, "name": "second"}),
-]
-.iter()
-.map(serde_json::to_string)
-.collect::<Result<Vec<_>, _>>()
-.expect("example rows serialize")
-.join("\n");
+    serde_json::json!({"id": 3, "name": "third"}),
+]).await?;
 
-let result = table.append(ndjson).await?;
-println!("committed remotely: {} rows", result.num_rows_inserted);
+let report = stream.shutdown().await?;
+println!("Written: {} rows", report.committed_rows);
 # Ok(())
 # }
 ```
 
-A failed append exposes structured details through `Error::append_details()`:
+`send()` adds one row to the SDK's pending writes; `send_all()` adds rows from an iterator. These calls do not wait for the rows to be written. Call `shutdown()` when you are finished to wait for writing to complete and close the stream.
+
+To wait for pending writes while keeping the stream open, call `flush()`:
 
 ```rust
-use scopedb_client::AppendState;
-use scopedb_client::ErrorKind;
-
-# fn inspect(error: &scopedb_client::Error) {
-if error.kind() == ErrorKind::AppendRowsFailed {
-    if let Some(details) = error.append_details() {
-        match details.append_state {
-            AppendState::Rejected => {
-                eprintln!("request rejected: {:?}", details.row_errors);
-            }
-            AppendState::Unknown => {
-                eprintln!("rows may have committed; reconcile before replaying");
-            }
-            AppendState::Committed => {}
-        }
-    }
-}
+# async fn demo() -> Result<(), scopedb_client::Error> {
+# let client = scopedb_client::Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
+# let stream = client.table("events").append_stream().build()?;
+let report = stream.flush().await?;
+println!("Written: {} rows", report.committed_rows);
+# stream.shutdown().await?;
+# Ok(())
 # }
 ```
 
-`Unknown` is deliberately different from a rejection: replaying the same rows may insert duplicates.
+### Continue after a batch fails
 
-All HTTP errors preserve the server message in `Error::message()` and expose operational metadata without message parsing:
+For logs or telemetry that should keep running after a batch fails, set `AppendFailurePolicy::Continue`. Read the report returned by `flush()` or `shutdown()` to see the write results.
+
+```rust
+use scopedb_client::AppendFailurePolicy;
+
+# async fn demo() -> Result<(), scopedb_client::Error> {
+# let client = scopedb_client::Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
+let stream = client
+    .table("events")
+    .append_stream()
+    .failure_policy(AppendFailurePolicy::Continue)
+    .build()?;
+
+stream.send(&serde_json::json!({"name": "request.completed"})).await?;
+let report = stream.shutdown().await?;
+println!("Write results: {report:?}");
+# Ok(())
+# }
+```
+
+### Append NDJSON
+
+Use `append()` when your data is already newline-delimited JSON: one JSON object per line.
+
+```rust
+# async fn demo() -> Result<(), scopedb_client::Error> {
+# let client = scopedb_client::Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
+let table = client.table("events");
+let ndjson = r#"{"id": 1, "name": "first"}
+{"id": 2, "name": "second"}"#;
+
+let result = table.append(ndjson).await?;
+println!("Written: {} rows", result.num_rows_inserted);
+# Ok(())
+# }
+```
+
+### More examples
+
+| Task | Example |
+| --- | --- |
+| Write NDJSON | [`append.rs`][append-example] |
+| Send rows with a stream | [`append_stream.rs`][append-stream-example] |
+| Import many rows | [`bulk_append.rs`][bulk-append-example] |
+| Write logs or events | [`telemetry.rs`][telemetry-example] |
+| Transform rows with SQL before writing | [`ingest_transform.rs`][ingest-transform-example] |
+
+## Inspecting errors
+
+Use the error's methods to read its message, HTTP status, and request ID:
 
 ```rust
 # fn inspect(error: &scopedb_client::Error) {
@@ -167,120 +199,6 @@ if let Some(details) = error.statement_details() {
 }
 # }
 ```
-
-Direct `append()` and `append_rows()` calls send one request without automatic retries. For these calls, unknown outcomes remain non-retryable through `Error::is_retryable()` because replay can duplicate rows. The asynchronous append stream applies its own delivery policy, described below. For eligible retries it honors `Retry-After`, capped by `max_backoff`.
-
-### Asynchronous append stream
-
-Use `append_stream()` for continuous or large producers. The stream serializes records to NDJSON, batches by size or time, bounds pending bytes, and sends a bounded number of HTTP append requests concurrently.
-
-By default, the stream retries temporary rejections and transient unknown outcomes, using the exact same batch. A successfully acknowledged batch has at-least-once delivery: if an earlier attempt committed but its response was lost, retrying can insert duplicates. Unknown outcomes caused by transport failures, invalid success responses, HTTP 408, HTTP 429, or HTTP 5xx are retried; permanent HTTP errors are not. Retry attempts are finite, so admission alone does not guarantee delivery.
-
-The same retry rules apply with either `AppendFailurePolicy::Stop` or `Continue`.
-
-```rust
-use std::time::Duration;
-
-# async fn demo() -> Result<(), scopedb_client::Error> {
-# let client = scopedb_client::Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
-let table = client.table("events").with_schema("public");
-let stream = table
-    .append_stream()
-    .target_batch_bytes(4 * 1024 * 1024)
-    .max_batch_rows(10_000)
-    .flush_interval(Duration::from_secs(1))
-    .max_concurrent_batches(4)
-    .max_buffered_bytes(64 * 1024 * 1024)
-    .build()?;
-
-let admitted = stream
-    .send_all([
-        serde_json::json!({"id": 1, "name": "first"}),
-        serde_json::json!({"id": 2, "name": "second"}),
-    ])
-    .await?;
-println!("accepted locally: {} rows", admitted.accepted_rows);
-
-// Remote delivery barrier for every row accepted before this call.
-let report = stream.flush().await?;
-println!("committed remotely: {} rows", report.committed_rows);
-
-// Closes admission, flushes remaining rows, and settles in-flight requests.
-stream.shutdown().await?;
-# Ok(())
-# }
-```
-
-`AppendStream` targets 4 MiB of uncompressed NDJSON per batch by default. Set `target_batch_bytes` to customize the target, up to 8 MiB. A single row may exceed the target but must fit within the 8 MiB request limit.
-
-Every table append request contains at most 8 MiB of uncompressed NDJSON and 200,000 rows. `AppendStream` splits automatically at either limit.
-
-`send()` and `send_all()` wait for local admission capacity only; they do not wait for a remote commit. Feed an iterator sequentially instead of spawning one task per row, which would move the unbounded backlog outside the stream. `flush()` and `shutdown()` are remote delivery barriers.
-
-Once a `flush()` future has enqueued its barrier, dropping that future does not cancel remote settlement. Keep it alive to receive the interval report; if a task is cancelled, inspect `stats().last_report` and lifetime counters before deciding how to reconcile the covered rows.
-
-The default `AppendFailurePolicy::Stop` is strict: the first batch that exhausts retries or cannot be retried stops admission, and a successful barrier confirms that its accepted prefix was acknowledged as committed at least once. A failed barrier can include other batches that already committed; do not replay its entire input without reconciliation. Use `max_concurrent_batches(1)` for serial request submission; concurrent batches have no defined commit order.
-
-### Best-effort telemetry and logs
-
-Telemetry producers often cannot wait for admission or stop permanently after one unavailable batch. Opt into `Continue`, use `try_send()` on the hot path, and inspect settlement reports and lifetime stats.
-
-```rust
-use std::time::Duration;
-use scopedb_client::AppendDeliveryOutcome;
-use scopedb_client::AppendFailurePolicy;
-
-# async fn demo() -> Result<(), scopedb_client::Error> {
-# let client = scopedb_client::Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
-let telemetry = client
-    .table("events")
-    .append_stream()
-    .failure_policy(AppendFailurePolicy::Continue)
-    .flush_interval(Duration::from_secs(1))
-    .on_batch_failure(|event| eprintln!("append failure: {event:?}"))
-    .build()?;
-
-if let Err(error) = telemetry.try_send(&serde_json::json!({
-    "name": "request.completed",
-    "status": 200,
-})) {
-    // Send this diagnostic to a different sink.
-    eprintln!("telemetry row dropped locally: {error}");
-}
-
-let report = telemetry.shutdown().await?;
-if report.outcome != AppendDeliveryOutcome::Ok {
-    eprintln!("telemetry loss or ambiguity: {report:?}");
-}
-# Ok(())
-# }
-```
-
-`Ok(())` from `try_send()` still means local admission, not remote commit. It returns immediately with an error when serialization fails, the row is invalid or too large, the buffer is full, the circuit is open, or the stream is closed. Continue mode releases failed batches after accounting for them; it is not an in-memory retry queue.
-
-The circuit breaker rejects non-blocking `try_send()` calls while open. The backpressured `send()` path can still admit rows within the configured memory budget; their dispatch waits for the circuit probe, so use `try_send()` on latency-sensitive logging and telemetry paths.
-
-A continue-mode report classifies rows as committed, failed, unknown, or locally dropped. For accepted rows in a completed report:
-
-```text
-accepted_rows = committed_rows + failed_rows + unknown_rows
-```
-
-`AppendDeliveryOutcome::Partial` means at least one row committed while another row failed, was dropped, or remains unknown. With no committed rows, the outcome is `Unknown` when any batch may have committed and `Failed` otherwise. Only a loss-free report is `Ok`.
-
-`committed_rows` counts logical input rows with at least one successful acknowledgement, not the number of copies inserted. An unknown attempt followed by a successful retry counts as committed once. If an unknown attempt is followed only by failures, the batch remains unknown even when the last attempt was explicitly rejected. Error metadata and row details describe the last attempt; that rejection does not prove that earlier attempts did not commit.
-
-An in-memory stream is not a durable queue; use an outbox when payloads must survive process failure or be available for reconciliation.
-
-### Choose a delivery path
-
-| Workload                         | Admission and delivery                                | Example                                           |
-| -------------------------------- | ----------------------------------------------------- | ------------------------------------------------- |
-| One exact NDJSON payload         | Caller owns the request boundary                      | [`append.rs`][append-example]                     |
-| Basic asynchronous batching      | SDK owns batches; strict barriers                     | [`append_stream.rs`][append-stream-example]       |
-| Backfill or file import          | Bounded producer memory and concurrent strict batches | [`bulk_append.rs`][bulk-append-example]           |
-| Long-running logs and events     | Non-blocking continue mode with observable loss       | [`telemetry.rs`][telemetry-example]               |
-| SQL transformation before insert | Transform-oriented ingest stream                      | [`ingest_transform.rs`][ingest-transform-example] |
 
 ## Table helper
 
@@ -327,7 +245,7 @@ stream.shutdown().await?;
 
 ## Examples
 
-The [example guide][example-guide] includes setup, safety guards, delivery contracts, and runnable commands from the repository workspace root.
+The [example guide][example-guide] includes setup instructions and commands to run each example from the repository root.
 
 The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][rust-http-api]. Release history and the maintainer runbook are in [`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
 

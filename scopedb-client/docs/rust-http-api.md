@@ -134,7 +134,7 @@ A committed response is:
 }
 ```
 
-The Rust SDK accepts success only when `append_state` is `committed` and the inserted row count is valid. A malformed or contradictory success response has an unknown commit outcome.
+`num_rows_inserted` is the number of rows written.
 
 ### Structured append errors
 
@@ -163,34 +163,23 @@ An append failure uses this payload when the outcome is known:
 
 `row_index` is zero-based within the submitted NDJSON request. The server may truncate the row-error list; `row_errors_truncated` preserves that fact.
 
-Transport errors, response-body read failures, attempt timeouts, and malformed responses are classified as `unknown`, because the request may have reached the commit path. Replaying an unknown payload may insert duplicates.
+### Writing with the SDK
 
-By default, the asynchronous append stream retries the same HTTP batch after temporary rejections and transient unknown outcomes. Unknown outcomes are eligible when no HTTP status is available or when the response is HTTP 2xx, 408, 429, or 5xx. A successful batch has at-least-once delivery: retrying an earlier unknown attempt can insert duplicates. Permanent HTTP errors stop retries.
+Create a stream with `table.append_stream().build()`. The SDK converts Rust values to NDJSON and writes them in batches.
 
-The same retry rules apply with either the `Stop` or `Continue` failure policy. Direct `Table::append` and `Client::append_rows` return the structured error to the caller without a retry loop; their unknown errors remain non-retryable through `Error::is_retryable()`.
+| Method | Use |
+| --- | --- |
+| `send()` | Add one row to the SDK's pending writes. |
+| `send_all()` | Add rows from an iterator. |
+| `try_send()` | Try to add a row without waiting; check the returned result. |
+| `flush()` | Wait for pending writes while keeping the stream open. |
+| `shutdown()` | Wait for writing to complete and close the stream. |
 
-If any attempt was unknown, a final rejected attempt cannot prove that the batch never committed. The final batch outcome stays unknown unless a later attempt succeeds. Its HTTP metadata and row-error details describe the last attempt, and the original final error remains available as its cause.
+`send()` and `send_all()` add rows to the SDK without waiting for the writes to finish. Call `shutdown()` when you are done sending rows.
 
-### Client-side batching and barriers
+Set `.failure_policy(AppendFailurePolicy::Continue)` to keep the stream running after a batch fails. Read the report returned by `flush()` or `shutdown()` for the write results.
 
-`Table::append_stream` is a client-side batching layer over the rows endpoint; it is not a separate HTTP endpoint.
-
-- Every accepted Rust value is serialized to exactly one NDJSON line.
-- `send` and `send_all` wait for local admission capacity, not a remote commit.
-- `try_send` attempts local admission immediately.
-- `target_batch_bytes`, `max_batch_rows`, and the flush interval seal batches.
-- `max_concurrent_batches` bounds concurrent append requests.
-- `max_buffered_bytes` bounds accepted serialized data that has not settled.
-- `flush` settles all rows accepted before its barrier.
-- `shutdown` closes admission and settles the final accepted prefix.
-
-The older `batch_bytes`, `max_in_flight_requests`, and `max_pending_bytes` builder names remain source-compatible deprecated aliases.
-
-With the default `Stop` failure policy, a failed batch makes the stream terminal and barriers return an error. With `Continue`, rejected and unknown batches are accounted for and released so later batches can proceed. Continue-mode barriers return an `AppendDeliveryReport`; they do not imply that every row committed.
-
-A successful strict barrier confirms at least one commit acknowledgement for every covered row. `committed_rows` counts logical input rows, not copies inserted by retries. A failed barrier may include successful batches; replaying the entire covered input can duplicate rows.
-
-Concurrent batches do not have a defined commit order. Set the in-flight limit to one when requests must be submitted serially. Neither policy provides a stream-wide transaction, rollback, durable replay queue, or idempotency.
+See the [stream example](../README.md#write-with-a-stream) for a complete usage example.
 
 ## Statement API
 
@@ -293,6 +282,4 @@ Non-append non-2xx responses generally use:
 }
 ```
 
-The SDK distinguishes transport or deserialization errors, non-2xx server errors, structured append outcomes, and in-band statement terminal states. Direct server errors preserve their messages in `Error::message()`. When available, `http_status()`, `request_id()`, and `retry_after()` expose response metadata; `is_retryable()` includes an explicit `retryable` value from direct or nested error envelopes before falling back to HTTP status classification. Unknown append errors conservatively return false; append streams apply the separate delivery policy above.
-
-`Retry-After` accepts delta seconds and HTTP dates. Append streams use it for eligible batch retries and cap the delay at the configured maximum backoff.
+Use `Error::message()` to read the error message. When available, `http_status()`, `request_id()`, and `retry_after()` provide the HTTP status, request ID, and suggested retry delay.
