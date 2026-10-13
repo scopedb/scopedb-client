@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use fastrace_reqwest::traceparent_headers;
 use reqwest::IntoUrl;
 use reqwest::Method;
@@ -59,12 +61,14 @@ const JSON_CONTENT_ENCODING: &str = "zstd";
 const UNCOMPRESSED_CONTENT_LENGTH: &str = "X-ScopeDB-Uncompressed-Content-Length";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 pub(crate) const MAX_APPEND_BODY_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct Client {
     endpoint: Url,
     client: reqwest::Client,
     authorization: Option<HeaderValue>,
+    write_timeout: Duration,
 }
 
 /// Builds a ScopeDB client with an optional API key and custom HTTP client.
@@ -76,6 +80,7 @@ pub struct ClientBuilder {
     endpoint: String,
     client: Option<reqwest::Client>,
     api_key: Option<String>,
+    write_timeout: Duration,
 }
 
 impl std::fmt::Debug for ClientBuilder {
@@ -84,6 +89,7 @@ impl std::fmt::Debug for ClientBuilder {
             .field("endpoint", &self.endpoint)
             .field("client", &self.client)
             .field("has_api_key", &self.api_key.is_some())
+            .field("write_timeout", &self.write_timeout)
             .finish()
     }
 }
@@ -104,9 +110,37 @@ impl ClientBuilder {
         self
     }
 
+    /// Bounds each table append or transform-ingest HTTP request, including
+    /// reading the response body. Defaults to 30 seconds and must be nonzero.
+    /// The budget starts after local encoding, compression, and request preparation.
+    /// Stream `attempt_timeout` settings override this default. A timeout does
+    /// not roll back the write; its commit outcome can be unknown.
+    ///
+    /// Shorter timeouts on a custom HTTP client still apply.
+    pub fn write_timeout(mut self, timeout: Duration) -> Self {
+        self.write_timeout = timeout;
+        self
+    }
+
     /// Validates the endpoint and authentication settings and builds the client.
     pub fn build(self) -> Result<Client, Error> {
+        if self.write_timeout.is_zero() {
+            return Err(Error::new(
+                ErrorKind::ConfigInvalid,
+                "write_timeout must be greater than zero",
+            ));
+        }
+        if tokio::time::Instant::now()
+            .checked_add(self.write_timeout)
+            .is_none()
+        {
+            return Err(Error::new(
+                ErrorKind::ConfigInvalid,
+                "write_timeout is too large",
+            ));
+        }
         let mut client = Client::new(self.endpoint, self.client.unwrap_or_default())?;
+        client.write_timeout = self.write_timeout;
         if let Some(api_key) = self.api_key {
             if api_key.is_empty() {
                 return Err(Error::new(
@@ -136,6 +170,7 @@ impl Client {
             endpoint: endpoint.to_string(),
             client: None,
             api_key: None,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
         }
     }
 
@@ -154,6 +189,7 @@ impl Client {
                     endpoint,
                     client,
                     authorization: None,
+                    write_timeout: DEFAULT_WRITE_TIMEOUT,
                 })
             }
             Err(err) => Err(Error::new(
@@ -308,16 +344,17 @@ impl Client {
         table: &str,
         ndjson: impl Into<String>,
     ) -> Result<AppendRowsResult, Error> {
-        self.append_rows_request(database, schema, table, ndjson.into())
+        self.append_rows_with_timeout(database, schema, table, ndjson.into(), None)
             .await
     }
 
-    async fn append_rows_request(
+    pub(crate) async fn append_rows_with_timeout(
         &self,
         database: &str,
         schema: &str,
         table: &str,
         ndjson: String,
+        timeout: Option<Duration>,
     ) -> Result<AppendRowsResult, Error> {
         if ndjson.len() > MAX_APPEND_BODY_BYTES {
             return Err(append_rejected_error(format!(
@@ -350,32 +387,52 @@ impl Client {
             .request(Method::POST, url)
             .headers(traceparent_headers())
             .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
-            .header(reqwest::header::CONTENT_ENCODING, JSON_CONTENT_ENCODING);
-        let response = request.body(body).send().await.map_err(|err| {
-            append_unknown_error("failed to send table append request").set_source(err)
-        })?;
-
-        let status = response.status();
-        let headers = response.headers().clone();
-        let payload = response.bytes().await.map_err(|err| {
-            apply_response_metadata(
-                append_unknown_error("failed to read table append response").set_source(err),
-                status,
-                &headers,
-            )
-        })?;
-        let result = decode_append_response(status, &headers, &payload)?;
-        if result.num_rows_inserted != expected_rows as i64 {
-            return Err(apply_response_metadata(
-                append_unknown_error(format!(
+            .header(reqwest::header::CONTENT_ENCODING, JSON_CONTENT_ENCODING)
+            .body(body);
+        let mut status = None;
+        let mut headers = reqwest::header::HeaderMap::new();
+        tokio::time::timeout(timeout.unwrap_or(self.write_timeout), async {
+            let response = request.send().await.map_err(|err| {
+                let message = if err.is_timeout() {
+                    "table append request timed out; commit outcome is unknown"
+                } else {
+                    "failed to send table append request"
+                };
+                append_unknown_error(message).set_write_source(err)
+            })?;
+            let response_status = response.status();
+            status = Some(response_status);
+            headers = response.headers().clone();
+            let payload = response.bytes().await.map_err(|err| {
+                let message = if err.is_timeout() {
+                    "table append request timed out; commit outcome is unknown"
+                } else {
+                    "failed to read table append response"
+                };
+                append_unknown_error(message).set_write_source(err)
+            })?;
+            let result = decode_append_response(response_status, &headers, &payload)?;
+            if result.num_rows_inserted != expected_rows as i64 {
+                return Err(append_unknown_error(format!(
                     "table append response reported {} inserted rows for a {expected_rows}-row request",
                     result.num_rows_inserted
-                )),
-                status,
-                &headers,
-            ));
-        }
-        Ok(result)
+                )));
+            }
+            Ok(result)
+        })
+        .await
+        .unwrap_or_else(|err| {
+            Err(
+                append_unknown_error("table append request timed out; commit outcome is unknown")
+                    .set_write_source(err),
+            )
+        })
+        .map_err(|err| match status {
+            Some(status) if err.http_status().is_none() => {
+                apply_response_metadata(err, status, &headers)
+            }
+            _ => err,
+        })
     }
 
     pub async fn insert(&self, rows: String, transform: String) -> Result<IngestResult, Error> {
@@ -388,7 +445,9 @@ impl Client {
             .await?
         {
             Response::Success(result) => Ok(result),
-            Response::Failed(err) => Err(map_failed_response(err)),
+            // Transform ingest does not report whether a failed request committed.
+            // An HTTP retry hint alone cannot make replay safe.
+            Response::Failed(err) => Err(map_failed_response(err).set_permanent()),
         }
     }
 }
@@ -493,19 +552,46 @@ impl Client {
     ) -> Result<Response<IngestResult>, Error> {
         let format = request.data.format();
         let url = self.make_url("v1/ingest")?;
-        let response = self
+        let request = self
             .post_json(url, &request)?
-            .headers(traceparent_headers())
-            .send()
-            .await
-            .map_err(|err| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    format!("failed to ingest data in {format}"),
-                )
-                .set_source(err)
+            .headers(traceparent_headers());
+        let mut status = None;
+        let mut headers = reqwest::header::HeaderMap::new();
+        tokio::time::timeout(self.write_timeout, async {
+            let response = request.send().await.map_err(|err| {
+                ingest_unknown_error(format!(
+                    "failed to ingest data in {format}; commit outcome is unknown"
+                ))
+                .set_write_source(err)
             })?;
-        Response::from_http_response(response).await
+            status = Some(response.status());
+            headers = response.headers().clone();
+            let result: Response<IngestResult> = Response::from_http_response(response)
+                .await
+                .map_err(|err| {
+                    ingest_unknown_error("failed to read ingest response; commit outcome is unknown")
+                        .set_write_source(err)
+                })?;
+            if let Response::Success(result) = &result
+                && result.num_rows_inserted < 0
+            {
+                return Err(ingest_unknown_error(
+                    "ingest response reported negative num_rows_inserted; commit outcome is unknown",
+                ));
+            }
+            Ok(result)
+        })
+        .await
+        .unwrap_or_else(|err| {
+            Err(ingest_unknown_error("ingest request timed out; commit outcome is unknown")
+                .set_write_source(err))
+        })
+        .map_err(|err| match status {
+            Some(status) if err.http_status().is_none() => {
+                apply_response_metadata(err, status, &headers)
+            }
+            _ => err,
+        })
     }
 
     #[track_caller]
@@ -641,6 +727,10 @@ fn decode_append_response(
     Err(error)
 }
 
+fn ingest_unknown_error(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::Unexpected, message).set_persistent()
+}
+
 fn append_unknown_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::AppendRowsFailed, message)
         .set_append_details(AppendErrorDetails {
@@ -705,6 +795,21 @@ mod tests {
             .build()
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ConfigInvalid);
+    }
+
+    #[test]
+    fn write_timeout_defaults_and_validation() {
+        let client = Client::new("https://example.com", reqwest::Client::new()).unwrap();
+        assert_eq!(client.write_timeout, std::time::Duration::from_secs(30));
+        let client = Client::builder("https://example.com").build().unwrap();
+        assert_eq!(client.write_timeout, std::time::Duration::from_secs(30));
+        for timeout in [std::time::Duration::ZERO, std::time::Duration::MAX] {
+            let error = Client::builder("https://example.com")
+                .write_timeout(timeout)
+                .build()
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ConfigInvalid);
+        }
     }
 
     #[test]

@@ -44,6 +44,8 @@ pub use client::Client;
 pub use client::ClientBuilder;
 pub use error::Error;
 pub use error::ErrorKind;
+pub use error::WriteErrorDetails;
+pub use error::WriteErrorReason;
 pub use ingest_stream::IngestStream;
 pub use ingest_stream::IngestStreamBuilder;
 pub use protocol::AppendErrorDetails;

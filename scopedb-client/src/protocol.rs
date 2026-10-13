@@ -29,7 +29,7 @@ use crate::Error;
 use crate::ErrorKind;
 use crate::ResultSet;
 
-/// The commit outcome reported by the table append API.
+/// The commit outcome used by table append responses and client-side write interruptions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppendState {

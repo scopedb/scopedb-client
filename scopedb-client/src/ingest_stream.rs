@@ -49,8 +49,14 @@ enum FatalStatus {
 
 #[derive(Debug, Clone)]
 struct FatalState {
+    kind: ErrorKind,
     message: String,
     status: FatalStatus,
+    write_details: Option<crate::WriteErrorDetails>,
+    http_status: Option<reqwest::StatusCode>,
+    request_id: Option<String>,
+    retry_after: Option<Duration>,
+    diagnostics: crate::error::ErrorDiagnostics,
 }
 
 impl FatalState {
@@ -64,13 +70,31 @@ impl FatalState {
         };
 
         Self {
-            message: error.to_string(),
+            kind: error.kind(),
+            message: error.message().to_string(),
             status,
+            write_details: error.write_details().copied(),
+            http_status: error.http_status(),
+            request_id: error.request_id().map(str::to_string),
+            retry_after: error.retry_after(),
+            diagnostics: error.diagnostics(),
         }
     }
 
     fn into_error(self) -> Error {
-        let error = Error::new(ErrorKind::Unexpected, self.message);
+        let mut error = Error::new(self.kind, self.message).with_diagnostics(self.diagnostics);
+        if let Some(details) = self.write_details {
+            error = error.set_write_details(details);
+        }
+        if let Some(status) = self.http_status {
+            error = error.set_http_status(status);
+        }
+        if let Some(request_id) = self.request_id {
+            error = error.set_request_id(request_id);
+        }
+        if let Some(retry_after) = self.retry_after {
+            error = error.set_retry_after(retry_after);
+        }
         match self.status {
             FatalStatus::Temporary => error.set_temporary(),
             FatalStatus::Persistent => error.set_persistent(),
