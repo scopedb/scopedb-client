@@ -51,7 +51,6 @@ const DEFAULT_MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_MAX_RETRIES: usize = 8;
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(5);
-const DEFAULT_CONTINUE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD: usize = 5;
 const DEFAULT_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(30);
 
@@ -388,7 +387,8 @@ impl AppendStreamBuilder {
         self
     }
 
-    /// Sets a timeout for each HTTP attempt. A timeout has an unknown commit outcome.
+    /// Sets a timeout for each HTTP attempt, overriding the client's write timeout.
+    /// A timeout has an unknown commit outcome. By default the client uses 30 seconds.
     pub fn attempt_timeout(mut self, attempt_timeout: Duration) -> Self {
         self.attempt_timeout = Some(attempt_timeout);
         self
@@ -419,10 +419,6 @@ impl AppendStreamBuilder {
             .set_source(err)
         })?;
 
-        let attempt_timeout = self.attempt_timeout.or_else(|| {
-            (self.failure_policy == AppendFailurePolicy::Continue)
-                .then_some(DEFAULT_CONTINUE_ATTEMPT_TIMEOUT)
-        });
         Ok(AppendStream::new(AppendStreamConfig {
             client: self.client,
             database: self.database,
@@ -436,7 +432,7 @@ impl AppendStreamBuilder {
             max_in_flight_requests: self.max_in_flight_requests,
             retry: self.retry,
             failure_policy: self.failure_policy,
-            attempt_timeout,
+            attempt_timeout: self.attempt_timeout,
             circuit_breaker: self.circuit_breaker,
             batch_failure_listeners: self.batch_failure_listeners,
         }))
@@ -1146,6 +1142,7 @@ struct StreamErrorSnapshot {
     message: String,
     status: SnapshotStatus,
     append_details: Option<AppendErrorDetails>,
+    write_details: Option<crate::WriteErrorDetails>,
     http_status: Option<reqwest::StatusCode>,
     request_id: Option<String>,
     retry_after: Option<Duration>,
@@ -1166,6 +1163,7 @@ impl StreamErrorSnapshot {
             message: error.message().to_string(),
             status,
             append_details: error.append_details().cloned(),
+            write_details: error.write_details().copied(),
             http_status: error.http_status(),
             request_id: error.request_id().map(str::to_string),
             retry_after: error.retry_after(),
@@ -1178,6 +1176,9 @@ impl StreamErrorSnapshot {
             Error::new(self.kind, self.message.clone()).with_diagnostics(self.diagnostics.clone());
         if let Some(details) = self.append_details.clone() {
             error = error.set_append_details(details);
+        }
+        if let Some(details) = self.write_details {
+            error = error.set_write_details(details);
         }
         if let Some(status) = self.http_status {
             error = error.set_http_status(status);
@@ -1759,23 +1760,16 @@ async fn append_batch(
     let mut backoff = request.retry.initial_backoff;
     let mut saw_unknown = false;
     loop {
-        let append = request.client.append_rows(
-            &request.database,
-            &request.schema,
-            &request.table,
-            payload.clone(),
-        );
-        let result = if let Some(timeout) = request.attempt_timeout {
-            match tokio::time::timeout(timeout, append).await {
-                Ok(result) => result,
-                Err(error) => Err(unknown_append_error(
-                    "append request timed out; commit outcome is unknown",
-                    Some(error),
-                )),
-            }
-        } else {
-            append.await
-        };
+        let result = request
+            .client
+            .append_rows_with_timeout(
+                &request.database,
+                &request.schema,
+                &request.table,
+                payload.clone(),
+                request.attempt_timeout,
+            )
+            .await;
 
         let error = match result {
             Ok(result) => return (Ok(result), retries),
@@ -1803,6 +1797,9 @@ async fn append_batch(
 }
 
 fn append_retryable(error: &Error) -> bool {
+    if error.write_details().is_some() {
+        return false;
+    }
     match error.append_details().map(|details| details.append_state) {
         Some(AppendState::Rejected) => error.is_temporary(),
         Some(AppendState::Unknown) => error.http_status().is_none_or(|status| {
@@ -2033,7 +2030,14 @@ mod tests {
         body: String,
         delay: Duration,
         headers: Vec<(&'static str, String)>,
-        disconnect: bool,
+        body_delay: Duration,
+        disconnect: Option<MockDisconnect>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum MockDisconnect {
+        BeforeHeaders,
+        DuringBody,
     }
 
     impl MockResponse {
@@ -2043,7 +2047,8 @@ mod tests {
                 body: body.into(),
                 delay: Duration::ZERO,
                 headers: Vec::new(),
-                disconnect: false,
+                body_delay: Duration::ZERO,
+                disconnect: None,
             }
         }
 
@@ -2070,7 +2075,17 @@ mod tests {
         }
 
         fn without_ack(mut self) -> Self {
-            self.disconnect = true;
+            self.disconnect = Some(MockDisconnect::BeforeHeaders);
+            self
+        }
+
+        fn with_body_delay(mut self, delay: Duration) -> Self {
+            self.body_delay = delay;
+            self
+        }
+
+        fn with_disconnect(mut self, disconnect: MockDisconnect) -> Self {
+            self.disconnect = Some(disconnect);
             self
         }
     }
@@ -2145,6 +2160,14 @@ mod tests {
             Client::new(&self.endpoint, http_client).unwrap()
         }
 
+        fn client_with_write_timeout(&self, timeout: Duration) -> Client {
+            Client::builder(&self.endpoint)
+                .http_client(reqwest::Client::builder().no_proxy().build().unwrap())
+                .write_timeout(timeout)
+                .build()
+                .unwrap()
+        }
+
         fn requests(&self) -> Vec<RecordedRequest> {
             lock(&self.requests).clone()
         }
@@ -2190,7 +2213,7 @@ mod tests {
         if !response.delay.is_zero() {
             thread::sleep(response.delay);
         }
-        if response.disconnect {
+        if matches!(response.disconnect, Some(MockDisconnect::BeforeHeaders)) {
             active.fetch_sub(1, Ordering::AcqRel);
             return;
         }
@@ -2207,14 +2230,24 @@ mod tests {
             .map(|(name, value)| format!("{name}: {value}\r\n"))
             .collect::<String>();
         let wire = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n",
             response.status,
             reason,
             response.body.len(),
             headers,
-            response.body
         );
         let _ = stream.write_all(wire.as_bytes());
+        let _ = stream.flush();
+        if !response.body_delay.is_zero() {
+            thread::sleep(response.body_delay);
+        }
+        let body = response.body.as_bytes();
+        let body = if matches!(response.disconnect, Some(MockDisconnect::DuringBody)) {
+            &body[..body.len().min(1)]
+        } else {
+            body
+        };
+        let _ = stream.write_all(body);
         let _ = stream.flush();
         active.fetch_sub(1, Ordering::AcqRel);
     }
@@ -2997,6 +3030,361 @@ mod tests {
         assert_eq!(report.outcome, AppendDeliveryOutcome::Unknown);
         assert_eq!(report.unknown_rows, 1);
         assert_eq!(report.retries, 0);
+    }
+
+    #[tokio::test]
+    async fn write_timeout_bounds_direct_append_and_ingest_including_response_body() {
+        for ingest in [false, true] {
+            for body_delay in [false, true] {
+                let server = MockServer::start(move |_, _| {
+                    let response = MockResponse::json(
+                        200,
+                        r#"{"append_state":"committed","num_rows_inserted":1}"#,
+                    );
+                    if body_delay {
+                        response.with_body_delay(Duration::from_millis(150))
+                    } else {
+                        response.with_delay(Duration::from_millis(150))
+                    }
+                });
+                let client = server.client_with_write_timeout(Duration::from_millis(50));
+                let error = if ingest {
+                    client
+                        .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
+                        .await
+                        .unwrap_err()
+                } else {
+                    client
+                        .table("events")
+                        .append("{\"id\":1}".to_string())
+                        .await
+                        .unwrap_err()
+                };
+                assert!(!error.is_retryable());
+                assert_write_timeout_contract(&error);
+                let source = std::error::Error::source(&error).unwrap();
+                assert!(source.is::<tokio::time::error::Elapsed>());
+                if !ingest {
+                    assert_eq!(
+                        error.append_details().unwrap().append_state,
+                        AppendState::Unknown
+                    );
+                }
+                if body_delay {
+                    assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
+                }
+                assert_eq!(server.requests().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn append_stream_policies_inherit_the_client_write_timeout() {
+        for policy in [AppendFailurePolicy::Stop, AppendFailurePolicy::Continue] {
+            let server = MockServer::start(|_, request| {
+                MockResponse::committed(request).with_delay(Duration::from_millis(150))
+            });
+            let stream = server
+                .client_with_write_timeout(Duration::from_millis(50))
+                .table("events")
+                .append_stream()
+                .failure_policy(policy)
+                .build()
+                .unwrap();
+            stream.send(&serde_json::json!({"id":1})).await.unwrap();
+            let result = stream.shutdown().await;
+            if policy == AppendFailurePolicy::Continue {
+                let report = result.unwrap();
+                assert_eq!(report.outcome, AppendDeliveryOutcome::Unknown);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.append_details().unwrap().append_state,
+                    AppendState::Unknown
+                );
+                assert_write_timeout_contract(&error);
+                assert_write_timeout_contract(&stream.flush().await.unwrap_err());
+            }
+            assert_eq!(stream.stats().unknown_rows, 1);
+            assert_eq!(stream.stats().retries, 0);
+            assert_eq!(server.requests().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_timeout_can_exceed_the_client_write_timeout() {
+        let server = MockServer::start(|_, request| {
+            MockResponse::committed(request).with_delay(Duration::from_millis(50))
+        });
+        let stream = server
+            .client_with_write_timeout(Duration::from_millis(10))
+            .table("events")
+            .append_stream()
+            .attempt_timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        stream.send(&serde_json::json!({"id":1})).await.unwrap();
+        assert_eq!(stream.shutdown().await.unwrap().committed_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn write_timeout_preserves_a_shorter_custom_http_timeout() {
+        for ingest in [false, true] {
+            for body_delay in [false, true] {
+                let server = MockServer::start(move |_, _| {
+                    let response = MockResponse::json(
+                        200,
+                        r#"{"append_state":"committed","num_rows_inserted":1}"#,
+                    );
+                    if body_delay {
+                        response.with_body_delay(Duration::from_millis(150))
+                    } else {
+                        response.with_delay(Duration::from_millis(150))
+                    }
+                });
+                let http = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_millis(50))
+                    .build()
+                    .unwrap();
+                let client = Client::builder(&server.endpoint)
+                    .http_client(http)
+                    .write_timeout(Duration::from_secs(1))
+                    .build()
+                    .unwrap();
+                let error = if ingest {
+                    client
+                        .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
+                        .await
+                        .unwrap_err()
+                } else {
+                    client
+                        .table("events")
+                        .append("{\"id\":1}".to_string())
+                        .await
+                        .unwrap_err()
+                };
+                let mut source = std::error::Error::source(&error);
+                let mut transport_timeout = false;
+                while let Some(error) = source {
+                    transport_timeout |= error
+                        .downcast_ref::<reqwest::Error>()
+                        .is_some_and(reqwest::Error::is_timeout);
+                    source = error.source();
+                }
+                assert!(
+                    transport_timeout,
+                    "the native transport cause must remain available"
+                );
+                assert_write_timeout_contract(&error);
+                if body_delay {
+                    assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
+                }
+                assert_eq!(server.requests().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_stream_inherits_the_client_write_timeout_without_retrying() {
+        let server = MockServer::start(|_, _| {
+            MockResponse::json(200, r#"{"num_rows_inserted":1}"#)
+                .with_delay(Duration::from_millis(150))
+        });
+        let stream = server
+            .client_with_write_timeout(Duration::from_millis(50))
+            .ingest_stream("SELECT $0")
+            .build();
+        stream.send(&serde_json::json!({"id":1})).await.unwrap();
+        let error = stream.shutdown().await.unwrap_err();
+        assert!(!error.is_retryable());
+        assert_write_timeout_contract(&error);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingest_failures_preserve_diagnostics_in_queued_and_later_operations() {
+        for timed_out in [false, true] {
+            let status = if timed_out { 200 } else { 503 };
+            let server = MockServer::start(move |_, _| {
+                let response = MockResponse::json(
+                    status,
+                    r#"{"message":"ingest unavailable","request_id":"failed-ingest","retryable":true}"#,
+                );
+                if timed_out {
+                    response.with_body_delay(Duration::from_millis(150))
+                } else {
+                    response
+                }
+            });
+            let timeout = if timed_out {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_secs(1)
+            };
+            let stream = server
+                .client_with_write_timeout(timeout)
+                .ingest_stream("SELECT $0")
+                .max_pending_bytes(9)
+                .build();
+            stream.send(&serde_json::json!({"id":1})).await.unwrap();
+            let next_row = serde_json::json!({"id":2});
+            let (first_flush, next_flush, blocked_send) =
+                tokio::join!(stream.flush(), stream.flush(), stream.send(&next_row));
+            let errors = [
+                first_flush.unwrap_err(),
+                next_flush.unwrap_err(),
+                blocked_send.unwrap_err(),
+                stream.shutdown().await.unwrap_err(),
+            ];
+            for error in errors {
+                assert_eq!(error.kind(), crate::ErrorKind::Unexpected);
+                assert_eq!(error.http_status().unwrap().as_u16(), status);
+                assert!(!error.is_retryable());
+                if timed_out {
+                    assert!(error.message().contains("commit outcome is unknown"));
+                    assert!(error.is_persistent());
+                    assert_write_timeout_contract(&error);
+                } else {
+                    assert_eq!(error.message(), "ingest unavailable");
+                    assert_eq!(error.request_id(), Some("failed-ingest"));
+                }
+            }
+            assert_eq!(server.requests().len(), 1);
+        }
+    }
+
+    fn assert_write_timeout_contract(error: &crate::Error) {
+        let details = error.write_details().unwrap();
+        assert_eq!(details.reason, crate::WriteErrorReason::Timeout);
+        assert_eq!(details.outcome, AppendState::Unknown);
+        assert!(!error.is_retryable());
+        assert_eq!(
+            serde_json::to_value(details).unwrap(),
+            serde_json::json!({"reason":"timeout","outcome":"unknown"})
+        );
+    }
+
+    #[tokio::test]
+    async fn write_timeout_starts_after_materializing_the_request() {
+        struct SlowPayload;
+        impl From<SlowPayload> for String {
+            fn from(_: SlowPayload) -> Self {
+                thread::sleep(Duration::from_millis(100));
+                "{\"id\":1}".to_string()
+            }
+        }
+        let server = MockServer::start(|_, request| MockResponse::committed(request));
+        let result = server
+            .client_with_write_timeout(Duration::from_millis(50))
+            .append_rows("scopedb", "public", "events", SlowPayload)
+            .await
+            .unwrap();
+        assert_eq!(result.num_rows_inserted, 1);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn server_timeout_rejection_remains_safely_retryable() {
+        let server = MockServer::start(|_, _| {
+            MockResponse::json(
+                408,
+                r#"{"message":"admission timed out","append_state":"rejected","retryable":true}"#,
+            )
+        });
+        let error = server
+            .client()
+            .table("events")
+            .append("{\"id\":1}".to_string())
+            .await
+            .unwrap_err();
+        assert!(error.write_details().is_none());
+        assert_eq!(
+            error.append_details().unwrap().append_state,
+            AppendState::Rejected
+        );
+        assert!(error.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn ingest_http_failures_do_not_replay_even_with_retry_hints() {
+        for status in [408, 429, 500, 503] {
+            let server = MockServer::start(move |_, _| {
+                MockResponse::json(
+                    status,
+                    r#"{"message":"ingest unavailable","request_id":"ingest-request","retryable":true}"#,
+                )
+            });
+            let client = server.client();
+            let error = client
+                .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
+                .await
+                .unwrap_err();
+            assert!(!error.is_retryable());
+            assert_eq!(error.message(), "ingest unavailable");
+            assert_eq!(error.http_status().unwrap().as_u16(), status);
+            assert_eq!(error.request_id(), Some("ingest-request"));
+
+            let stream = client.ingest_stream("SELECT $0").max_retries(5).build();
+            stream.send(&serde_json::json!({"id":1})).await.unwrap();
+            assert!(!stream.shutdown().await.unwrap_err().is_retryable());
+            assert_eq!(server.requests().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_invalid_success_bodies_have_unknown_outcomes() {
+        for body in [
+            "{",
+            "null",
+            "{}",
+            r#"{"num_rows_inserted":null}"#,
+            r#"{"num_rows_inserted":"1"}"#,
+            r#"{"num_rows_inserted":-1}"#,
+        ] {
+            let server = MockServer::start(move |_, _| MockResponse::json(200, body));
+            let client = server.client();
+            let error = client
+                .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
+                .await
+                .unwrap_err();
+            assert!(!error.is_retryable());
+            assert!(error.message().contains("commit outcome is unknown"));
+            assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
+
+            let stream = client.ingest_stream("SELECT $0").max_retries(5).build();
+            stream.send(&serde_json::json!({"id":1})).await.unwrap();
+            let error = stream.shutdown().await.unwrap_err();
+            assert!(!error.is_retryable());
+            assert!(error.message().contains("commit outcome is unknown"));
+            assert_eq!(server.requests().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_connection_loss_after_receiving_rows_is_not_replayed() {
+        for disconnect in [MockDisconnect::BeforeHeaders, MockDisconnect::DuringBody] {
+            let server = MockServer::start(move |_, _| {
+                MockResponse::json(200, r#"{"num_rows_inserted":1}"#).with_disconnect(disconnect)
+            });
+            let client = server.client();
+            let error = client
+                .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
+                .await
+                .unwrap_err();
+            assert!(!error.is_retryable());
+            assert!(error.message().contains("commit outcome is unknown"));
+            if matches!(disconnect, MockDisconnect::DuringBody) {
+                assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
+            }
+
+            let stream = client.ingest_stream("SELECT $0").max_retries(5).build();
+            stream.send(&serde_json::json!({"id":1})).await.unwrap();
+            let error = stream.shutdown().await.unwrap_err();
+            assert!(!error.is_retryable());
+            assert!(error.message().contains("commit outcome is unknown"));
+            assert_eq!(server.requests().len(), 2);
+        }
     }
 
     #[tokio::test]

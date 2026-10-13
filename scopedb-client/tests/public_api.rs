@@ -26,8 +26,23 @@ fn ergonomic_client_builder_is_public() {
     scopedb_client::Client::builder("http://127.0.0.1:6543")
         .api_key("test-key")
         .http_client(scopedb_client::reqwest::Client::new())
+        .write_timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap();
+}
+
+#[test]
+fn structured_write_error_contract_is_public() {
+    let error = scopedb_client::Error::new(scopedb_client::ErrorKind::Unexpected, "example");
+    let _details: Option<&scopedb_client::WriteErrorDetails> = error.write_details();
+    assert_eq!(
+        scopedb_client::WriteErrorReason::Timeout.to_string(),
+        "timeout"
+    );
+    assert_eq!(
+        scopedb_client::WriteErrorReason::Cancelled.to_string(),
+        "cancelled"
+    );
 }
 
 #[allow(dead_code)]

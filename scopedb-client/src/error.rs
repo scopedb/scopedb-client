@@ -18,6 +18,7 @@ use std::time::Duration;
 use reqwest::StatusCode;
 
 use crate::protocol::AppendErrorDetails;
+use crate::protocol::AppendState;
 use crate::protocol::StatementErrorDetails;
 
 /// ErrorKind is all kinds of Error of ScopeDB client.
@@ -36,6 +37,35 @@ pub enum ErrorKind {
 
     /// A statement reached a failed or cancelled terminal state.
     StatementFailed,
+}
+
+/// The client-side reason an in-flight write was interrupted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WriteErrorReason {
+    /// A client or transport deadline expired.
+    Timeout,
+    /// The caller cancelled an in-flight write.
+    Cancelled,
+}
+
+impl fmt::Display for WriteErrorReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+        })
+    }
+}
+
+/// Details of an interrupted write. An unknown outcome may have committed and
+/// must not be automatically replayed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct WriteErrorDetails {
+    pub reason: WriteErrorReason,
+    pub outcome: AppendState,
 }
 
 impl ErrorKind {
@@ -76,11 +106,12 @@ enum ErrorStatus {
     ///
     /// Users CAN retry the operation to resolve it.
     Temporary,
-    /// Persistent means this error used to be temporary but still failed after retry.
+    /// Persistent means the error is not classified as retryable.
     ///
-    /// For example, underlying services kept returning network errors.
+    /// For example, a retry budget was exhausted or a write has an unknown outcome.
     ///
-    /// Users MAY retry this operation, but it's highly possible to error again.
+    /// Append streams may explicitly replay transient unknown outcomes under
+    /// their delivery policy. Client timeouts are never automatically replayed.
     Persistent,
 }
 
@@ -114,6 +145,7 @@ pub struct Error {
     status: ErrorStatus,
     context: Vec<(&'static str, String)>,
     append_details: Option<AppendErrorDetails>,
+    write_details: Option<WriteErrorDetails>,
     statement_details: Option<Box<StatementErrorDetails>>,
     http_metadata: Option<Box<HttpErrorMetadata>>,
 
@@ -152,6 +184,14 @@ impl fmt::Display for Error {
             write!(f, ", retry_after: {retry_after:?}")?;
         }
 
+        if let Some(details) = self.write_details() {
+            write!(
+                f,
+                ", write_reason: {}, write_outcome: {}",
+                details.reason, details.outcome
+            )?;
+        }
+
         if let Some(source) = &self.source {
             write!(f, ", source: {source}")?;
         }
@@ -170,6 +210,7 @@ impl fmt::Debug for Error {
             de.field("status", &self.status);
             de.field("context", &self.context);
             de.field("append_details", &self.append_details);
+            de.field("write_details", &self.write_details);
             de.field("statement_details", &self.statement_details);
             de.field("http_metadata", &self.http_metadata);
             de.field("source", &self.source);
@@ -188,6 +229,13 @@ impl fmt::Debug for Error {
         }
         if let Some(retry_after) = self.retry_after() {
             write!(f, ", retry_after: {retry_after:?}")?;
+        }
+        if let Some(details) = self.write_details() {
+            write!(
+                f,
+                ", write_reason: {}, write_outcome: {}",
+                details.reason, details.outcome
+            )?;
         }
         writeln!(f)?;
 
@@ -224,6 +272,7 @@ impl Error {
             status: ErrorStatus::Permanent,
             context: Vec::default(),
             append_details: None,
+            write_details: None,
             statement_details: None,
             http_metadata: None,
             source: None,
@@ -258,6 +307,25 @@ impl Error {
     pub(crate) fn with_diagnostics(mut self, diagnostics: ErrorDiagnostics) -> Self {
         self.context = diagnostics.context;
         self.source = diagnostics.source;
+        self
+    }
+
+    pub(crate) fn set_write_source(mut self, src: impl Into<anyhow::Error>) -> Self {
+        let source = src.into();
+        if self.write_details.is_none() {
+            self.write_details = write_error_details_from_source(source.as_ref());
+        }
+        self.set_source(source)
+    }
+
+    /// Returns client timeout or cancellation details after sending began.
+    /// Existing error kinds, sources, and HTTP diagnostics remain available.
+    pub fn write_details(&self) -> Option<&WriteErrorDetails> {
+        self.write_details.as_ref()
+    }
+
+    pub(crate) fn set_write_details(mut self, details: WriteErrorDetails) -> Self {
+        self.write_details = Some(details);
         self
     }
 
@@ -373,4 +441,29 @@ impl Error {
     pub fn is_persistent(&self) -> bool {
         self.status == ErrorStatus::Persistent
     }
+}
+
+fn write_error_details_from_source(
+    source: &(dyn std::error::Error + 'static),
+) -> Option<WriteErrorDetails> {
+    let mut current = Some(source);
+    while let Some(error) = current {
+        if error.is::<tokio::time::error::Elapsed>()
+            || error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_timeout)
+        {
+            return Some(WriteErrorDetails {
+                reason: WriteErrorReason::Timeout,
+                outcome: AppendState::Unknown,
+            });
+        }
+        if let Some(error) = error.downcast_ref::<Error>()
+            && error.write_details.is_some()
+        {
+            return error.write_details;
+        }
+        current = error.source();
+    }
+    None
 }

@@ -26,6 +26,23 @@ let client = Client::builder("http://127.0.0.1:6543")
 
 Applications that own TLS, proxy, timeout, or pooling settings can pass a compatible HTTP client through `.http_client(...)`. `Client::new(endpoint, http_client)` remains available when authentication is already configured on that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to avoid dependency-version mismatches.
 
+Every table append and transform-ingest HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Configure it with `Client::builder(endpoint).write_timeout(Duration::from_secs(60))` before `build()`; it must be nonzero. `Client::new` uses the same default. Streams inherit the client timeout unless an append stream explicitly sets `attempt_timeout`. Shorter timeouts on a custom HTTP client still apply. Admission, retry backoff, and an entire `flush()`/`shutdown()` barrier are outside this budget.
+
+Client timeouts after an HTTP attempt begins preserve the existing error kind and source and add `Error::write_details()` with `reason: WriteErrorReason::Timeout` and `outcome: AppendState::Unknown`; `is_retryable()` is false. The structured details, source, and HTTP diagnostics remain available on subsequent errors returned by the stream and batch failure events. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams retain their existing at-least-once retry policy for other transient unknown outcomes; those retries may duplicate committed rows.
+
+```rust
+use scopedb_client::{AppendState, WriteErrorReason};
+# fn inspect(error: &scopedb_client::Error) {
+if let Some(details) = error.write_details() {
+    if details.reason == WriteErrorReason::Timeout {
+        assert_eq!(details.outcome, AppendState::Unknown);
+        assert!(!error.is_retryable());
+        eprintln!("write may have committed; reconcile before replaying");
+    }
+}
+# }
+```
+
 Statement and transform-ingest JSON request bodies and all table append requests use zstd compression by default. The default HTTP client also negotiates compressed responses. Append limits are based on the uncompressed NDJSON body.
 
 The runnable examples read authentication from `SCOPEDB_API_KEY`. For backward compatibility, they fall back to `SCOPEDB_TOKEN` when the API key variable is unset or empty. The builder marks the resulting authorization header as sensitive so standard header and request `Debug` formatting redacts the credential.
@@ -217,6 +234,8 @@ println!("columns = {}", description.columns.len());
 ## Transform-oriented ingest
 
 `IngestStream` remains useful when input JSON needs a SQL transform before insertion. Prefer `Table::append` or `Table::append_stream` when records already match the destination table.
+
+Transform ingest does not report a rejected-versus-unknown commit state. Failed requests are therefore never automatically retried, including HTTP 429/5xx, transport errors, timeouts, and invalid success responses. A failed stream closes admission and rejects its pending `flush()` and `shutdown()` barriers. Later operations preserve the terminal error's HTTP status, request ID, and `Retry-After` diagnostics. Check the destination before replaying data that may already have committed; use a durable outbox when payloads must survive process failure.
 
 ```rust
 # async fn demo() -> Result<(), scopedb_client::Error> {
