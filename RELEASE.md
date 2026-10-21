@@ -2,6 +2,12 @@
 
 Rust SDK releases are published from a clean `main` checkout after the release PR has merged. The crate version, changelog entry, Git tag, and crates.io version must all match. Tags with the legacy `rust/vX.Y.Z` form were retained only to preserve release history from the former monorepo; new releases use `vX.Y.Z`.
 
+## Changelog format
+
+Use `# Changelog` with a short introduction, an `## Unreleased` section, and `## vX.Y.Z (YYYY-MM-DD)` release headings. Preserve published version numbers and dates. Use `*` bullets with one coherent, user-observable change per source line. Order nonempty sections as `Breaking Changes`, `New Features`, `Bug Fixes`, and `Improvements`.
+
+Compare each entry with the latest released version. Explain the impact and migration path for breaking changes, and describe deprecations alongside their replacements. Include documentation or metadata changes when they affect users; omit internal tests, refactors, and CI maintenance. GitHub release notes should use the matching changelog entry.
+
 ## Prepare
 
 1. Set the SDK version without a leading `v`, then confirm that exact version is not already present on crates.io:
