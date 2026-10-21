@@ -1,28 +1,56 @@
 # ScopeDB SDK for Rust
 
-`scopedb-client` is an async Rust client for ScopeDB. It supports statements, read-only REST catalog discovery, direct NDJSON table appends, bounded concurrent streaming writes, and transform-oriented JSON ingest.
+[![Version](https://img.shields.io/crates/v/scopedb-client)](https://crates.io/crates/scopedb-client) [![Docs](https://img.shields.io/badge/docs-scopedb.io-blue)](https://www.scopedb.io/docs/developer/rust) [![CI](https://img.shields.io/github/actions/workflow/status/scopedb/scopedb-client/ci.yml?branch=main&label=CI)](https://github.com/scopedb/scopedb-client/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://www.apache.org/licenses/LICENSE-2.0)
+
+The official async Rust client for [ScopeDB](https://www.scopedb.io). Run ScopeQL queries, browse the catalog, and write rows with bounded concurrent streams. For application writes, start with `Table::append_stream`.
+
+## Runtime support
+
+Requires Rust 1.91.0 or later and a Tokio runtime. Use the SDK in a trusted server-side process and keep API keys out of source control.
 
 ## Installation
 
-`scopedb-client` requires Rust 1.91.0 or later.
+From your application crate:
 
 ```sh
 cargo add scopedb-client serde_json
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-## Create a client
+## Quickstart
 
-Use the builder for the common API-key path. An API key is a server credential: keep it in a trusted process and never compile or return it to an untrusted client.
+Set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` using the [connection guide](https://www.scopedb.io/docs/guides/connect-to-scopedb). Save this program as `src/main.rs` and run `cargo run`:
 
 ```rust,no_run
 use scopedb_client::Client;
 
-let client = Client::builder("http://127.0.0.1:6543")
-    .api_key(std::env::var("SCOPEDB_API_KEY").expect("SCOPEDB_API_KEY is required"))
-    .build()?;
-# Ok::<(), scopedb_client::Error>(())
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::builder(std::env::var("SCOPEDB_ENDPOINT")?)
+        .api_key(std::env::var("SCOPEDB_API_KEY")?)
+        .build()?;
+
+    let result = client.query("SELECT 1 AS ready").await?;
+    println!("{:?}", result.into_objects()?);
+    Ok(())
+}
 ```
+
+## Documentation
+
+- [SDK guide](https://www.scopedb.io/docs/developer/rust)
+- [API reference](https://docs.rs/scopedb-client)
+- [Examples][example-guide]
+- [Changelog][changelog]
+- [Report an issue](https://github.com/scopedb/scopedb-client/issues)
+
+This SDK sends ScopeQL statements to ScopeDB; the language is documented separately. Use these canonical entry points:
+
+- [Quickstart](https://www.scopedb.io/docs/guides/quickstart)
+- [Query guide](https://www.scopedb.io/docs/guides/query-events)
+- [Language reference](https://www.scopedb.io/docs/reference)
+
+## Client configuration
 
 Applications that own TLS, proxy, timeout, or pooling settings can pass a compatible HTTP client through `.http_client(...)`. `Client::new(endpoint, http_client)` remains available when authentication is already configured on that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to avoid dependency-version mismatches.
 
@@ -46,14 +74,6 @@ if let Some(details) = error.write_details() {
 Statement and transform-ingest JSON request bodies and all table append requests use zstd compression by default. The default HTTP client also negotiates compressed responses. Append limits are based on the uncompressed NDJSON body.
 
 The runnable examples read authentication from `SCOPEDB_API_KEY`. For backward compatibility, they fall back to `SCOPEDB_TOKEN` when the API key variable is unset or empty. The builder marks the resulting authorization header as sensitive so standard header and request `Debug` formatting redacts the credential.
-
-## ScopeQL
-
-This SDK sends ScopeQL statements to ScopeDB; the language is documented separately. Use these canonical entry points:
-
-- [Quickstart](https://docs.scopedb.io/guides/quickstart)
-- [Query guide](https://docs.scopedb.io/guides/query-events)
-- [Language reference](https://docs.scopedb.io/reference/)
 
 ## Run a statement
 
@@ -267,6 +287,14 @@ stream.shutdown().await?;
 The [example guide][example-guide] includes setup instructions and commands to run each example from the repository root.
 
 The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][rust-http-api]. Release history and the maintainer runbook are in [`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
+
+## Development
+
+See the [repository development guide](https://github.com/scopedb/scopedb-client#development) for workspace checks and [RELEASE.md][release] for the publishing procedure.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 
 [append-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/append.rs
 [append-stream-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/append_stream.rs

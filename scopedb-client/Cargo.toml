@@ -17,9 +17,9 @@ name = "scopedb-client"
 version = "0.3.3"
 
 categories = ["database"]
-description = "A Rust client for ScopeDB"
+description = "The official Rust client for ScopeDB"
 documentation = "https://docs.rs/scopedb-client"
-keywords = ["scopedb"]
+keywords = ["scopedb", "scopeql", "database", "analytics", "sdk"]
 readme = "README.md"
 
 edition.workspace = true

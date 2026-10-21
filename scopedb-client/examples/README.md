@@ -2,7 +2,7 @@
 
 Start with a quickstart, then choose the example for your task. Every example uses only the public `scopedb-client` API. The shared client helper uses `Client::builder(...).api_key(...)`, so copied examples do not need a direct reqwest dependency. API keys belong only in a trusted process; never return one to an untrusted client.
 
-These examples focus on SDK integration and assume valid ScopeQL. For language syntax, use the canonical [Quickstart](https://docs.scopedb.io/guides/quickstart), [query guide](https://docs.scopedb.io/guides/query-events), and [language reference](https://docs.scopedb.io/reference/).
+These examples focus on SDK integration and assume valid ScopeQL. For language syntax, use the canonical [Quickstart](https://www.scopedb.io/docs/guides/quickstart), [query guide](https://www.scopedb.io/docs/guides/query-events), and [language reference](https://www.scopedb.io/docs/reference).
 
 The commands below run from the repository root.
 
