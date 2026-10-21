@@ -288,10 +288,6 @@ The [example guide][example-guide] includes setup instructions and commands to r
 
 The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][rust-http-api]. Release history and the maintainer runbook are in [`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
 
-## Development
-
-See the [repository development guide](https://github.com/scopedb/scopedb-client#development) for workspace checks and [RELEASE.md][release] for the publishing procedure.
-
 ## License
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
