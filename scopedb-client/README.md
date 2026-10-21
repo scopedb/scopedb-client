@@ -203,12 +203,12 @@ println!("Written: {} rows", result.num_rows_inserted);
 
 ### More examples
 
-| Task | Example |
-| --- | --- |
-| Write NDJSON | [`append.rs`][append-example] |
-| Send rows with a stream | [`append_stream.rs`][append-stream-example] |
-| Import many rows | [`bulk_append.rs`][bulk-append-example] |
-| Write logs or events | [`telemetry.rs`][telemetry-example] |
+| Task                                   | Example                                           |
+| -------------------------------------- | ------------------------------------------------- |
+| Write NDJSON                           | [`append.rs`][append-example]                     |
+| Send rows with a stream                | [`append_stream.rs`][append-stream-example]       |
+| Import many rows                       | [`bulk_append.rs`][bulk-append-example]           |
+| Write logs or events                   | [`telemetry.rs`][telemetry-example]               |
 | Transform rows with SQL before writing | [`ingest_transform.rs`][ingest-transform-example] |
 
 ## Inspecting errors
@@ -225,8 +225,7 @@ eprintln!("retry_after = {:?}", error.retry_after());
 # }
 ```
 
-When a statement reaches the failed state, `Error::statement_details()`
-preserves the server-provided code, message, and optional code-specific JSON:
+When a statement reaches the failed state, `Error::statement_details()` preserves the server-provided code, message, and optional code-specific JSON:
 
 ```rust
 # fn inspect(error: &scopedb_client::Error) {

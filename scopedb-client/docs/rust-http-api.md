@@ -167,13 +167,13 @@ An append failure uses this payload when the outcome is known:
 
 Create a stream with `table.append_stream().build()`. The SDK converts Rust values to NDJSON and writes them in batches.
 
-| Method | Use |
-| --- | --- |
-| `send()` | Add one row to the SDK's pending writes. |
-| `send_all()` | Add rows from an iterator. |
+| Method       | Use                                                          |
+| ------------ | ------------------------------------------------------------ |
+| `send()`     | Add one row to the SDK's pending writes.                     |
+| `send_all()` | Add rows from an iterator.                                   |
 | `try_send()` | Try to add a row without waiting; check the returned result. |
-| `flush()` | Wait for pending writes while keeping the stream open. |
-| `shutdown()` | Wait for writing to complete and close the stream. |
+| `flush()`    | Wait for pending writes while keeping the stream open.       |
+| `shutdown()` | Wait for writing to complete and close the stream.           |
 
 `send()` and `send_all()` add rows to the SDK without waiting for the writes to finish. Call `shutdown()` when you are done sending rows.
 
