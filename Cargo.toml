@@ -31,7 +31,6 @@ fastrace = { version = "0.7.19" }
 fastrace-reqwest = { version = "0.3.0" }
 httpdate = { version = "1.0.3" }
 jiff = { version = "0.2.35", features = ["serde"] }
-mea = { version = "0.6.7" }
 reqwest = { version = "0.13.4", default-features = false, features = [
   "json",
   "query",

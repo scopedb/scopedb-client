@@ -1,6 +1,6 @@
 # ScopeDB SDK for Rust
 
-`scopedb-client` is an async Rust client for ScopeDB. It supports statements, read-only REST catalog discovery, direct NDJSON table appends, bounded concurrent streaming writes, and transform-oriented JSON ingest.
+`scopedb-client` is an async Rust client for ScopeDB. It supports statements, read-only REST catalog discovery, direct NDJSON table appends, and bounded concurrent streaming writes.
 
 ## Installation
 
@@ -26,7 +26,7 @@ let client = Client::builder("http://127.0.0.1:6543")
 
 Applications that own TLS, proxy, timeout, or pooling settings can pass a compatible HTTP client through `.http_client(...)`. `Client::new(endpoint, http_client)` remains available when authentication is already configured on that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to avoid dependency-version mismatches.
 
-Every table append and transform-ingest HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Configure it with `Client::builder(endpoint).write_timeout(Duration::from_secs(60))` before `build()`; it must be nonzero. `Client::new` uses the same default. Streams inherit the client timeout unless an append stream explicitly sets `attempt_timeout`. Shorter timeouts on a custom HTTP client still apply. Admission, retry backoff, and an entire `flush()`/`shutdown()` barrier are outside this budget.
+Every table append HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Configure it with `Client::builder(endpoint).write_timeout(Duration::from_secs(60))` before `build()`; it must be nonzero. `Client::new` uses the same default. Streams inherit the client timeout unless an append stream explicitly sets `attempt_timeout`. Shorter timeouts on a custom HTTP client still apply. Admission, retry backoff, and an entire `flush()`/`shutdown()` barrier are outside this budget.
 
 Client timeouts after an HTTP attempt begins preserve the existing error kind and source and add `Error::write_details()` with `reason: WriteErrorReason::Timeout` and `outcome: AppendState::Unknown`; `is_retryable()` is false. The structured details, source, and HTTP diagnostics remain available on subsequent errors returned by the stream and batch failure events. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams retain their existing at-least-once retry policy for other transient unknown outcomes; those retries may duplicate committed rows.
 
@@ -43,7 +43,7 @@ if let Some(details) = error.write_details() {
 # }
 ```
 
-Statement and transform-ingest JSON request bodies and all table append requests use zstd compression by default. The default HTTP client also negotiates compressed responses. Append limits are based on the uncompressed NDJSON body.
+Statement JSON request bodies and all table append requests use zstd compression by default. The default HTTP client also negotiates compressed responses. Append limits are based on the uncompressed NDJSON body.
 
 The runnable examples read authentication from `SCOPEDB_API_KEY`. For backward compatibility, they fall back to `SCOPEDB_TOKEN` when the API key variable is unset or empty. The builder marks the resulting authorization header as sensitive so standard header and request `Debug` formatting redacts the credential.
 
@@ -189,7 +189,7 @@ println!("Written: {} rows", result.num_rows_inserted);
 | Send rows with a stream | [`append_stream.rs`][append-stream-example] |
 | Import many rows | [`bulk_append.rs`][bulk-append-example] |
 | Write logs or events | [`telemetry.rs`][telemetry-example] |
-| Transform rows with SQL before writing | [`ingest_transform.rs`][ingest-transform-example] |
+| Shape source fields before appending | [`append_transform.rs`][append-transform-example] |
 
 ## Inspecting errors
 
@@ -231,36 +231,38 @@ println!("columns = {}", description.columns.len());
 # }
 ```
 
-## Transform-oriented ingest
+## Migrate from Ingest
 
-`IngestStream` remains useful when input JSON needs a SQL transform before insertion. Prefer `Table::append` or `Table::append_stream` when records already match the destination table.
+`Client::insert`, `Client::ingest_stream`, `IngestStream`, `IngestStreamBuilder`, and `IngestResult` have been removed. Use `Table::append` for one NDJSON request or `Table::append_stream` to batch Rust values. Append requires ScopeDB 0.5.6 or later.
 
-Transform ingest does not report a rejected-versus-unknown commit state. Failed requests are therefore never automatically retried, including HTTP 429/5xx, transport errors, timeouts, and invalid success responses. A failed stream closes admission and rejects its pending `flush()` and `shutdown()` barriers. Later operations preserve the terminal error's HTTP status, request ID, and `Retry-After` diagnostics. Check the destination before replaying data that may already have committed; use a durable outbox when payloads must survive process failure.
+Append accepts rows matching the destination columns, not a ScopeQL statement. Move field renaming, type conversion, filtering, and routing into the producer before calling `send`. See [`append_transform.rs`][append-transform-example] for a runnable example. For transformations that must run in ScopeQL, append the original event into an `object` column in a staging table, then execute a separate `FROM ... SELECT ... INSERT INTO ...` statement. Staging and transformation are separate commits; track processed batches before retrying the transformation.
 
 ```rust
 # async fn demo() -> Result<(), scopedb_client::Error> {
 # let client = scopedb_client::Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
-let stream = client
-    .ingest_stream(
-        r#"
-        SELECT
-            $0["ts"]::timestamp as occurred_at,
-            $0["name"]::string as name
-        INSERT INTO public.events (occurred_at, name)
-        "#,
-    )
-    .build();
-
-stream
-    .send(&serde_json::json!({
-        "ts": "2026-03-13T12:00:00Z",
-        "name": "ScopeDB",
-    }))
-    .await?;
-stream.shutdown().await?;
+let source = serde_json::json!({"ts": "2026-03-13T12:00:00Z", "name": "ScopeDB"});
+let stream = client.table("events").append_stream()
+    .max_concurrent_batches(1)
+    .max_retries(0)
+    .build()?;
+let sent = stream.send(&serde_json::json!({
+    "occurred_at": source["ts"],
+    "name": source["name"],
+})).await;
+let report = stream.shutdown().await;
+sent?;
+println!("Committed rows: {}", report?.committed_rows);
 # Ok(())
 # }
 ```
+
+Review these behavior changes when migrating:
+
+- Append batches allow up to 8 MiB of uncompressed NDJSON and 200,000 rows. Reduce an old ingest batch-byte target above 8 MiB.
+- Append stream `build()` returns a `Result`; handle configuration errors with `?` before sending records.
+- `flush()` and `shutdown()` return an `AppendDeliveryReport` for activity since the previous report. Read `committed_rows` instead of `num_rows_inserted`, and check `outcome` when using the continue policy. Direct `append()` still returns `num_rows_inserted`.
+- Append streams send up to four batches concurrently by default. Use `.max_concurrent_batches(1)` for sequential requests; queries still require `ORDER BY` for ordered results.
+- Append streams may retry transient unknown outcomes, which can duplicate rows. Use `.max_retries(0)` to preserve the old stream's no-replay behavior. Client timeouts are never retried. Direct `append()` makes one attempt.
 
 ## Examples
 
@@ -274,7 +276,7 @@ The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][ru
 [catalog-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/catalog.rs
 [changelog]: https://github.com/scopedb/scopedb-client/blob/main/CHANGELOG.md
 [example-guide]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/README.md
-[ingest-transform-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/ingest_transform.rs
+[append-transform-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/append_transform.rs
 [release]: https://github.com/scopedb/scopedb-client/blob/main/RELEASE.md
 [rust-http-api]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/docs/rust-http-api.md
 [telemetry-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/telemetry.rs

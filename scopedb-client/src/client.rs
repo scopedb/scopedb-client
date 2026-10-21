@@ -30,7 +30,6 @@ use uuid::Uuid;
 use crate::CatalogIterator;
 use crate::Error;
 use crate::ErrorKind;
-use crate::IngestStreamBuilder;
 use crate::ResultSet;
 use crate::Statement;
 use crate::Table;
@@ -41,10 +40,6 @@ use crate::protocol::AppendState;
 use crate::protocol::CatalogListOptions;
 use crate::protocol::CatalogPage;
 use crate::protocol::DatabaseResource;
-use crate::protocol::IngestData;
-use crate::protocol::IngestRequest;
-use crate::protocol::IngestResult;
-use crate::protocol::IngestType;
 use crate::protocol::Response;
 use crate::protocol::ResultFormat;
 use crate::protocol::SchemaResource;
@@ -110,7 +105,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Bounds each table append or transform-ingest HTTP request, including
+    /// Bounds each table append HTTP request, including
     /// reading the response body. Defaults to 30 seconds and must be nonzero.
     /// The budget starts after local encoding, compression, and request preparation.
     /// Stream `attempt_timeout` settings override this default. A timeout does
@@ -210,10 +205,6 @@ impl Client {
 
     pub fn table(&self, table: impl Into<String>) -> Table {
         Table::new(self.clone(), table.into())
-    }
-
-    pub fn ingest_stream(&self, statement: impl Into<String>) -> IngestStreamBuilder {
-        IngestStreamBuilder::new(self.clone(), statement.into())
     }
 
     /// Executes a ScopeQL statement and waits for all result rows.
@@ -434,22 +425,6 @@ impl Client {
             _ => err,
         })
     }
-
-    pub async fn insert(&self, rows: String, transform: String) -> Result<IngestResult, Error> {
-        match self
-            .ingest(IngestRequest {
-                ty: IngestType::Committed,
-                data: IngestData::Json { rows },
-                statement: transform,
-            })
-            .await?
-        {
-            Response::Success(result) => Ok(result),
-            // Transform ingest does not report whether a failed request committed.
-            // An HTTP retry hint alone cannot make replay safe.
-            Response::Failed(err) => Err(map_failed_response(err).set_permanent()),
-        }
-    }
 }
 
 impl Client {
@@ -543,55 +518,6 @@ impl Client {
                 .set_temporary()
             })?;
         Response::from_http_response(response).await
-    }
-
-    #[fastrace::trace]
-    pub(crate) async fn ingest(
-        &self,
-        request: IngestRequest,
-    ) -> Result<Response<IngestResult>, Error> {
-        let format = request.data.format();
-        let url = self.make_url("v1/ingest")?;
-        let request = self
-            .post_json(url, &request)?
-            .headers(traceparent_headers());
-        let mut status = None;
-        let mut headers = reqwest::header::HeaderMap::new();
-        tokio::time::timeout(self.write_timeout, async {
-            let response = request.send().await.map_err(|err| {
-                ingest_unknown_error(format!(
-                    "failed to ingest data in {format}; commit outcome is unknown"
-                ))
-                .set_write_source(err)
-            })?;
-            status = Some(response.status());
-            headers = response.headers().clone();
-            let result: Response<IngestResult> = Response::from_http_response(response)
-                .await
-                .map_err(|err| {
-                    ingest_unknown_error("failed to read ingest response; commit outcome is unknown")
-                        .set_write_source(err)
-                })?;
-            if let Response::Success(result) = &result
-                && result.num_rows_inserted < 0
-            {
-                return Err(ingest_unknown_error(
-                    "ingest response reported negative num_rows_inserted; commit outcome is unknown",
-                ));
-            }
-            Ok(result)
-        })
-        .await
-        .unwrap_or_else(|err| {
-            Err(ingest_unknown_error("ingest request timed out; commit outcome is unknown")
-                .set_write_source(err))
-        })
-        .map_err(|err| match status {
-            Some(status) if err.http_status().is_none() => {
-                apply_response_metadata(err, status, &headers)
-            }
-            _ => err,
-        })
     }
 
     #[track_caller]
@@ -725,10 +651,6 @@ fn decode_append_response(
         error = error.set_retry_after(retry_after);
     }
     Err(error)
-}
-
-fn ingest_unknown_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::Unexpected, message).set_persistent()
 }
 
 fn append_unknown_error(message: impl Into<String>) -> Error {

@@ -245,32 +245,9 @@ A finished statement contains a JSON result set:
 }
 ```
 
-## Transform-oriented ingest API
+## Transform source events
 
-### `POST /v1/ingest`
-
-Ingests JSON lines through a transformation statement.
-
-```json
-{
-  "type": "committed",
-  "data": {
-    "format": "json",
-    "rows": "{\"k\":1}\n{\"k\":2}"
-  },
-  "statement": "SELECT ... INSERT INTO target_table"
-}
-```
-
-The Rust SDK uses committed ingest with JSON-line data. A successful response is:
-
-```json
-{
-  "num_rows_inserted": 2
-}
-```
-
-This endpoint is useful when each input record needs a SQL transform. For rows already shaped like a table, use the streaming write API.
+The SDK uses table appends for writes. Shape each NDJSON object to match the destination columns before sending it. For ScopeQL transformations, append raw events into a staging table and execute a separate statement over those rows; the append and transformation are separate commits. See the [migration guide](../README.md#migrate-from-ingest) for the removed APIs and delivery differences.
 
 ## Generic error responses
 

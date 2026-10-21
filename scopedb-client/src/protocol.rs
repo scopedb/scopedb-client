@@ -349,44 +349,6 @@ impl fmt::Display for ErrorStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "format")]
-pub(crate) enum IngestData {
-    #[serde(rename = "json")]
-    Json { rows: String },
-}
-
-impl IngestData {
-    pub fn format(&self) -> &'static str {
-        match self {
-            Self::Json { .. } => "json",
-        }
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IngestType {
-    #[default]
-    #[serde(rename = "committed")]
-    Committed,
-    #[serde(rename = "buffered")]
-    Buffered,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestRequest {
-    #[serde(default)]
-    #[serde(rename = "type")]
-    pub ty: IngestType,
-    pub data: IngestData,
-    pub statement: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestResult {
-    pub num_rows_inserted: i64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ResultFormat {
     #[serde(rename = "json")]

@@ -59,7 +59,7 @@ $env:SCOPEDB_TABLE = "sdk_example_events"
 | [`append_stream.rs`](append_stream.rs) | Send rows with a stream | `cargo run --example append_stream` |
 | [`bulk_append.rs`](bulk_append.rs) | Import many rows | `cargo run --example bulk_append` |
 | [`telemetry.rs`](telemetry.rs) | Write logs or events | `cargo run --example telemetry` |
-| [`ingest_transform.rs`](ingest_transform.rs) | Transform rows with SQL before writing | `cargo run --example ingest_transform` |
+| [`append_transform.rs`](append_transform.rs) | Shape source fields before appending | `cargo run --example append_transform` |
 
 `append.rs` writes prepared NDJSON with `table.append()`. Each line is one JSON object.
 
