@@ -13,7 +13,7 @@ These examples can run against a reachable ScopeDB endpoint without modifying da
 | Example                        | Shows                                                | Run                             |
 | ------------------------------ | ---------------------------------------------------- | ------------------------------- |
 | [`statement.rs`](statement.rs) | Query shorthand and object result rows               | `cargo run --example statement` |
-| [`catalog.rs`](catalog.rs)     | Automatic REST catalog pagination and full resources | `cargo run --example catalog`   |
+| [`catalog.rs`](catalog.rs)     | Declarative catalog snapshots and table definitions  | `cargo run --example catalog`   |
 | [`table.rs`](table.rs)         | Quoted table identifiers and full table descriptions | `cargo run --example table`     |
 
 ## Before running a write example
@@ -53,13 +53,13 @@ $env:SCOPEDB_TABLE = "sdk_example_events"
 
 ## Choose a write example
 
-| Example                                      | Shows                                  | Run                                    |
-| -------------------------------------------- | -------------------------------------- | -------------------------------------- |
-| [`append.rs`](append.rs)                     | Write NDJSON                           | `cargo run --example append`           |
-| [`append_stream.rs`](append_stream.rs)       | Send rows with a stream                | `cargo run --example append_stream`    |
-| [`bulk_append.rs`](bulk_append.rs)           | Import many rows                       | `cargo run --example bulk_append`      |
-| [`telemetry.rs`](telemetry.rs)               | Write logs or events                   | `cargo run --example telemetry`        |
-| [`ingest_transform.rs`](ingest_transform.rs) | Transform rows with SQL before writing | `cargo run --example ingest_transform` |
+| Example                                      | Shows                                | Run                                    |
+| -------------------------------------------- | ------------------------------------ | -------------------------------------- |
+| [`append.rs`](append.rs)                     | Write NDJSON                         | `cargo run --example append`           |
+| [`append_stream.rs`](append_stream.rs)       | Send rows with a stream              | `cargo run --example append_stream`    |
+| [`bulk_append.rs`](bulk_append.rs)           | Import many rows                     | `cargo run --example bulk_append`      |
+| [`telemetry.rs`](telemetry.rs)               | Write logs or events                 | `cargo run --example telemetry`        |
+| [`append_transform.rs`](append_transform.rs) | Shape source fields before appending | `cargo run --example append_transform` |
 
 `append.rs` writes prepared NDJSON with `table.append()`. Each line is one JSON object.
 

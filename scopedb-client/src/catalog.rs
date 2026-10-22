@@ -12,158 +12,383 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use std::collections::VecDeque;
-use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
+use std::marker::PhantomData;
 
-use crate::CatalogListOptions;
-use crate::CatalogPage;
+use fastrace_reqwest::traceparent_headers;
+use reqwest::Method;
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::Client;
+use crate::DataType;
 use crate::Error;
 use crate::ErrorKind;
+use crate::protocol::ErrorStatus;
+use crate::protocol::apply_response_metadata;
 
-type PageFuture<T> = Pin<Box<dyn Future<Output = Result<CatalogPage<T>, Error>> + Send>>;
-type PageFetcher<T> = Arc<dyn Fn(CatalogListOptions) -> PageFuture<T> + Send + Sync>;
-
-/// Lazily iterates catalog resources across every page.
-///
-/// Call [`CatalogIterator::next`] until it returns `None`. A page is requested
-/// only when the local item buffer is empty, so stopping iteration does not
-/// fetch unused pages.
-#[must_use = "catalog iterators are lazy; call next().await to fetch resources"]
-pub struct CatalogIterator<T> {
-    fetch_page: PageFetcher<T>,
-    page_size: Option<usize>,
-    next_page_token: Option<String>,
-    seen_tokens: HashSet<String>,
-    items: VecDeque<T>,
-    exhausted: bool,
-    terminal_error: Option<Error>,
+/// Complete tenant catalog. Apply replaces the entire selected subtree.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CatalogDocument {
+    #[serde(default)]
+    pub databases: Vec<CatalogDatabase>,
 }
 
-impl<T> fmt::Debug for CatalogIterator<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CatalogIterator")
-            .field("page_size", &self.page_size)
-            .field("next_page_token", &self.next_page_token)
-            .field("buffered_items", &self.items.len())
-            .field("exhausted", &self.exhausted)
-            .field("has_terminal_error", &self.terminal_error.is_some())
-            .finish_non_exhaustive()
-    }
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CatalogDatabase {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub schemas: Vec<CatalogSchema>,
 }
 
-impl<T> CatalogIterator<T>
-where
-    T: Send + 'static,
-{
-    pub(crate) fn new<F, Fut>(options: CatalogListOptions, fetch_page: F) -> Self
-    where
-        F: Fn(CatalogListOptions) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<CatalogPage<T>, Error>> + Send + 'static,
-    {
-        let next_page_token = options.page_token;
-        let seen_tokens = next_page_token.iter().cloned().collect();
-        let fetch_page = Arc::new(move |options| {
-            let future = fetch_page(options);
-            Box::pin(future) as PageFuture<T>
-        });
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CatalogSchema {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub tables: Vec<CatalogTable>,
+    #[serde(default)]
+    pub views: Vec<CatalogView>,
+}
+
+/// A complete table definition. Omitted collections are empty and omitted
+/// optional fields are cleared. Storage is accepted only at creation.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CatalogTable {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub columns: Vec<CatalogColumn>,
+    #[serde(default)]
+    pub partition_by: Vec<String>,
+    #[serde(default)]
+    pub cluster_by: Vec<String>,
+    #[serde(default)]
+    pub distinct: CatalogDistinct,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogColumn {
+    pub name: String,
+    pub data_type: DataType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub indexes: Vec<CatalogColumnIndex>,
+}
+
+/// Additional column index. ScopeDB 0.6 supports type "search" and analyzer "log".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogColumnIndex {
+    #[serde(rename = "type")]
+    pub index_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyzer: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CatalogDistinct {
+    #[serde(default)]
+    pub on: Vec<String>,
+    #[serde(default)]
+    pub by: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogView {
+    pub name: String,
+    pub statement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// Preview, concurrency preconditions, and explicit data-loss authorization.
+#[derive(Debug, Clone, Default)]
+pub struct CatalogOptions {
+    pub dry_run: bool,
+    pub allow_destructive: bool,
+    /// Opaque ETag returned by Get or a dry-run result, including its quotes.
+    pub if_match: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogSnapshot<T> {
+    pub definition: T,
+    pub etag: String,
+}
+
+/// Normalized states compared in one transaction; None means absent.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CatalogResult<T> {
+    pub before: Option<T>,
+    pub after: Option<T>,
+    pub destructive: bool,
+    /// The base version for dry-run, or the resulting version after a mutation.
+    #[serde(skip)]
+    pub etag: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Catalog {
+    resource: CatalogResource<CatalogDocument>,
+}
+
+impl Catalog {
+    pub(crate) fn new(client: Client) -> Self {
         Self {
-            fetch_page,
-            page_size: options.page_size,
-            next_page_token,
-            seen_tokens,
-            items: VecDeque::new(),
-            exhausted: false,
-            terminal_error: None,
+            resource: CatalogResource::new(client, &["catalog"]),
         }
     }
 
-    /// Returns the next resource, fetching another page when necessary.
-    pub async fn next(&mut self) -> Result<Option<T>, Error> {
-        loop {
-            if let Some(item) = self.items.pop_front() {
-                return Ok(Some(item));
-            }
-            if let Some(error) = self.terminal_error.take() {
-                return Err(error);
-            }
-            if self.exhausted {
-                return Ok(None);
-            }
+    pub async fn get(&self) -> Result<CatalogSnapshot<CatalogDocument>, Error> {
+        self.resource.get().await
+    }
 
-            let page = (self.fetch_page)(CatalogListOptions {
-                page_size: self.page_size,
-                page_token: self.next_page_token.clone(),
-            })
-            .await?;
+    /// Replaces the complete tenant catalog. An empty document clears it.
+    pub async fn apply(
+        &self,
+        definition: &CatalogDocument,
+        options: CatalogOptions,
+    ) -> Result<CatalogResult<CatalogDocument>, Error> {
+        self.resource.apply(definition, options).await
+    }
 
-            if let Some(token) = page.next_page_token.as_ref()
-                && !self.seen_tokens.insert(token.clone())
-            {
-                self.exhausted = true;
-                self.items = page.items.into();
-                self.terminal_error = Some(Error::new(
-                    ErrorKind::Unexpected,
-                    "catalog pagination returned a repeated page token",
-                ));
-                continue;
-            }
-            self.next_page_token = page.next_page_token;
-            self.exhausted = self.next_page_token.is_none();
-            self.items = page.items.into();
-        }
+    /// Retains fields unknown to this SDK when reading and applying definitions.
+    pub fn raw(&self) -> CatalogResource<serde_json::Value> {
+        self.resource.raw()
+    }
+
+    pub fn database(&self, database: &str) -> CatalogResource<CatalogDatabase> {
+        CatalogResource::new(
+            self.resource.client.clone(),
+            &["catalog", "databases", database],
+        )
+    }
+    pub fn schema(&self, database: &str, schema: &str) -> CatalogResource<CatalogSchema> {
+        CatalogResource::new(
+            self.resource.client.clone(),
+            &["catalog", "databases", database, "schemas", schema],
+        )
+    }
+    pub fn table(
+        &self,
+        database: &str,
+        schema: &str,
+        table: &str,
+    ) -> CatalogResource<CatalogTable> {
+        CatalogResource::new(
+            self.resource.client.clone(),
+            &[
+                "catalog",
+                "databases",
+                database,
+                "schemas",
+                schema,
+                "tables",
+                table,
+            ],
+        )
+    }
+    pub fn view(&self, database: &str, schema: &str, view: &str) -> CatalogResource<CatalogView> {
+        CatalogResource::new(
+            self.resource.client.clone(),
+            &[
+                "catalog",
+                "databases",
+                database,
+                "schemas",
+                schema,
+                "views",
+                view,
+            ],
+        )
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Mutex;
+/// A selected subtree. Names are unescaped identifiers. Apply replaces the whole
+/// definition; it is not a patch. Mutations never retry automatically.
+#[derive(Debug, Clone)]
+pub struct CatalogResource<T> {
+    client: Client,
+    path: Vec<String>,
+    definition: PhantomData<T>,
+}
 
-    use super::*;
+impl<T> CatalogResource<T> {
+    fn new(client: Client, path: &[&str]) -> Self {
+        Self {
+            client,
+            path: path.iter().map(|s| (*s).to_string()).collect(),
+            definition: PhantomData,
+        }
+    }
 
-    #[tokio::test]
-    async fn iterates_pages_and_rejects_repeated_tokens() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut catalog = CatalogIterator::new(CatalogListOptions::default(), {
-            let calls = calls.clone();
-            move |options| {
-                let calls = calls.clone();
-                async move {
-                    calls.lock().unwrap().push(options.page_token.clone());
-                    match options.page_token.as_deref() {
-                        None => Ok(CatalogPage {
-                            items: vec![1, 2],
-                            next_page_token: Some("next".to_string()),
-                        }),
-                        Some("next") => Ok(CatalogPage {
-                            items: vec![3],
-                            next_page_token: None,
-                        }),
-                        _ => unreachable!(),
-                    }
-                }
-            }
-        });
+    pub fn raw(&self) -> CatalogResource<serde_json::Value> {
+        CatalogResource {
+            client: self.client.clone(),
+            path: self.path.clone(),
+            definition: PhantomData,
+        }
+    }
 
-        assert_eq!(catalog.next().await.unwrap(), Some(1));
-        assert_eq!(catalog.next().await.unwrap(), Some(2));
-        assert_eq!(catalog.next().await.unwrap(), Some(3));
-        assert_eq!(catalog.next().await.unwrap(), None);
-        assert_eq!(*calls.lock().unwrap(), vec![None, Some("next".to_string())]);
+    async fn request<R: DeserializeOwned>(
+        &self,
+        method: Method,
+        body: Option<Vec<u8>>,
+        options: CatalogOptions,
+    ) -> Result<(R, String), Error> {
+        let mutation = method != Method::GET;
+        let writing = mutation && !options.dry_run;
+        let url = self
+            .client
+            .make_resource_url(&self.path.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let mut request = self
+            .client
+            .request(method.clone(), url)
+            .headers(traceparent_headers());
+        if options.dry_run {
+            request = request.query(&[("dry_run", true)]);
+        }
+        if options.allow_destructive {
+            request = request.query(&[("allow_destructive", true)]);
+        }
+        if let Some(etag) = options.if_match {
+            let etag = reqwest::header::HeaderValue::from_str(&etag).map_err(|e| {
+                Error::new(ErrorKind::ConfigInvalid, "invalid If-Match header").set_source(e)
+            })?;
+            request = request.header(reqwest::header::IF_MATCH, etag);
+        }
+        if let Some(body) = body {
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body);
+        }
+        if mutation {
+            request = request.timeout(self.client.write_timeout());
+        }
+        let response = request.send().await.map_err(|e| {
+            catalog_transport_error(writing, "failed to send catalog request").set_source(e)
+        })?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.bytes().await.map_err(|e| {
+            apply_response_metadata(
+                catalog_transport_error(writing, "failed to read catalog response").set_source(e),
+                status,
+                &headers,
+            )
+        })?;
+        if !status.is_success() {
+            let error = ErrorStatus::from_http_parts(status, &headers, &bytes)
+                .into_error(ErrorKind::CatalogFailed);
+            return Err(if writing {
+                error.set_persistent()
+            } else {
+                error
+            });
+        }
+        let etag = headers
+            .get(reqwest::header::ETAG)
+            .and_then(|h| h.to_str().ok())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                apply_response_metadata(
+                    catalog_transport_error(writing, "catalog response is missing ETag"),
+                    status,
+                    &headers,
+                )
+            })?
+            .to_string();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            apply_response_metadata(
+                catalog_transport_error(writing, "invalid catalog response").set_source(e),
+                status,
+                &headers,
+            )
+        })?;
+        let valid_resource = |v: &serde_json::Value| v.is_object() || v.is_null();
+        if !value.is_object()
+            || (mutation
+                && !(value.get("before").is_some_and(valid_resource)
+                    && value.get("after").is_some_and(valid_resource)
+                    && value
+                        .get("destructive")
+                        .is_some_and(serde_json::Value::is_boolean)))
+        {
+            return Err(apply_response_metadata(
+                catalog_transport_error(writing, "invalid catalog response"),
+                status,
+                &headers,
+            ));
+        }
+        let result = serde_json::from_value(value).map_err(|e| {
+            apply_response_metadata(
+                catalog_transport_error(writing, "invalid catalog definition").set_source(e),
+                status,
+                &headers,
+            )
+        })?;
+        Ok((result, etag))
+    }
+}
 
-        let mut repeated = CatalogIterator::new(CatalogListOptions::default(), |_| async {
-            Ok(CatalogPage {
-                items: vec![7_u8],
-                next_page_token: Some("same".to_string()),
-            })
-        });
-        assert_eq!(repeated.next().await.unwrap(), Some(7));
-        assert_eq!(repeated.next().await.unwrap(), Some(7));
-        let error = repeated.next().await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Unexpected);
-        assert_eq!(repeated.next().await.unwrap(), None);
+impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
+    pub async fn get(&self) -> Result<CatalogSnapshot<T>, Error> {
+        let (definition, etag) = self
+            .request(Method::GET, None, CatalogOptions::default())
+            .await?;
+        Ok(CatalogSnapshot { definition, etag })
+    }
+
+    pub async fn apply(
+        &self,
+        definition: &T,
+        options: CatalogOptions,
+    ) -> Result<CatalogResult<T>, Error> {
+        let body = serde_json::to_vec(definition).map_err(|e| {
+            Error::new(
+                ErrorKind::ConfigInvalid,
+                "failed to serialize catalog definition",
+            )
+            .set_source(e)
+        })?;
+        let (mut result, etag): (CatalogResult<T>, _) =
+            self.request(Method::PUT, Some(body), options).await?;
+        result.etag = etag;
+        Ok(result)
+    }
+
+    pub async fn delete(&self, options: CatalogOptions) -> Result<CatalogResult<T>, Error> {
+        if self.path.len() == 1 {
+            return Err(Error::new(
+                ErrorKind::ConfigInvalid,
+                "the root catalog does not support DELETE; apply an empty document instead",
+            ));
+        }
+        let (mut result, etag): (CatalogResult<T>, _) =
+            self.request(Method::DELETE, None, options).await?;
+        result.etag = etag;
+        Ok(result)
+    }
+}
+
+fn catalog_transport_error(writing: bool, message: &str) -> Error {
+    let error = Error::new(ErrorKind::CatalogFailed, message);
+    if writing {
+        error
+            .set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
+            .set_persistent()
+    } else {
+        error
     }
 }

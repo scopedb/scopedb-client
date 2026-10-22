@@ -14,43 +14,24 @@
 
 mod common;
 
-use scopedb_client::CatalogListOptions;
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = common::client()?;
     let database = common::database();
     let schema = common::schema();
 
-    let mut databases = client.iterate_databases(CatalogListOptions {
-        page_size: Some(100),
-        page_token: None,
-    });
-    while let Some(item) = databases.next().await? {
+    let catalog = client.catalog().get().await?;
+    for item in catalog.definition.databases {
         println!(
             "database {}: {}",
             item.name,
             item.comment.unwrap_or_default()
         );
     }
-
-    let database_resource = client.fetch_database(&database).await?;
-    println!("selected database: {database_resource:?}");
-
-    let mut schemas = client.iterate_schemas(&database, CatalogListOptions::default());
-    while let Some(item) = schemas.next().await? {
-        println!("schema {}.{}", item.database, item.name);
+    let snapshot = client.catalog().schema(&database, &schema).get().await?;
+    println!("schema ETag: {}", snapshot.etag);
+    for table in snapshot.definition.tables {
+        println!("table {}: {:?}", table.name, table.columns);
     }
-
-    let schema_resource = client.fetch_schema(&database, &schema).await?;
-    println!("selected schema: {schema_resource:?}");
-
-    let mut tables = client.iterate_tables(&database, &schema, CatalogListOptions::default());
-    if let Some(first) = tables.next().await? {
-        println!("first table summary: {first:?}");
-        let resource = client.fetch_table(&database, &schema, &first.name).await?;
-        println!("first table resource: {resource:?}");
-    }
-
     Ok(())
 }

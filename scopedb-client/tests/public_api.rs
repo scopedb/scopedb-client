@@ -54,13 +54,9 @@ fn application_api_surface_compiles(client: &scopedb_client::Client) {
     drop(status);
     let wait = handle.wait();
     drop(wait);
-    let _databases = client.iterate_databases(scopedb_client::CatalogListOptions::default());
-    let _schemas = client.iterate_schemas("scopedb", scopedb_client::CatalogListOptions::default());
-    let _tables = client.iterate_tables(
-        "scopedb",
-        "public",
-        scopedb_client::CatalogListOptions::default(),
-    );
+    let catalog = client.catalog();
+    let _snapshot = catalog.get();
+    let _schema = catalog.schema("scopedb", "public");
     let table = client.table("events").with_schema("public");
     let _description = table.describe();
     let _stream = table

@@ -2060,7 +2060,7 @@ mod tests {
                 .count();
             Self::json(
                 200,
-                format!(r#"{{"append_state":"committed","num_rows_inserted":{rows}}}"#),
+                format!(r#"{{"status":"committed","num_rows_inserted":{rows}}}"#),
             )
         }
 
@@ -2546,7 +2546,7 @@ mod tests {
         for request in requests {
             assert_eq!(
                 request.target,
-                "/v1/databases/analytics%202026/schemas/public/tables/events%2Farchive/rows"
+                "/v1/catalog/databases/analytics%202026/schemas/public/tables/events%2Farchive/ingest"
             );
             assert_eq!(
                 request.headers.get("content-type").map(String::as_str),
@@ -2738,20 +2738,16 @@ mod tests {
     #[tokio::test]
     async fn unknown_remains_unknown_after_terminal_rejection() {
         for final_status in [422, 503] {
-            let server = MockServer::start(move |index, _| match index {
-                0 => MockResponse::json(503, r#"{"message":"ambiguous","append_state":"unknown"}"#),
+            let server = MockServer::start(move |index, _| {
+                match index {
+                0 => MockResponse::json(503, r#"{"message":"ambiguous","code":"ingest_failure","details":{"status":"unknown"}}"#),
                 1 => MockResponse::json(
                     final_status,
-                    r#"{
-                    "message":"last rejection",
-                    "append_state":"rejected",
-                    "request_id":"last-attempt",
-                    "row_errors":[{"row_index":0,"column":"id","message":"invalid"}],
-                    "row_errors_truncated":true
-                }"#,
+                    r#"{"message":"last rejection","request_id":"last-attempt","code":"ingest_failure","details":{"status":"rejected","row_errors":[{"row_index":0,"column":"id","message":"invalid"}],"row_errors_truncated":true}}"#,
                 )
                 .with_header("Retry-After", "2"),
                 _ => panic!("unexpected retry request {index}"),
+            }
             });
             let stream = server
                 .client()
@@ -2918,10 +2914,14 @@ mod tests {
             let row: serde_json::Value = serde_json::from_str(&request.body).unwrap();
             match row["id"].as_u64().unwrap() {
                 0 => MockResponse::committed(request),
-                1 if ambiguous_attempts.fetch_add(1, Ordering::AcqRel) == 0 => {
-                    MockResponse::json(503, r#"{"message":"ambiguous","append_state":"unknown"}"#)
-                }
-                _ => MockResponse::json(422, r#"{"message":"invalid","append_state":"rejected"}"#),
+                1 if ambiguous_attempts.fetch_add(1, Ordering::AcqRel) == 0 => MockResponse::json(
+                    503,
+                    r#"{"message":"ambiguous","code":"ingest_failure","details":{"status":"unknown"}}"#,
+                ),
+                _ => MockResponse::json(
+                    422,
+                    r#"{"message":"invalid","code":"ingest_failure","details":{"status":"rejected"}}"#,
+                ),
             }
         });
         let stream = server
@@ -2960,10 +2960,19 @@ mod tests {
     #[tokio::test]
     async fn continue_mode_retries_temporary_rejections_and_unknown_outcomes() {
         let server = MockServer::start(|index, request| match index {
-            0 => MockResponse::json(503, r#"{"message":"busy","append_state":"rejected"}"#),
+            0 => MockResponse::json(
+                503,
+                r#"{"message":"busy","code":"ingest_failure","details":{"status":"rejected"}}"#,
+            ),
             1 => MockResponse::committed(request),
-            2 => MockResponse::json(503, r#"{"message":"ambiguous","append_state":"unknown"}"#),
-            3 | 4 => MockResponse::json(422, r#"{"message":"bad row","append_state":"rejected"}"#),
+            2 => MockResponse::json(
+                503,
+                r#"{"message":"ambiguous","code":"ingest_failure","details":{"status":"unknown"}}"#,
+            ),
+            3 | 4 => MockResponse::json(
+                422,
+                r#"{"message":"bad row","code":"ingest_failure","details":{"status":"rejected"}}"#,
+            ),
             _ => panic!("unexpected retry request {index}"),
         });
         let stream = server
@@ -3033,48 +3042,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_timeout_bounds_direct_append_and_ingest_including_response_body() {
-        for ingest in [false, true] {
-            for body_delay in [false, true] {
-                let server = MockServer::start(move |_, _| {
-                    let response = MockResponse::json(
-                        200,
-                        r#"{"append_state":"committed","num_rows_inserted":1}"#,
-                    );
-                    if body_delay {
-                        response.with_body_delay(Duration::from_millis(150))
-                    } else {
-                        response.with_delay(Duration::from_millis(150))
-                    }
-                });
-                let client = server.client_with_write_timeout(Duration::from_millis(50));
-                let error = if ingest {
-                    client
-                        .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
-                        .await
-                        .unwrap_err()
-                } else {
-                    client
-                        .table("events")
-                        .append("{\"id\":1}".to_string())
-                        .await
-                        .unwrap_err()
-                };
-                assert!(!error.is_retryable());
-                assert_write_timeout_contract(&error);
-                let source = std::error::Error::source(&error).unwrap();
-                assert!(source.is::<tokio::time::error::Elapsed>());
-                if !ingest {
-                    assert_eq!(
-                        error.append_details().unwrap().append_state,
-                        AppendState::Unknown
-                    );
-                }
+    async fn write_timeout_bounds_direct_append_including_response_body() {
+        for body_delay in [false, true] {
+            let server = MockServer::start(move |_, _| {
+                let response =
+                    MockResponse::json(200, r#"{"status":"committed","num_rows_inserted":1}"#);
                 if body_delay {
-                    assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
+                    response.with_body_delay(Duration::from_millis(150))
+                } else {
+                    response.with_delay(Duration::from_millis(150))
                 }
-                assert_eq!(server.requests().len(), 1);
+            });
+            let client = server.client_with_write_timeout(Duration::from_millis(50));
+            let error = client
+                .table("events")
+                .append("{\"id\":1}".to_string())
+                .await
+                .unwrap_err();
+            assert!(!error.is_retryable());
+            assert_write_timeout_contract(&error);
+            let source = std::error::Error::source(&error).unwrap();
+            assert!(source.is::<tokio::time::error::Elapsed>());
+            assert_eq!(
+                error.append_details().unwrap().append_state,
+                AppendState::Unknown
+            );
+            if body_delay {
+                assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
             }
+            assert_eq!(server.requests().len(), 1);
         }
     }
 
@@ -3129,126 +3125,46 @@ mod tests {
 
     #[tokio::test]
     async fn write_timeout_preserves_a_shorter_custom_http_timeout() {
-        for ingest in [false, true] {
-            for body_delay in [false, true] {
-                let server = MockServer::start(move |_, _| {
-                    let response = MockResponse::json(
-                        200,
-                        r#"{"append_state":"committed","num_rows_inserted":1}"#,
-                    );
-                    if body_delay {
-                        response.with_body_delay(Duration::from_millis(150))
-                    } else {
-                        response.with_delay(Duration::from_millis(150))
-                    }
-                });
-                let http = reqwest::Client::builder()
-                    .no_proxy()
-                    .timeout(Duration::from_millis(50))
-                    .build()
-                    .unwrap();
-                let client = Client::builder(&server.endpoint)
-                    .http_client(http)
-                    .write_timeout(Duration::from_secs(1))
-                    .build()
-                    .unwrap();
-                let error = if ingest {
-                    client
-                        .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
-                        .await
-                        .unwrap_err()
-                } else {
-                    client
-                        .table("events")
-                        .append("{\"id\":1}".to_string())
-                        .await
-                        .unwrap_err()
-                };
-                let mut source = std::error::Error::source(&error);
-                let mut transport_timeout = false;
-                while let Some(error) = source {
-                    transport_timeout |= error
-                        .downcast_ref::<reqwest::Error>()
-                        .is_some_and(reqwest::Error::is_timeout);
-                    source = error.source();
-                }
-                assert!(
-                    transport_timeout,
-                    "the native transport cause must remain available"
-                );
-                assert_write_timeout_contract(&error);
-                if body_delay {
-                    assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
-                }
-                assert_eq!(server.requests().len(), 1);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn ingest_stream_inherits_the_client_write_timeout_without_retrying() {
-        let server = MockServer::start(|_, _| {
-            MockResponse::json(200, r#"{"num_rows_inserted":1}"#)
-                .with_delay(Duration::from_millis(150))
-        });
-        let stream = server
-            .client_with_write_timeout(Duration::from_millis(50))
-            .ingest_stream("SELECT $0")
-            .build();
-        stream.send(&serde_json::json!({"id":1})).await.unwrap();
-        let error = stream.shutdown().await.unwrap_err();
-        assert!(!error.is_retryable());
-        assert_write_timeout_contract(&error);
-        assert_eq!(server.requests().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn ingest_failures_preserve_diagnostics_in_queued_and_later_operations() {
-        for timed_out in [false, true] {
-            let status = if timed_out { 200 } else { 503 };
+        for body_delay in [false, true] {
             let server = MockServer::start(move |_, _| {
-                let response = MockResponse::json(
-                    status,
-                    r#"{"message":"ingest unavailable","request_id":"failed-ingest","retryable":true}"#,
-                );
-                if timed_out {
+                let response =
+                    MockResponse::json(200, r#"{"status":"committed","num_rows_inserted":1}"#);
+                if body_delay {
                     response.with_body_delay(Duration::from_millis(150))
                 } else {
-                    response
+                    response.with_delay(Duration::from_millis(150))
                 }
             });
-            let timeout = if timed_out {
-                Duration::from_millis(50)
-            } else {
-                Duration::from_secs(1)
-            };
-            let stream = server
-                .client_with_write_timeout(timeout)
-                .ingest_stream("SELECT $0")
-                .max_pending_bytes(9)
-                .build();
-            stream.send(&serde_json::json!({"id":1})).await.unwrap();
-            let next_row = serde_json::json!({"id":2});
-            let (first_flush, next_flush, blocked_send) =
-                tokio::join!(stream.flush(), stream.flush(), stream.send(&next_row));
-            let errors = [
-                first_flush.unwrap_err(),
-                next_flush.unwrap_err(),
-                blocked_send.unwrap_err(),
-                stream.shutdown().await.unwrap_err(),
-            ];
-            for error in errors {
-                assert_eq!(error.kind(), crate::ErrorKind::Unexpected);
-                assert_eq!(error.http_status().unwrap().as_u16(), status);
-                assert!(!error.is_retryable());
-                if timed_out {
-                    assert!(error.message().contains("commit outcome is unknown"));
-                    assert!(error.is_persistent());
-                    assert_write_timeout_contract(&error);
-                } else {
-                    assert_eq!(error.message(), "ingest unavailable");
-                    assert_eq!(error.request_id(), Some("failed-ingest"));
-                }
+            let http = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_millis(50))
+                .build()
+                .unwrap();
+            let client = Client::builder(&server.endpoint)
+                .http_client(http)
+                .write_timeout(Duration::from_secs(1))
+                .build()
+                .unwrap();
+            let error = client
+                .table("events")
+                .append("{\"id\":1}".to_string())
+                .await
+                .unwrap_err();
+            let mut source = std::error::Error::source(&error);
+            let mut transport_timeout = false;
+            while let Some(error) = source {
+                transport_timeout |= error
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(reqwest::Error::is_timeout);
+                source = error.source();
+            }
+            assert!(
+                transport_timeout,
+                "the native transport cause must remain available"
+            );
+            assert_write_timeout_contract(&error);
+            if body_delay {
+                assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
             }
             assert_eq!(server.requests().len(), 1);
         }
@@ -3289,7 +3205,7 @@ mod tests {
         let server = MockServer::start(|_, _| {
             MockResponse::json(
                 408,
-                r#"{"message":"admission timed out","append_state":"rejected","retryable":true}"#,
+                r#"{"message":"admission timed out","retryable":true,"code":"ingest_failure","details":{"status":"rejected"}}"#,
             )
         });
         let error = server
@@ -3307,82 +3223,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_http_failures_do_not_replay_even_with_retry_hints() {
-        for status in [408, 429, 500, 503] {
-            let server = MockServer::start(move |_, _| {
-                MockResponse::json(
-                    status,
-                    r#"{"message":"ingest unavailable","request_id":"ingest-request","retryable":true}"#,
-                )
-            });
-            let client = server.client();
-            let error = client
-                .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
-                .await
-                .unwrap_err();
-            assert!(!error.is_retryable());
-            assert_eq!(error.message(), "ingest unavailable");
-            assert_eq!(error.http_status().unwrap().as_u16(), status);
-            assert_eq!(error.request_id(), Some("ingest-request"));
-
-            let stream = client.ingest_stream("SELECT $0").max_retries(5).build();
-            stream.send(&serde_json::json!({"id":1})).await.unwrap();
-            assert!(!stream.shutdown().await.unwrap_err().is_retryable());
-            assert_eq!(server.requests().len(), 2);
-        }
-    }
-
-    #[tokio::test]
-    async fn ingest_invalid_success_bodies_have_unknown_outcomes() {
-        for body in [
-            "{",
-            "null",
-            "{}",
-            r#"{"num_rows_inserted":null}"#,
-            r#"{"num_rows_inserted":"1"}"#,
-            r#"{"num_rows_inserted":-1}"#,
-        ] {
-            let server = MockServer::start(move |_, _| MockResponse::json(200, body));
-            let client = server.client();
-            let error = client
-                .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
-                .await
-                .unwrap_err();
-            assert!(!error.is_retryable());
-            assert!(error.message().contains("commit outcome is unknown"));
-            assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
-
-            let stream = client.ingest_stream("SELECT $0").max_retries(5).build();
-            stream.send(&serde_json::json!({"id":1})).await.unwrap();
-            let error = stream.shutdown().await.unwrap_err();
-            assert!(!error.is_retryable());
-            assert!(error.message().contains("commit outcome is unknown"));
-            assert_eq!(server.requests().len(), 2);
-        }
-    }
-
-    #[tokio::test]
-    async fn ingest_connection_loss_after_receiving_rows_is_not_replayed() {
+    async fn connection_loss_is_not_replayed_when_append_retries_are_disabled() {
         for disconnect in [MockDisconnect::BeforeHeaders, MockDisconnect::DuringBody] {
-            let server = MockServer::start(move |_, _| {
-                MockResponse::json(200, r#"{"num_rows_inserted":1}"#).with_disconnect(disconnect)
+            let server = MockServer::start(move |_, request| {
+                MockResponse::committed(request).with_disconnect(disconnect)
             });
             let client = server.client();
-            let error = client
-                .insert("{\"id\":1}".to_string(), "SELECT $0".to_string())
-                .await
-                .unwrap_err();
-            assert!(!error.is_retryable());
-            assert!(error.message().contains("commit outcome is unknown"));
-            if matches!(disconnect, MockDisconnect::DuringBody) {
-                assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
-            }
-
-            let stream = client.ingest_stream("SELECT $0").max_retries(5).build();
+            let direct = client.table("events").append(r#"{"id":1}"#).await;
+            let stream = client
+                .table("events")
+                .append_stream()
+                .max_retries(0)
+                .build()
+                .unwrap();
             stream.send(&serde_json::json!({"id":1})).await.unwrap();
-            let error = stream.shutdown().await.unwrap_err();
-            assert!(!error.is_retryable());
-            assert!(error.message().contains("commit outcome is unknown"));
+            for error in [direct.unwrap_err(), stream.shutdown().await.unwrap_err()] {
+                assert_eq!(
+                    error.append_details().unwrap().append_state,
+                    AppendState::Unknown
+                );
+                assert!(!error.is_retryable());
+                if matches!(disconnect, MockDisconnect::DuringBody) {
+                    assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
+                }
+            }
             assert_eq!(server.requests().len(), 2);
         }
     }
@@ -3390,8 +3254,11 @@ mod tests {
     #[tokio::test]
     async fn stop_policy_closes_after_a_rejected_batch() {
         let server = MockServer::start(|_, _| {
-            MockResponse::json(422, r#"{"message":"invalid","append_state":"rejected"}"#)
-                .with_delay(Duration::from_millis(20))
+            MockResponse::json(
+                422,
+                r#"{"message":"invalid","code":"ingest_failure","details":{"status":"rejected"}}"#,
+            )
+            .with_delay(Duration::from_millis(20))
         });
         let stream = server
             .client()
@@ -3426,10 +3293,16 @@ mod tests {
     #[tokio::test]
     async fn strict_terminal_waits_for_every_in_flight_outcome() {
         let server = MockServer::start(|index, _| match index {
-            0 => MockResponse::json(422, r#"{"message":"invalid","append_state":"rejected"}"#)
-                .with_delay(Duration::from_millis(5)),
-            1 => MockResponse::json(503, r#"{"message":"ambiguous","append_state":"unknown"}"#)
-                .with_delay(Duration::from_millis(80)),
+            0 => MockResponse::json(
+                422,
+                r#"{"message":"invalid","code":"ingest_failure","details":{"status":"rejected"}}"#,
+            )
+            .with_delay(Duration::from_millis(5)),
+            1 => MockResponse::json(
+                503,
+                r#"{"message":"ambiguous","code":"ingest_failure","details":{"status":"unknown"}}"#,
+            )
+            .with_delay(Duration::from_millis(80)),
             _ => panic!("unexpected request {index}"),
         });
         let stream = server

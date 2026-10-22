@@ -14,13 +14,11 @@
 
 use std::time::Duration;
 
-use jiff::SignedDuration;
 use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::Error;
 use crate::ErrorKind;
-use crate::StatementCancelResult;
 use crate::client::Client;
 use crate::protocol::Response;
 use crate::protocol::ResultFormat;
@@ -34,7 +32,8 @@ pub struct Statement {
     client: Client,
     statement: String,
     statement_id: Option<Uuid>,
-    exec_timeout: Option<SignedDuration>,
+    max_elapsed: Option<Duration>,
+    max_estimated: Option<Duration>,
     format: ResultFormat,
 }
 
@@ -44,17 +43,33 @@ impl Statement {
         self
     }
 
-    pub fn with_exec_timeout(mut self, exec_timeout: SignedDuration) -> Self {
-        self.exec_timeout = Some(exec_timeout);
+    /// Limits total elapsed time on the server, including queueing.
+    pub fn with_max_elapsed(mut self, duration: Duration) -> Self {
+        self.max_elapsed = Some(duration);
+        self
+    }
+
+    /// Rejects execution when its estimated duration exceeds this limit.
+    pub fn with_max_estimated(mut self, duration: Duration) -> Self {
+        self.max_estimated = Some(duration);
         self
     }
 
     pub async fn submit(self) -> Result<StatementHandle, Error> {
+        if self.max_elapsed.is_some_and(|d| d.is_zero())
+            || self.max_estimated.is_some_and(|d| d.is_zero())
+        {
+            return Err(Error::new(
+                ErrorKind::ConfigInvalid,
+                "statement duration limits must be positive",
+            ));
+        }
         let Statement {
             client,
             statement,
             statement_id,
-            exec_timeout,
+            max_elapsed,
+            max_estimated,
             format,
         } = self;
 
@@ -62,7 +77,8 @@ impl Statement {
             .submit_statement(StatementRequest {
                 statement,
                 statement_id,
-                exec_timeout,
+                max_elapsed_seconds: max_elapsed.map(|v| v.as_secs_f64()),
+                max_estimated_seconds: max_estimated.map(|v| v.as_secs_f64()),
                 params: StatementRequestParams { format },
             })
             .await?;
@@ -87,7 +103,8 @@ impl Statement {
             client,
             statement,
             statement_id: None,
-            exec_timeout: None,
+            max_elapsed: None,
+            max_estimated: None,
             format: ResultFormat::Json,
         }
     }
@@ -169,17 +186,16 @@ impl StatementHandle {
                 match status {
                     StatementStatus::Finished(finished) => return Ok(finished.result_set()),
                     StatementStatus::Failed(failed) => {
-                        let mut error =
-                            Error::new(ErrorKind::StatementFailed, failed.message.clone());
-                        if let Some(details) = failed.error.clone() {
-                            error = error.set_statement_details(details);
-                        }
-                        return Err(error);
+                        return Err(Error::new(
+                            ErrorKind::StatementFailed,
+                            failed.error.message.clone(),
+                        )
+                        .set_statement_details(failed.error.clone()));
                     }
                     StatementStatus::Cancelled(cancelled) => {
                         return Err(Error::new(
                             ErrorKind::StatementFailed,
-                            cancelled.message.clone(),
+                            format!("statement {} was cancelled", cancelled.statement_id),
                         ));
                     }
                     StatementStatus::Pending(..) | StatementStatus::Running(..) => {
@@ -199,58 +215,16 @@ impl StatementHandle {
         self.wait().await
     }
 
-    pub async fn cancel(&mut self) -> Result<StatementCancelResult, Error> {
-        if let Some(response) = self.last_status.as_ref() {
-            match response {
-                StatementStatus::Pending(..) | StatementStatus::Running(..) => {}
-                StatementStatus::Finished(s) => {
-                    return Ok(StatementCancelResult {
-                        statement_id: s.statement_id,
-                        created_at: s.created_at,
-                        status: "finished".to_string(),
-                        message: "statement is finished".to_string(),
-                    });
-                }
-                StatementStatus::Failed(s) => {
-                    return Ok(StatementCancelResult {
-                        statement_id: s.statement_id,
-                        created_at: s.created_at,
-                        status: "failed".to_string(),
-                        message: "statement is failed".to_string(),
-                    });
-                }
-                StatementStatus::Cancelled(s) => {
-                    return Ok(StatementCancelResult {
-                        statement_id: s.statement_id,
-                        created_at: s.created_at,
-                        status: "cancelled".to_string(),
-                        message: "statement is cancelled".to_string(),
-                    });
-                }
-            }
+    /// Cancels execution and returns the complete status, including a result or
+    /// error when the statement finished before cancellation took effect.
+    pub async fn cancel(&mut self) -> Result<StatementStatus, Error> {
+        if let Some(status) = self.last_status.as_ref().filter(|s| s.is_terminated()) {
+            return Ok(status.clone());
         }
-
         match self.client.cancel_statement(self.statement_id).await? {
-            Response::Success(response) => {
-                self.last_status = match response.status.as_str() {
-                    "failed" => Some(StatementStatus::Failed(crate::StatementStatusFailed {
-                        statement_id: response.statement_id,
-                        created_at: response.created_at,
-                        progress: crate::StatementEstimatedProgress::default(),
-                        message: response.message.clone(),
-                        error: None,
-                    })),
-                    "cancelled" => Some(StatementStatus::Cancelled(
-                        crate::StatementStatusCancelled {
-                            statement_id: response.statement_id,
-                            created_at: response.created_at,
-                            progress: crate::StatementEstimatedProgress::default(),
-                            message: response.message.clone(),
-                        },
-                    )),
-                    _ => self.last_status.take(),
-                };
-                Ok(response)
+            Response::Success(status) => {
+                self.last_status = Some(status.clone());
+                Ok(status)
             }
             Response::Failed(err) => Err(err.into_error(ErrorKind::Unexpected)),
         }

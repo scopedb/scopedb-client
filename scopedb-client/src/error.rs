@@ -37,6 +37,9 @@ pub enum ErrorKind {
 
     /// A statement reached a failed or cancelled terminal state.
     StatementFailed,
+
+    /// A declarative catalog operation failed.
+    CatalogFailed,
 }
 
 /// The client-side reason an in-flight write was interrupted.
@@ -88,6 +91,7 @@ impl From<ErrorKind> for &'static str {
             ErrorKind::ConfigInvalid => "ConfigInvalid",
             ErrorKind::AppendRowsFailed => "AppendRowsFailed",
             ErrorKind::StatementFailed => "StatementFailed",
+            ErrorKind::CatalogFailed => "CatalogFailed",
         }
     }
 }
@@ -123,8 +127,15 @@ struct HttpErrorMetadata {
 }
 
 #[derive(Debug, Clone)]
+struct ApiErrorDetails {
+    code: Option<String>,
+    details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ErrorDiagnostics {
     context: Vec<(&'static str, String)>,
+    api_error: Option<Box<ApiErrorDetails>>,
     source: Option<std::sync::Arc<anyhow::Error>>,
 }
 
@@ -144,6 +155,7 @@ pub struct Error {
 
     status: ErrorStatus,
     context: Vec<(&'static str, String)>,
+    api_error: Option<Box<ApiErrorDetails>>,
     append_details: Option<AppendErrorDetails>,
     write_details: Option<WriteErrorDetails>,
     statement_details: Option<Box<StatementErrorDetails>>,
@@ -207,6 +219,7 @@ impl fmt::Debug for Error {
             let mut de = f.debug_struct("Error");
             de.field("kind", &self.kind);
             de.field("message", &self.message);
+            de.field("api_error", &self.api_error);
             de.field("status", &self.status);
             de.field("context", &self.context);
             de.field("append_details", &self.append_details);
@@ -271,6 +284,7 @@ impl Error {
 
             status: ErrorStatus::Permanent,
             context: Vec::default(),
+            api_error: None,
             append_details: None,
             write_details: None,
             statement_details: None,
@@ -300,12 +314,14 @@ impl Error {
     pub(crate) fn diagnostics(&self) -> ErrorDiagnostics {
         ErrorDiagnostics {
             context: self.context.clone(),
+            api_error: self.api_error.clone(),
             source: self.source.clone(),
         }
     }
 
     pub(crate) fn with_diagnostics(mut self, diagnostics: ErrorDiagnostics) -> Self {
         self.context = diagnostics.context;
+        self.api_error = diagnostics.api_error;
         self.source = diagnostics.source;
         self
     }
@@ -394,6 +410,33 @@ impl Error {
     /// Return the kind of this error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
+    }
+
+    /// Returns the server error code, including codes introduced by newer servers.
+    pub fn code(&self) -> Option<&str> {
+        self.api_error
+            .as_deref()
+            .and_then(|e| e.code.as_deref())
+            .or_else(|| self.statement_details().map(|e| e.code.as_str()))
+    }
+
+    /// Returns the original structured server details, when provided.
+    pub fn details(&self) -> Option<&serde_json::Value> {
+        self.api_error
+            .as_deref()
+            .and_then(|e| e.details.as_ref())
+            .or_else(|| self.statement_details().and_then(|e| e.details.as_ref()))
+    }
+
+    pub(crate) fn set_api_error(
+        mut self,
+        code: Option<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        if code.is_some() || details.is_some() {
+            self.api_error = Some(Box::new(ApiErrorDetails { code, details }));
+        }
+        self
     }
 
     /// Return the error message.

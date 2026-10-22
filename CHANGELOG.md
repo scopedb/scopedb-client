@@ -6,21 +6,23 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### Breaking Changes
 
+* Require ScopeDB 0.6.0 and use native Statement, declarative Catalog, and table ingest APIs. Replace paginated Catalog APIs and the legacy execution timeout option; cancellation retains complete terminal responses.
+* Removed `Client::insert`, `Client::ingest_stream`, and the transform Ingest types. Use table append APIs and transform rows in the producer; see the [migration guide](scopedb-client/README.md#migrate-from-ingest).
+
 * `AppendStream` now retries transient unknown outcomes other than client timeouts, matching the Go and JavaScript SDKs. A successfully acknowledged batch has at-least-once delivery and retries may insert duplicates. Direct append calls still send one request and conservatively classify unknown outcomes as non-retryable.
 * Upgraded the re-exported reqwest API from 0.12 to 0.13. Custom HTTP clients must now use reqwest 0.13, and the default HTTPS client uses reqwest's platform certificate verification.
-* Removed the statement `with_max_parallelism` option. Execution timeout remains the only exposed statement execution control.
+* Removed the statement `with_max_parallelism` option. Elapsed and estimated duration limits replace the old execution timeout option.
 
 ### New Features
 
-* Table append and transform-ingest requests now have a configurable client `write_timeout`, defaulting to 30 seconds including response-body reads. Streams inherit it unless an append stream explicitly sets `attempt_timeout`. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. `Error::write_details()` exposes a client timeout's `timeout` reason and `unknown` outcome while preserving existing kinds, sources, HTTP diagnostics, and subsequent stream errors.
+* Add complete Catalog replacements and deletion with dry-run, ETags, conditional updates, views, computed columns, and explicit destructive-change authorization. Preserve structured error codes/details and statement compute seconds.
+
+* Table append requests now have a configurable client `write_timeout`, defaulting to 30 seconds including response-body reads. Streams inherit it unless an append stream explicitly sets `attempt_timeout`. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. `Error::write_details()` exposes a client timeout's `timeout` reason and `unknown` outcome while preserving existing kinds, sources, HTTP diagnostics, and subsequent stream errors.
 
 ### Improvements
 
-* Failed transform-ingest requests no longer trigger automatic retries that could duplicate committed rows. Transport failures and invalid success responses report an unknown commit outcome and preserve response diagnostics.
-* Ingest streams preserve the terminal HTTP failure diagnostics in subsequent `send()`, `flush()`, and `shutdown()` calls.
 * Preserve a batch's unknown outcome when subsequent retries are rejected or exhausted, including the last attempt's structured details, HTTP metadata, and typed cause through delivery barriers. Report committed rows as logical input rows acknowledged at least once.
 * `AppendStream` now targets 4 MiB per batch by default; the maximum configurable target and uncompressed request limit remain 8 MiB.
-* `IngestStream` now seals a batch before the next record would exceed its target size.
 * Direct caller-encoded table appends now use the same zstd compression and 8 MiB uncompressed request limit as streaming append batches.
 * Preserve structured failed-statement details on terminal errors and correct binary result formatting so wire-format hex strings are not encoded a second time.
 

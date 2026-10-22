@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::CatalogTable;
 use crate::Client;
 use crate::Error;
 use crate::FieldSchema;
 use crate::Schema;
 use crate::append_stream::AppendStreamBuilder;
 use crate::protocol::AppendRowsResult;
-use crate::protocol::TableResource;
 
 #[derive(Debug, Clone)]
 pub struct Table {
@@ -92,14 +92,35 @@ impl Table {
         )
     }
 
-    /// Fetches the full REST catalog resource for this table.
-    pub async fn describe(&self) -> Result<TableResource, Error> {
-        self.client
-            .fetch_table(
+    /// Returns the complete declarative table definition.
+    pub async fn describe(&self) -> Result<CatalogTable, Error> {
+        Ok(self
+            .client
+            .catalog()
+            .table(
                 self.database.as_deref().unwrap_or("scopedb"),
                 self.schema.as_deref().unwrap_or("public"),
                 &self.table,
             )
+            .get()
+            .await?
+            .definition)
+    }
+
+    /// Replaces this table definition; use dry-run and If-Match to review changes.
+    pub async fn apply(
+        &self,
+        definition: &CatalogTable,
+        options: crate::CatalogOptions,
+    ) -> Result<crate::CatalogResult<CatalogTable>, Error> {
+        self.client
+            .catalog()
+            .table(
+                self.database.as_deref().unwrap_or("scopedb"),
+                self.schema.as_deref().unwrap_or("public"),
+                &self.table,
+            )
+            .apply(definition, options)
             .await
     }
 

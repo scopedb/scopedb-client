@@ -24,13 +24,10 @@ use reqwest::header::CONTENT_ENCODING;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use crate::CatalogIterator;
 use crate::Error;
 use crate::ErrorKind;
-use crate::IngestStreamBuilder;
 use crate::ResultSet;
 use crate::Statement;
 use crate::Table;
@@ -38,22 +35,11 @@ use crate::protocol::AppendErrorDetails;
 use crate::protocol::AppendRowsErrorPayload;
 use crate::protocol::AppendRowsResult;
 use crate::protocol::AppendState;
-use crate::protocol::CatalogListOptions;
-use crate::protocol::CatalogPage;
-use crate::protocol::DatabaseResource;
-use crate::protocol::IngestData;
-use crate::protocol::IngestRequest;
-use crate::protocol::IngestResult;
-use crate::protocol::IngestType;
 use crate::protocol::Response;
 use crate::protocol::ResultFormat;
-use crate::protocol::SchemaResource;
-use crate::protocol::StatementCancelResult;
 use crate::protocol::StatementRequest;
 use crate::protocol::StatementRequestParams;
 use crate::protocol::StatementStatus;
-use crate::protocol::TableResource;
-use crate::protocol::TableResourceSummary;
 use crate::protocol::apply_response_metadata;
 use crate::statement::StatementHandle;
 
@@ -110,7 +96,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Bounds each table append or transform-ingest HTTP request, including
+    /// Bounds each table append HTTP request, including
     /// reading the response body. Defaults to 30 seconds and must be nonzero.
     /// The budget starts after local encoding, compression, and request preparation.
     /// Stream `attempt_timeout` settings override this default. A timeout does
@@ -212,125 +198,14 @@ impl Client {
         Table::new(self.clone(), table.into())
     }
 
-    pub fn ingest_stream(&self, statement: impl Into<String>) -> IngestStreamBuilder {
-        IngestStreamBuilder::new(self.clone(), statement.into())
-    }
-
     /// Executes a ScopeQL statement and waits for all result rows.
     pub async fn query(&self, statement: impl Into<String>) -> Result<ResultSet, Error> {
         self.statement(statement).execute().await
     }
 
-    pub async fn list_databases(
-        &self,
-        options: CatalogListOptions,
-    ) -> Result<CatalogPage<DatabaseResource>, Error> {
-        self.fetch_catalog(&["databases"], Some(&options), "failed to list databases")
-            .await
-    }
-
-    /// Lazily iterates databases across every catalog page.
-    pub fn iterate_databases(
-        &self,
-        options: CatalogListOptions,
-    ) -> CatalogIterator<DatabaseResource> {
-        let client = self.clone();
-        CatalogIterator::new(options, move |options| {
-            let client = client.clone();
-            async move { client.list_databases(options).await }
-        })
-    }
-
-    pub async fn fetch_database(&self, database: &str) -> Result<DatabaseResource, Error> {
-        self.fetch_catalog(&["databases", database], None, "failed to fetch database")
-            .await
-    }
-
-    pub async fn list_schemas(
-        &self,
-        database: &str,
-        options: CatalogListOptions,
-    ) -> Result<CatalogPage<SchemaResource>, Error> {
-        self.fetch_catalog(
-            &["databases", database, "schemas"],
-            Some(&options),
-            "failed to list schemas",
-        )
-        .await
-    }
-
-    /// Lazily iterates schemas across every catalog page.
-    pub fn iterate_schemas(
-        &self,
-        database: impl Into<String>,
-        options: CatalogListOptions,
-    ) -> CatalogIterator<SchemaResource> {
-        let client = self.clone();
-        let database = database.into();
-        CatalogIterator::new(options, move |options| {
-            let client = client.clone();
-            let database = database.clone();
-            async move { client.list_schemas(&database, options).await }
-        })
-    }
-
-    pub async fn fetch_schema(
-        &self,
-        database: &str,
-        schema: &str,
-    ) -> Result<SchemaResource, Error> {
-        self.fetch_catalog(
-            &["databases", database, "schemas", schema],
-            None,
-            "failed to fetch schema",
-        )
-        .await
-    }
-
-    pub async fn list_tables(
-        &self,
-        database: &str,
-        schema: &str,
-        options: CatalogListOptions,
-    ) -> Result<CatalogPage<TableResourceSummary>, Error> {
-        self.fetch_catalog(
-            &["databases", database, "schemas", schema, "tables"],
-            Some(&options),
-            "failed to list tables",
-        )
-        .await
-    }
-
-    /// Lazily iterates table summaries across every catalog page.
-    pub fn iterate_tables(
-        &self,
-        database: impl Into<String>,
-        schema: impl Into<String>,
-        options: CatalogListOptions,
-    ) -> CatalogIterator<TableResourceSummary> {
-        let client = self.clone();
-        let database = database.into();
-        let schema = schema.into();
-        CatalogIterator::new(options, move |options| {
-            let client = client.clone();
-            let database = database.clone();
-            let schema = schema.clone();
-            async move { client.list_tables(&database, &schema, options).await }
-        })
-    }
-
-    pub async fn fetch_table(
-        &self,
-        database: &str,
-        schema: &str,
-        table: &str,
-    ) -> Result<TableResource, Error> {
-        self.fetch_catalog(
-            &["databases", database, "schemas", schema, "tables", table],
-            None,
-            "failed to fetch table",
-        )
-        .await
+    /// Selects the complete declarative catalog or an individual resource.
+    pub fn catalog(&self) -> crate::Catalog {
+        crate::Catalog::new(self.clone())
     }
 
     /// Appends at most 8 MiB of uncompressed newline-delimited JSON to a table.
@@ -367,13 +242,14 @@ impl Client {
             .filter(|line| !line.trim().is_empty())
             .count();
         let url = self.make_resource_url(&[
+            "catalog",
             "databases",
             database,
             "schemas",
             schema,
             "tables",
             table,
-            "rows",
+            "ingest",
         ])?;
         let body =
             zstd::stream::encode_all(ndjson.as_bytes(), ZSTD_COMPRESSION_LEVEL).map_err(|err| {
@@ -434,52 +310,9 @@ impl Client {
             _ => err,
         })
     }
-
-    pub async fn insert(&self, rows: String, transform: String) -> Result<IngestResult, Error> {
-        match self
-            .ingest(IngestRequest {
-                ty: IngestType::Committed,
-                data: IngestData::Json { rows },
-                statement: transform,
-            })
-            .await?
-        {
-            Response::Success(result) => Ok(result),
-            // Transform ingest does not report whether a failed request committed.
-            // An HTTP retry hint alone cannot make replay safe.
-            Response::Failed(err) => Err(map_failed_response(err).set_permanent()),
-        }
-    }
 }
 
 impl Client {
-    async fn fetch_catalog<T: DeserializeOwned>(
-        &self,
-        segments: &[&str],
-        options: Option<&CatalogListOptions>,
-        operation: &'static str,
-    ) -> Result<T, Error> {
-        if let Some(options) = options {
-            options.validate()?;
-        }
-        let url = self.make_resource_url(segments)?;
-        let mut request = self
-            .request(Method::GET, url)
-            .headers(traceparent_headers());
-        if let Some(options) = options {
-            request = request.query(options);
-        }
-        let response = request.send().await.map_err(|err| {
-            Error::new(ErrorKind::Unexpected, operation)
-                .set_source(err)
-                .set_temporary()
-        })?;
-        match Response::from_http_response(response).await? {
-            Response::Success(result) => Ok(result),
-            Response::Failed(err) => Err(map_failed_response(err)),
-        }
-    }
-
     #[fastrace::trace]
     pub(crate) async fn submit_statement(
         &self,
@@ -526,12 +359,15 @@ impl Client {
     pub(crate) async fn cancel_statement(
         &self,
         statement_id: Uuid,
-    ) -> Result<Response<StatementCancelResult>, Error> {
+    ) -> Result<Response<StatementStatus>, Error> {
         let path = format!("v1/statements/{statement_id}/cancel");
         let url = self.make_url(&path)?;
         let response = self
             .request(Method::POST, url)
             .headers(traceparent_headers())
+            .query(&StatementRequestParams {
+                format: ResultFormat::Json,
+            })
             .send()
             .await
             .map_err(|err| {
@@ -545,55 +381,6 @@ impl Client {
         Response::from_http_response(response).await
     }
 
-    #[fastrace::trace]
-    pub(crate) async fn ingest(
-        &self,
-        request: IngestRequest,
-    ) -> Result<Response<IngestResult>, Error> {
-        let format = request.data.format();
-        let url = self.make_url("v1/ingest")?;
-        let request = self
-            .post_json(url, &request)?
-            .headers(traceparent_headers());
-        let mut status = None;
-        let mut headers = reqwest::header::HeaderMap::new();
-        tokio::time::timeout(self.write_timeout, async {
-            let response = request.send().await.map_err(|err| {
-                ingest_unknown_error(format!(
-                    "failed to ingest data in {format}; commit outcome is unknown"
-                ))
-                .set_write_source(err)
-            })?;
-            status = Some(response.status());
-            headers = response.headers().clone();
-            let result: Response<IngestResult> = Response::from_http_response(response)
-                .await
-                .map_err(|err| {
-                    ingest_unknown_error("failed to read ingest response; commit outcome is unknown")
-                        .set_write_source(err)
-                })?;
-            if let Response::Success(result) = &result
-                && result.num_rows_inserted < 0
-            {
-                return Err(ingest_unknown_error(
-                    "ingest response reported negative num_rows_inserted; commit outcome is unknown",
-                ));
-            }
-            Ok(result)
-        })
-        .await
-        .unwrap_or_else(|err| {
-            Err(ingest_unknown_error("ingest request timed out; commit outcome is unknown")
-                .set_write_source(err))
-        })
-        .map_err(|err| match status {
-            Some(status) if err.http_status().is_none() => {
-                apply_response_metadata(err, status, &headers)
-            }
-            _ => err,
-        })
-    }
-
     #[track_caller]
     fn make_url(&self, path: &str) -> Result<Url, Error> {
         self.endpoint.join(path).map_err(|err| {
@@ -601,7 +388,13 @@ impl Client {
         })
     }
 
-    fn make_resource_url(&self, segments: &[&str]) -> Result<Url, Error> {
+    pub(crate) fn make_resource_url(&self, segments: &[&str]) -> Result<Url, Error> {
+        if segments.iter().any(|s| matches!(*s, "" | "." | "..")) {
+            return Err(Error::new(
+                ErrorKind::ConfigInvalid,
+                "resource names must not be empty or dot segments",
+            ));
+        }
         let mut url = self.make_url("v1/")?;
         let mut path = url.path_segments_mut().map_err(|_| {
             Error::new(
@@ -615,8 +408,15 @@ impl Client {
         Ok(url)
     }
 
-    fn request(&self, method: Method, url: Url) -> reqwest::RequestBuilder {
-        let request = self.client.request(method, url);
+    pub(crate) fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
+
+    pub(crate) fn request(&self, method: Method, url: Url) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .request(method, url)
+            .header("X-ScopeDB-Client", "scopedb-client");
         if let Some(authorization) = &self.authorization {
             request.header(AUTHORIZATION, authorization.clone())
         } else {
@@ -653,10 +453,6 @@ impl Client {
             .header(UNCOMPRESSED_CONTENT_LENGTH, uncompressed_bytes.to_string())
             .body(body))
     }
-}
-
-fn map_failed_response(err: crate::protocol::ErrorStatus) -> Error {
-    err.into_error(ErrorKind::Unexpected)
 }
 
 fn decode_append_response(
@@ -716,8 +512,12 @@ fn decode_append_response(
     }
 
     let metadata_error = http_error.into_error(ErrorKind::AppendRowsFailed);
-    let mut error =
-        append_unknown_error(metadata_error.message().to_string()).set_http_status(status);
+    let mut error = append_unknown_error(metadata_error.message().to_string())
+        .set_http_status(status)
+        .set_api_error(
+            metadata_error.code().map(str::to_string),
+            metadata_error.details().cloned(),
+        );
     if let Some(request_id) = metadata_error.request_id() {
         error = error.set_request_id(request_id.to_string());
     }
@@ -725,10 +525,6 @@ fn decode_append_response(
         error = error.set_retry_after(retry_after);
     }
     Err(error)
-}
-
-fn ingest_unknown_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::Unexpected, message).set_persistent()
 }
 
 fn append_unknown_error(message: impl Into<String>) -> Error {
@@ -847,7 +643,7 @@ mod tests {
     fn committed_append_response_is_returned() {
         let result = decode(
             StatusCode::OK,
-            br#"{"append_state":"committed","num_rows_inserted":2}"#,
+            br#"{"status":"committed","num_rows_inserted":2}"#,
         )
         .unwrap();
 
@@ -859,12 +655,7 @@ mod tests {
     fn rejected_append_error_preserves_row_details_and_retry_status() {
         let error = decode(
             StatusCode::SERVICE_UNAVAILABLE,
-            br#"{
-                "message":"validation failed",
-                "append_state":"rejected",
-                "row_errors":[{"row_index":3,"column":"ts","message":"invalid timestamp"}],
-                "row_errors_truncated":true
-            }"#,
+            br#"{"message":"validation failed","code":"ingest_failure","details":{"status":"rejected","row_errors":[{"row_index":3,"column":"ts","message":"invalid timestamp"}],"row_errors_truncated":true}}"#,
         )
         .unwrap_err();
 
@@ -884,12 +675,7 @@ mod tests {
         let error = decode_append_response(
             StatusCode::SERVICE_UNAVAILABLE,
             &headers,
-            br#"{
-                "message":"capacity is temporarily unavailable",
-                "request_id":"body-request",
-                "retryable":false,
-                "append_state":"rejected"
-            }"#,
+            br#"{"message":"capacity is temporarily unavailable","request_id":"body-request","retryable":false,"code":"ingest_failure","details":{"status":"rejected"}}"#,
         )
         .unwrap_err();
 
@@ -904,7 +690,7 @@ mod tests {
     fn unknown_append_outcome_is_never_retryable() {
         let error = decode(
             StatusCode::SERVICE_UNAVAILABLE,
-            br#"{"message":"coordinator unavailable","append_state":"unknown"}"#,
+            br#"{"message":"coordinator unavailable","code":"ingest_failure","details":{"status":"unknown"}}"#,
         )
         .unwrap_err();
 
