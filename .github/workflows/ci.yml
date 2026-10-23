@@ -14,6 +14,7 @@
 
 name: CI (Rust SDK)
 on:
+  workflow_call:
   pull_request:
     branches: [ main ]
   push:
