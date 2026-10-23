@@ -96,7 +96,8 @@ impl ClientBuilder {
     }
 
     /// Bounds each table append and Catalog mutation HTTP request, including
-    /// reading the response body. Defaults to 30 seconds and must be nonzero.
+    /// reading the response body. Defaults to 30 seconds and must be finite and nonzero.
+    /// This deadline cannot be disabled; increase it when writes need more time.
     /// The budget starts after local encoding, compression, and request preparation.
     /// Stream `attempt_timeout` settings override this default. A timeout does
     /// not roll back the write; its commit outcome can be unknown.
