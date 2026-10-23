@@ -47,6 +47,10 @@ pub(crate) const MAX_APPEND_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_APPEND_ROWS: usize = 200_000;
 const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// An async client for queries, table writes, and catalog operations.
+///
+/// Start with [`Self::builder`] to configure your endpoint and API key.
+/// Clones share the underlying HTTP connection pool.
 #[derive(Debug, Clone)]
 pub struct Client {
     endpoint: Url,
@@ -89,7 +93,20 @@ impl ClientBuilder {
     }
 
     /// Uses a preconfigured compatible HTTP client.
-    /// Disable redirects and automatic retries on this client to prevent replaying writes.
+    ///
+    /// Use the re-exported [`crate::reqwest`] version. Disable redirects and
+    /// transport retries to prevent replaying writes; the SDK's default client
+    /// already does this.
+    ///
+    /// ```
+    /// use scopedb_client::reqwest;
+    ///
+    /// let http_client = reqwest::Client::builder()
+    ///     .redirect(reqwest::redirect::Policy::none())
+    ///     .retry(reqwest::retry::never())
+    ///     .build()?;
+    /// # Ok::<(), reqwest::Error>(())
+    /// ```
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
         self.client = Some(client);
         self
@@ -101,6 +118,11 @@ impl ClientBuilder {
     /// The budget starts after local encoding, compression, and request preparation.
     /// Stream `attempt_timeout` settings override this default. A timeout does
     /// not roll back the write; its commit outcome can be unknown.
+    ///
+    /// This is a per-attempt budget. Waiting for stream capacity, retry backoff,
+    /// and the total duration of a flush or shutdown are outside it.
+    /// Append timeouts are exposed through [`Error::write_details`] and are
+    /// never automatically replayed.
     ///
     /// Shorter timeouts on a custom HTTP client still apply.
     pub fn write_timeout(mut self, timeout: Duration) -> Self {
@@ -175,6 +197,8 @@ impl Client {
     ///
     /// Use the HTTP types re-exported from [`crate::reqwest`] to avoid a
     /// dependency-version mismatch in applications using another reqwest major.
+    /// Configure the HTTP client as described in [`ClientBuilder::http_client`]
+    /// to prevent automatic write replay. The write timeout defaults to 30 seconds.
     pub fn new<E: IntoUrl>(endpoint: E, client: reqwest::Client) -> Result<Self, Error> {
         match endpoint.into_url() {
             Ok(mut endpoint) => {

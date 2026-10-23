@@ -1,6 +1,6 @@
 # Rust HTTP API reference
 
-This SDK requires ScopeDB 0.6.0 or later. All requests identify the client through `X-ScopeDB-Client: scopedb-client`. An optional API key is sent as a Bearer token.
+All requests identify the client through `X-ScopeDB-Client: scopedb-client`. An optional API key is sent as a Bearer token.
 
 ## Declarative Catalog
 
@@ -54,7 +54,7 @@ A rejected request can include row-level errors:
 
 Direct `Table::append` makes one attempt. `Table::append_stream` batches values and retries temporary rejections. Replaying transient unknown outcomes requires `.retry_unknown(true)` and can duplicate rows. Client timeouts are never automatically replayed. Use `flush` or `shutdown` to observe completion and delivery reports. See the [writing guide](../README.md#writing-rows) for batching, concurrency, and failure policies.
 
-ScopeDB 0.6's NDJSON input decoder is limited to signed 64-bit integers, even for `uint` columns. This input restriction does not apply to query results, whose `uint` cells support the full unsigned 64-bit range.
+NDJSON input is limited to signed 64-bit integers, even for `uint` columns and nested JSON values. This input restriction does not apply to query results, whose `uint` cells support the full unsigned 64-bit range.
 
 ## Statements
 
@@ -87,4 +87,4 @@ The JSON result format encodes cells as strings or null, with field metadata pro
 
 HTTP errors use `{ "code": "...", "message": "...", "details": ... }`. `Error::code()` and `details()` preserve unknown codes and structured details. `http_status()`, `request_id()`, and `retry_after()` expose transport diagnostics. Failed statements additionally expose `statement_details()`; append failures expose `append_details()`.
 
-The legacy transform Ingest API is removed. Shape events before appending, or append raw events and execute a separate ScopeQL transformation. These are separate commits. See the [0.6 migration](../README.md#migrate-to-scopedb-06) and [Ingest migration](../README.md#migrate-from-ingest).
+The legacy transform Ingest API is removed. Shape events before appending, or append raw events and execute a separate ScopeQL transformation. See [Upgrade from 0.3 to 0.4](migration-0.4.md#replace-ingest-with-append).

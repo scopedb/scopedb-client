@@ -18,6 +18,11 @@ use crate::Error;
 use crate::append_stream::AppendStreamBuilder;
 use crate::protocol::AppendRowsResult;
 
+/// A table selected for writes or catalog reads.
+///
+/// The table must already exist for writes. Database and schema default to
+/// `scopedb` and `public`; override them with [`Self::with_database`] and
+/// [`Self::with_schema`].
 #[derive(Debug, Clone)]
 pub struct Table {
     client: Client,
@@ -64,7 +69,26 @@ impl Table {
             .map(|_| ())
     }
 
-    /// Appends at most 8 MiB of uncompressed newline-delimited JSON to this table.
+    /// Writes newline-delimited JSON to this table in one HTTP attempt.
+    ///
+    /// Each line must be a JSON object matching the destination columns. A request
+    /// allows at most 8 MiB of uncompressed NDJSON and 200,000 rows. The SDK sends
+    /// it with zstd compression and does not automatically retry it.
+    ///
+    /// Integer inputs must fit in a signed 64-bit integer, including values in
+    /// `uint` columns and nested JSON. Larger integers are rejected without
+    /// narrowing; query results still support the full `u64` range.
+    ///
+    /// ```no_run
+    /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
+    /// let result = client
+    ///     .table("events")
+    ///     .append(r#"{"id": 1, "name": "page_view"}"#)
+    ///     .await?;
+    /// println!("Written: {} rows", result.num_rows_inserted);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn append(&self, ndjson: impl Into<String>) -> Result<AppendRowsResult, Error> {
         self.client
             .append_rows(

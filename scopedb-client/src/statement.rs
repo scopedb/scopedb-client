@@ -24,6 +24,8 @@ use crate::protocol::StatementRequest;
 use crate::protocol::StatementStatus;
 use crate::result::ResultSet;
 
+/// A query with optional execution limits. Use [`Self::execute`] to wait for its
+/// result, or [`Self::submit`] to retain a handle for progress and cancellation.
 #[derive(Debug)]
 pub struct Statement {
     client: Client,
@@ -117,6 +119,20 @@ impl Statement {
     }
 }
 
+/// Tracks one submitted query. Keep the handle to inspect progress, wait for
+/// results, or request cancellation.
+///
+/// | Operation | Method |
+/// | --------- | ------ |
+/// | Read the last observed status without a request | [`Self::snapshot`] |
+/// | Fetch the current status | [`Self::refresh`] |
+/// | Wait for results | [`Self::wait`] |
+/// | Request cancellation | [`Self::cancel`] |
+///
+/// Dropping a wait or refresh future stops local waiting without cancelling
+/// execution. Terminal statuses are cached, so waiting again returns the result
+/// without another request. Retry temporary read failures on this handle rather
+/// than submitting another query.
 #[derive(Debug)]
 pub struct StatementHandle {
     client: Client,
