@@ -4,6 +4,8 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+## v0.4.1 (2026-10-23)
+
 ### Improvements
 
 * Shorten the API documentation landing page and consolidate the 0.3-to-0.4 upgrade steps, including Ingest migration, in one guide.
