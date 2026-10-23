@@ -36,8 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - [SDK guide](https://www.scopedb.io/docs/developer/rust)
 - [API reference](https://docs.rs/scopedb-client)
-- [Examples][example-guide]
-- [Changelog][changelog]
+- Runnable examples are documented in `examples/README.md`.
+- Release history is recorded in the repository's `CHANGELOG.md`.
 - [Report an issue](https://github.com/scopedb/scopedb-client/issues)
 
 This SDK sends ScopeQL statements to ScopeDB; the language is documented separately. Use these canonical entry points:
@@ -116,7 +116,7 @@ resource.apply(&definition, CatalogOptions {
 # }
 ```
 
-See [`examples/catalog.rs`][catalog-example] for read-only catalog discovery.
+See `examples/catalog.rs` for read-only catalog discovery.
 
 ## Writing rows
 
@@ -205,13 +205,13 @@ println!("Written: {} rows", result.num_rows_inserted);
 
 ### More examples
 
-| Task                                 | Example                                           |
-| ------------------------------------ | ------------------------------------------------- |
-| Write NDJSON                         | [`append.rs`][append-example]                     |
-| Send rows with a stream              | [`append_stream.rs`][append-stream-example]       |
-| Import many rows                     | [`bulk_append.rs`][bulk-append-example]           |
-| Write logs or events                 | [`telemetry.rs`][telemetry-example]               |
-| Import an NDJSON file                | [`import_ndjson.rs`][import-ndjson-example]       |
+| Task                    | Example                     |
+| ----------------------- | --------------------------- |
+| Write NDJSON            | `examples/append.rs`        |
+| Send rows with a stream | `examples/append_stream.rs` |
+| Import many rows        | `examples/bulk_append.rs`   |
+| Write logs or events    | `examples/telemetry.rs`     |
+| Import an NDJSON file   | `examples/import_ndjson.rs` |
 
 ## Inspecting errors
 
@@ -304,21 +304,10 @@ Review these behavior changes when migrating:
 
 ## Examples
 
-The [example guide][example-guide] includes setup instructions and commands to run each example from the repository root.
+The example guide in `examples/README.md` includes setup instructions and commands to run each example from the repository root.
 
-The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][rust-http-api]. Release history and the maintainer runbook are in [`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
+The wire-level endpoint and payload reference is in `docs/rust-http-api.md`. Release history and the maintainer runbook are in the repository's `CHANGELOG.md` and `RELEASE.md`.
 
 ## License
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
-
-[append-example]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/examples/append.rs
-[append-stream-example]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/examples/append_stream.rs
-[bulk-append-example]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/examples/bulk_append.rs
-[catalog-example]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/examples/catalog.rs
-[changelog]: https://github.com/scopedb/scopedb-client/blob/main/CHANGELOG.md
-[example-guide]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/examples/README.md
-[import-ndjson-example]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/examples/import_ndjson.rs
-[release]: https://github.com/scopedb/scopedb-client/blob/main/RELEASE.md
-[rust-http-api]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/docs/rust-http-api.md
-[telemetry-example]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/examples/telemetry.rs

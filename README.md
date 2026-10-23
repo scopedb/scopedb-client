@@ -42,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [API reference](https://docs.rs/scopedb-client)
 - [Client configuration and usage](scopedb-client/README.md)
 - [Examples](scopedb-client/examples/README.md)
+- [HTTP wire reference](scopedb-client/docs/rust-http-api.md)
 - [Changelog](CHANGELOG.md)
 - [Report an issue](https://github.com/scopedb/scopedb-client/issues)
 
