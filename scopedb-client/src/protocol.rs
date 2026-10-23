@@ -53,8 +53,7 @@ impl fmt::Display for AppendState {
 /// The result of a committed table append.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResult {
-    #[serde(rename = "status")]
-    pub append_state: AppendState,
+    pub status: AppendState,
     pub num_rows_inserted: i64,
 }
 
@@ -69,8 +68,7 @@ pub struct AppendRowError {
 /// Structured failure details returned by the table append API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
-    #[serde(rename = "status")]
-    pub append_state: AppendState,
+    pub status: AppendState,
     #[serde(default)]
     pub row_errors: Vec<AppendRowError>,
     #[serde(default)]
@@ -153,6 +151,7 @@ impl ErrorStatus {
     pub(crate) fn into_error(self, kind: ErrorKind) -> Error {
         let mut error = Error::new(kind, self.message)
             .set_http_status(self.code)
+            .set_server_retryable(self.retryable)
             .set_api_error(self.api_code, self.details);
         if let Some(request_id) = self.request_id {
             error = error.set_request_id(request_id);
@@ -408,6 +407,7 @@ impl StatementStatus {
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct StatementEstimatedProgress {
     /// Total progress in percentage: `[0.0, 100.0]`.
+    #[serde(deserialize_with = "deserialize_progress_float")]
     pub total_percentage: f64,
     /// Duration in nanoseconds since the statement is submitted.
     pub nanos_from_submitted: i64,
@@ -420,6 +420,7 @@ pub struct StatementEstimatedProgress {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatementProgress {
     /// Compute consumed by the statement, in seconds.
+    #[serde(deserialize_with = "deserialize_progress_float")]
     pub compute_seconds: f64,
     pub total_stages: i64,
     pub total_partitions: i64,
@@ -435,6 +436,14 @@ pub struct StatementProgress {
     pub skipped_rows: i64,
     pub skipped_compressed_bytes: i64,
     pub skipped_uncompressed_bytes: i64,
+}
+
+// Internally tagged enums and flattened fields buffer numbers through Serde.
+// Number understands serde_json's arbitrary-precision representation in that buffer.
+fn deserialize_progress_float<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    serde_json::Number::deserialize(d)?
+        .as_f64()
+        .ok_or_else(|| serde::de::Error::custom("progress number is outside the f64 range"))
 }
 
 impl StatementProgress {
@@ -485,7 +494,6 @@ pub struct FieldMetadata {
 pub enum DataType {
     #[serde(rename = "int")]
     Int,
-    #[serde(alias = "u_int")] // backward compatibility
     #[serde(rename = "uint")]
     UInt,
     #[serde(rename = "float")]
@@ -516,7 +524,7 @@ impl FromStr for DataType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "int" => Ok(Self::Int),
-            "uint" | "u_int" => Ok(Self::UInt),
+            "uint" => Ok(Self::UInt),
             "float" => Ok(Self::Float),
             "binary" => Ok(Self::Binary),
             "string" => Ok(Self::String),
@@ -557,7 +565,7 @@ mod tests {
             serde_json::from_str(r#"{"code":"invalid_schema","message":"not committed","details":{"status":"rejected"}}"#)
                 .unwrap();
 
-        assert_eq!(payload.details.append_state, AppendState::Rejected);
+        assert_eq!(payload.details.status, AppendState::Rejected);
         assert!(payload.details.row_errors.is_empty());
         assert!(!payload.details.row_errors_truncated);
     }

@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(error) => {
             if matches!(
-                error.append_details().map(|details| details.append_state),
+                error.append_details().map(|details| details.status),
                 Some(AppendState::Unknown)
             ) {
                 eprintln!("commit outcome is unknown; reconcile before replaying");

@@ -35,8 +35,11 @@ pub enum ErrorKind {
     /// A table append was rejected or its commit outcome is unknown.
     AppendRowsFailed,
 
-    /// A statement reached a failed or cancelled terminal state.
+    /// A statement reached a failed terminal state.
     StatementFailed,
+
+    /// A statement reached the cancelled terminal state.
+    StatementCancelled,
 
     /// A declarative catalog operation failed.
     CatalogFailed,
@@ -91,6 +94,7 @@ impl From<ErrorKind> for &'static str {
             ErrorKind::ConfigInvalid => "ConfigInvalid",
             ErrorKind::AppendRowsFailed => "AppendRowsFailed",
             ErrorKind::StatementFailed => "StatementFailed",
+            ErrorKind::StatementCancelled => "StatementCancelled",
             ErrorKind::CatalogFailed => "CatalogFailed",
         }
     }
@@ -119,24 +123,18 @@ enum ErrorStatus {
     Persistent,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct HttpErrorMetadata {
     status: Option<StatusCode>,
     request_id: Option<String>,
     retry_after: Option<Duration>,
+    retryable: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
 struct ApiErrorDetails {
     code: Option<String>,
     details: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ErrorDiagnostics {
-    context: Vec<(&'static str, String)>,
-    api_error: Option<Box<ApiErrorDetails>>,
-    source: Option<std::sync::Arc<anyhow::Error>>,
 }
 
 impl fmt::Display for ErrorStatus {
@@ -149,6 +147,7 @@ impl fmt::Display for ErrorStatus {
     }
 }
 
+#[derive(Clone)]
 pub struct Error {
     kind: ErrorKind,
     message: String,
@@ -186,6 +185,9 @@ impl fmt::Display for Error {
             write!(f, " => {}", self.message)?;
         }
 
+        if let Some(code) = self.code() {
+            write!(f, ", code: {code}")?;
+        }
         if let Some(status) = self.http_status() {
             write!(f, ", http_status: {}", status.as_u16())?;
         }
@@ -233,6 +235,9 @@ impl fmt::Debug for Error {
         write!(f, "{} ({})", self.kind, self.status)?;
         if !self.message.is_empty() {
             write!(f, " => {}", self.message)?;
+        }
+        if let Some(code) = self.code() {
+            write!(f, ", code: {code}")?;
         }
         if let Some(status) = self.http_status() {
             write!(f, ", http_status: {}", status.as_u16())?;
@@ -311,21 +316,6 @@ impl Error {
         self
     }
 
-    pub(crate) fn diagnostics(&self) -> ErrorDiagnostics {
-        ErrorDiagnostics {
-            context: self.context.clone(),
-            api_error: self.api_error.clone(),
-            source: self.source.clone(),
-        }
-    }
-
-    pub(crate) fn with_diagnostics(mut self, diagnostics: ErrorDiagnostics) -> Self {
-        self.context = diagnostics.context;
-        self.api_error = diagnostics.api_error;
-        self.source = diagnostics.source;
-        self
-    }
-
     pub(crate) fn set_write_source(mut self, src: impl Into<anyhow::Error>) -> Self {
         let source = src.into();
         if self.write_details.is_none() {
@@ -338,11 +328,6 @@ impl Error {
     /// Existing error kinds, sources, and HTTP diagnostics remain available.
     pub fn write_details(&self) -> Option<&WriteErrorDetails> {
         self.write_details.as_ref()
-    }
-
-    pub(crate) fn set_write_details(mut self, details: WriteErrorDetails) -> Self {
-        self.write_details = Some(details);
-        self
     }
 
     /// Return structured table-append failure details, when available.
@@ -378,6 +363,17 @@ impl Error {
     pub(crate) fn set_retry_after(mut self, retry_after: Duration) -> Self {
         self.http_metadata_mut().retry_after = Some(retry_after);
         self
+    }
+
+    pub(crate) fn set_server_retryable(mut self, retryable: Option<bool>) -> Self {
+        self.http_metadata_mut().retryable = retryable;
+        self
+    }
+
+    pub(crate) fn server_retryable(&self) -> Option<bool> {
+        self.http_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.retryable)
     }
 
     fn http_metadata_mut(&mut self) -> &mut HttpErrorMetadata {

@@ -47,6 +47,7 @@ const JSON_CONTENT_ENCODING: &str = "zstd";
 const UNCOMPRESSED_CONTENT_LENGTH: &str = "X-ScopeDB-Uncompressed-Content-Length";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 pub(crate) const MAX_APPEND_BODY_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_APPEND_ROWS: usize = 200_000;
 const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -91,6 +92,7 @@ impl ClientBuilder {
     }
 
     /// Uses a preconfigured compatible HTTP client.
+    /// Disable redirects and automatic retries on this client to prevent replaying writes.
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
         self.client = Some(client);
         self
@@ -125,7 +127,18 @@ impl ClientBuilder {
                 "write_timeout is too large",
             ));
         }
-        let mut client = Client::new(self.endpoint, self.client.unwrap_or_default())?;
+        let http_client = match self.client {
+            Some(client) => client,
+            None => reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()
+                .map_err(|err| {
+                    Error::new(ErrorKind::ConfigInvalid, "failed to build HTTP client")
+                        .set_source(err)
+                })?,
+        };
+        let mut client = Client::new(self.endpoint, http_client)?;
         client.write_timeout = self.write_timeout;
         if let Some(api_key) = self.api_key {
             if api_key.is_empty() {
@@ -167,6 +180,18 @@ impl Client {
     pub fn new<E: IntoUrl>(endpoint: E, client: reqwest::Client) -> Result<Self, Error> {
         match endpoint.into_url() {
             Ok(mut endpoint) => {
+                if !matches!(endpoint.scheme(), "http" | "https")
+                    || endpoint.host_str().is_none()
+                    || !endpoint.username().is_empty()
+                    || endpoint.password().is_some()
+                    || endpoint.query().is_some()
+                    || endpoint.fragment().is_some()
+                {
+                    return Err(Error::new(
+                        ErrorKind::ConfigInvalid,
+                        "endpoint must be an HTTP(S) URL without credentials, query, or fragment",
+                    ));
+                }
                 if !endpoint.path().ends_with('/') {
                     let path = format!("{}/", endpoint.path());
                     endpoint.set_path(&path);
@@ -241,6 +266,11 @@ impl Client {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .count();
+        if expected_rows > MAX_APPEND_ROWS {
+            return Err(append_rejected_error(format!(
+                "append payload exceeds the {MAX_APPEND_ROWS}-row limit",
+            )));
+        }
         let url = self.make_resource_url(&[
             "catalog",
             "databases",
@@ -253,11 +283,8 @@ impl Client {
         ])?;
         let body =
             zstd::stream::encode_all(ndjson.as_bytes(), ZSTD_COMPRESSION_LEVEL).map_err(|err| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    "failed to compress table append request body",
-                )
-                .set_source(err)
+                append_rejected_error("failed to compress table append request body")
+                    .set_source(err)
             })?;
         let request = self
             .request(Method::POST, url)
@@ -463,8 +490,7 @@ fn decode_append_response(
     if status == StatusCode::OK {
         return match serde_json::from_slice::<AppendRowsResult>(payload) {
             Ok(result)
-                if result.append_state == AppendState::Committed
-                    && result.num_rows_inserted >= 0 =>
+                if result.status == AppendState::Committed && result.num_rows_inserted >= 0 =>
             {
                 Ok(result)
             }
@@ -495,16 +521,16 @@ fn decode_append_response(
     let http_error = crate::protocol::ErrorStatus::from_http_parts(status, headers, payload);
     if let Ok(payload) = serde_json::from_slice::<AppendRowsErrorPayload>(payload)
         && matches!(
-            payload.details.append_state,
+            payload.details.status,
             AppendState::Rejected | AppendState::Unknown
         )
     {
-        let append_state = payload.details.append_state;
+        let status = payload.details.status;
         let error = http_error
             .into_error(ErrorKind::AppendRowsFailed)
             .set_append_details(payload.details);
 
-        return Err(if append_state == AppendState::Unknown {
+        return Err(if status == AppendState::Unknown {
             error.set_persistent()
         } else {
             error
@@ -514,6 +540,7 @@ fn decode_append_response(
     let metadata_error = http_error.into_error(ErrorKind::AppendRowsFailed);
     let mut error = append_unknown_error(metadata_error.message().to_string())
         .set_http_status(status)
+        .set_server_retryable(metadata_error.server_retryable())
         .set_api_error(
             metadata_error.code().map(str::to_string),
             metadata_error.details().cloned(),
@@ -530,7 +557,7 @@ fn decode_append_response(
 fn append_unknown_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::AppendRowsFailed, message)
         .set_append_details(AppendErrorDetails {
-            append_state: AppendState::Unknown,
+            status: AppendState::Unknown,
             row_errors: Vec::new(),
             row_errors_truncated: false,
         })
@@ -539,7 +566,7 @@ fn append_unknown_error(message: impl Into<String>) -> Error {
 
 fn append_rejected_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::AppendRowsFailed, message).set_append_details(AppendErrorDetails {
-        append_state: AppendState::Rejected,
+        status: AppendState::Rejected,
         row_errors: Vec::new(),
         row_errors_truncated: false,
     })
@@ -647,7 +674,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.append_state, AppendState::Committed);
+        assert_eq!(result.status, AppendState::Committed);
         assert_eq!(result.num_rows_inserted, 2);
     }
 
@@ -662,7 +689,7 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::AppendRowsFailed);
         assert!(error.is_temporary());
         let details = error.append_details().unwrap();
-        assert_eq!(details.append_state, AppendState::Rejected);
+        assert_eq!(details.status, AppendState::Rejected);
         assert_eq!(details.row_errors[0].row_index, 3);
         assert!(details.row_errors_truncated);
     }
@@ -696,10 +723,7 @@ mod tests {
 
         assert!(error.is_persistent());
         assert!(!error.is_temporary());
-        assert_eq!(
-            error.append_details().unwrap().append_state,
-            AppendState::Unknown
-        );
+        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 
     #[test]
@@ -707,10 +731,7 @@ mod tests {
         let error = decode(StatusCode::BAD_REQUEST, br#"{"message":"bad request"}"#).unwrap_err();
 
         assert!(error.is_persistent());
-        assert_eq!(
-            error.append_details().unwrap().append_state,
-            AppendState::Unknown
-        );
+        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 
     #[test]
@@ -723,9 +744,6 @@ mod tests {
 
         assert_eq!(error.message(), "unsupported path");
         assert!(error.is_persistent());
-        assert_eq!(
-            error.append_details().unwrap().append_state,
-            AppendState::Unknown
-        );
+        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 }

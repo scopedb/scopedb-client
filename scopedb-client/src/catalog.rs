@@ -28,13 +28,16 @@ use crate::protocol::ErrorStatus;
 use crate::protocol::apply_response_metadata;
 
 /// Complete tenant catalog. Apply replaces the entire selected subtree.
+/// Typed definitions reject unknown fields; use [`Catalog::raw`] for newer definitions.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogDocument {
     #[serde(default)]
     pub databases: Vec<CatalogDatabase>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogDatabase {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,6 +47,7 @@ pub struct CatalogDatabase {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogSchema {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +61,7 @@ pub struct CatalogSchema {
 /// A complete table definition. Omitted collections are empty and omitted
 /// optional fields are cleared. Storage is accepted only at creation.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogTable {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,6 +81,7 @@ pub struct CatalogTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogColumn {
     pub name: String,
     pub data_type: DataType,
@@ -89,6 +95,7 @@ pub struct CatalogColumn {
 
 /// Additional column index. ScopeDB 0.6 supports type "search" and analyzer "log".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogColumnIndex {
     #[serde(rename = "type")]
     pub index_type: String,
@@ -97,6 +104,7 @@ pub struct CatalogColumnIndex {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogDistinct {
     #[serde(default)]
     pub on: Vec<String>,
@@ -105,6 +113,7 @@ pub struct CatalogDistinct {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogView {
     pub name: String,
     pub statement: String,
@@ -273,26 +282,50 @@ impl<T> CatalogResource<T> {
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body);
         }
-        if mutation {
-            request = request.timeout(self.client.write_timeout());
-        }
-        let response = request.send().await.map_err(|e| {
-            catalog_transport_error(writing, "failed to send catalog request").set_source(e)
-        })?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        let bytes = response.bytes().await.map_err(|e| {
-            apply_response_metadata(
-                catalog_transport_error(writing, "failed to read catalog response").set_source(e),
-                status,
-                &headers,
-            )
-        })?;
+        let mut response_metadata = None;
+        let read_response = async {
+            let response = request.send().await.map_err(|e| {
+                catalog_transport_error(writing, "failed to send catalog request").set_source(e)
+            })?;
+            let status = response.status();
+            let headers = response.headers().clone();
+            response_metadata = Some((status, headers.clone()));
+            let bytes = response.bytes().await.map_err(|e| {
+                apply_response_metadata(
+                    catalog_transport_error(writing, "failed to read catalog response")
+                        .set_source(e),
+                    status,
+                    &headers,
+                )
+            })?;
+            Ok::<_, Error>((status, headers, bytes))
+        };
+        let (status, headers, bytes) = if mutation {
+            match tokio::time::timeout(self.client.write_timeout(), read_response).await {
+                Ok(result) => result?,
+                Err(source) => {
+                    let error = catalog_transport_error(writing, "catalog request timed out")
+                        .set_source(source);
+                    return Err(match response_metadata {
+                        Some((status, headers)) => apply_response_metadata(error, status, &headers),
+                        None => error,
+                    });
+                }
+            }
+        } else {
+            read_response.await?
+        };
         if !status.is_success() {
             let error = ErrorStatus::from_http_parts(status, &headers, &bytes)
                 .into_error(ErrorKind::CatalogFailed);
             return Err(if writing {
-                error.set_persistent()
+                if error.code().is_none() {
+                    error
+                        .set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
+                        .set_persistent()
+                } else {
+                    error.set_persistent()
+                }
             } else {
                 error
             });
@@ -333,7 +366,11 @@ impl<T> CatalogResource<T> {
         }
         let result = serde_json::from_value(value).map_err(|e| {
             apply_response_metadata(
-                catalog_transport_error(writing, "invalid catalog definition").set_source(e),
+                catalog_transport_error(
+                    writing,
+                    "cannot decode catalog definition; use raw() to retain unsupported fields",
+                )
+                .set_source(e),
                 status,
                 &headers,
             )

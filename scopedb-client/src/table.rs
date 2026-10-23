@@ -15,8 +15,6 @@
 use crate::CatalogTable;
 use crate::Client;
 use crate::Error;
-use crate::FieldSchema;
-use crate::Schema;
 use crate::append_stream::AppendStreamBuilder;
 use crate::protocol::AppendRowsResult;
 
@@ -49,15 +47,13 @@ impl Table {
     }
 
     pub fn identifier(&self) -> String {
-        let mut parts = Vec::with_capacity(3);
-        if let Some(database) = &self.database {
-            parts.push(quote_ident(database, '`'));
-        }
-        if let Some(schema) = &self.schema {
-            parts.push(quote_ident(schema, '`'));
-        }
-        parts.push(quote_ident(&self.table, '`'));
-        parts.join(".")
+        [
+            self.database.as_deref().unwrap_or("scopedb"),
+            self.schema.as_deref().unwrap_or("public"),
+            &self.table,
+        ]
+        .map(quote_ident)
+        .join(".")
     }
 
     pub async fn drop(&self) -> Result<(), Error> {
@@ -92,60 +88,18 @@ impl Table {
         )
     }
 
-    /// Returns the complete declarative table definition.
-    pub async fn describe(&self) -> Result<CatalogTable, Error> {
-        Ok(self
-            .client
-            .catalog()
-            .table(
-                self.database.as_deref().unwrap_or("scopedb"),
-                self.schema.as_deref().unwrap_or("public"),
-                &self.table,
-            )
-            .get()
-            .await?
-            .definition)
-    }
-
-    /// Replaces this table definition; use dry-run and If-Match to review changes.
-    pub async fn apply(
-        &self,
-        definition: &CatalogTable,
-        options: crate::CatalogOptions,
-    ) -> Result<crate::CatalogResult<CatalogTable>, Error> {
-        self.client
-            .catalog()
-            .table(
-                self.database.as_deref().unwrap_or("scopedb"),
-                self.schema.as_deref().unwrap_or("public"),
-                &self.table,
-            )
-            .apply(definition, options)
-            .await
-    }
-
-    /// Backward-compatible schema-only view of [`Table::describe`].
-    #[deprecated(note = "use describe")]
-    pub async fn table_schema(&self) -> Result<Schema, Error> {
-        let table = self.describe().await?;
-        let fields = table
-            .columns
-            .into_iter()
-            .map(|column| FieldSchema {
-                name: column.name,
-                data_type: column.data_type,
-            })
-            .collect();
-
-        Ok(Schema { fields })
+    /// Selects this table's complete definition and ETag for conditional changes.
+    pub fn catalog(&self) -> crate::CatalogResource<CatalogTable> {
+        self.client.catalog().table(
+            self.database.as_deref().unwrap_or("scopedb"),
+            self.schema.as_deref().unwrap_or("public"),
+            &self.table,
+        )
     }
 }
 
-fn quote_ident(input: &str, quote: char) -> String {
-    quote_scopeql(input, quote)
-}
-
-fn quote_scopeql(input: &str, quote: char) -> String {
+fn quote_ident(input: &str) -> String {
+    let quote = '`';
     let mut out = String::with_capacity(input.len() + 2);
     out.push(quote);
     for ch in input.chars() {
@@ -171,9 +125,31 @@ mod tests {
     use super::quote_ident;
 
     #[test]
+    fn identifiers_always_use_the_same_defaults_as_append_and_catalog() {
+        let client = crate::Client::builder("https://example.invalid")
+            .build()
+            .unwrap();
+        assert_eq!(
+            client.table("events").identifier(),
+            "`scopedb`.`public`.`events`"
+        );
+        assert_eq!(
+            client
+                .table("events")
+                .with_database("analytics")
+                .identifier(),
+            "`analytics`.`public`.`events`"
+        );
+        assert_eq!(
+            client.table("events").with_schema("archive").identifier(),
+            "`scopedb`.`archive`.`events`"
+        );
+    }
+
+    #[test]
     fn test_quote_ident() {
-        assert_eq!(quote_ident("plain", '`'), "`plain`");
-        assert_eq!(quote_ident("a`b", '`'), "`a\\`b`");
-        assert_eq!(quote_ident("a\nb", '`'), "`a\\nb`");
+        assert_eq!(quote_ident("plain"), "`plain`");
+        assert_eq!(quote_ident("a`b"), "`a\\`b`");
+        assert_eq!(quote_ident("a\nb"), "`a\\nb`");
     }
 }

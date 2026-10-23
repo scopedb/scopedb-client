@@ -88,12 +88,14 @@ impl Statement {
                 client,
                 statement_id: response.statement_id(),
                 format,
-                last_status: Some(response),
+                snapshot: Some(response),
             }),
             Response::Failed(err) => Err(err.into_error(ErrorKind::Unexpected)),
         }
     }
 
+    /// Submits and waits. Dropping this future stops polling, not server execution.
+    /// Retain a submitted handle to request cancellation explicitly.
     pub async fn execute(self) -> Result<ResultSet, Error> {
         self.submit().await?.wait().await
     }
@@ -115,7 +117,7 @@ pub struct StatementHandle {
     client: Client,
     statement_id: Uuid,
     format: ResultFormat,
-    last_status: Option<StatementStatus>,
+    snapshot: Option<StatementStatus>,
 }
 
 impl StatementHandle {
@@ -125,33 +127,22 @@ impl StatementHandle {
 
     /// Returns the status snapshot received by the most recent request without
     /// making a network request.
-    pub fn last_status(&self) -> Option<&StatementStatus> {
-        self.last_status.as_ref()
+    pub fn snapshot(&self) -> Option<&StatementStatus> {
+        self.snapshot.as_ref()
     }
 
-    /// Returns progress from the most recent status snapshot.
-    pub fn progress(&self) -> Option<&crate::StatementEstimatedProgress> {
-        self.last_status.as_ref().map(StatementStatus::progress)
-    }
-
-    /// Returns a result set when the most recent status snapshot is finished.
-    pub fn result_set(&self) -> Option<ResultSet> {
-        self.last_status.as_ref().and_then(|status| match status {
-            StatementStatus::Finished(s) => Some(s.result_set()),
-            _ => None,
-        })
-    }
-
-    /// Fetches and returns the latest statement status.
-    pub async fn status(&mut self) -> Result<&StatementStatus, Error> {
-        // already terminated - no need to fetch again
-        match self.last_status.as_ref() {
-            Some(StatementStatus::Finished(..))
-            | Some(StatementStatus::Failed(..))
-            | Some(StatementStatus::Cancelled(..)) => {
-                return Ok(self.last_status.as_ref().expect("status was matched above"));
-            }
-            _ => {}
+    /// Fetches a status snapshot, or returns the cached terminal state.
+    /// Requests on a handle are serialized through its mutable borrow.
+    pub async fn refresh(&mut self) -> Result<&StatementStatus, Error> {
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(StatementStatus::is_terminated)
+        {
+            return Ok(self
+                .snapshot
+                .as_ref()
+                .expect("terminal snapshot is present"));
         }
 
         let (format, statement_id) = (self.format, self.statement_id);
@@ -161,28 +152,23 @@ impl StatementHandle {
             .await?
         {
             Response::Success(status) => {
-                self.last_status = Some(status);
-                Ok(self.last_status.as_ref().expect("status was just assigned"))
+                self.snapshot = Some(status);
+                Ok(self.snapshot.as_ref().expect("status was just assigned"))
             }
             Response::Failed(err) => Err(err.into_error(ErrorKind::Unexpected)),
         }
     }
 
-    /// Backward-compatible alias for [`StatementHandle::status`].
-    #[deprecated(note = "use status")]
-    pub async fn fetch_once(&mut self) -> Result<(), Error> {
-        self.status().await.map(|_| ())
-    }
-
     /// Waits for the statement to terminate and returns its result set.
+    /// Dropping this future leaves the handle and server execution available.
     pub async fn wait(&mut self) -> Result<ResultSet, Error> {
         let mut delay = Duration::from_millis(5);
         let max_delay = Duration::from_secs(1);
 
         loop {
-            self.status().await?;
+            self.refresh().await?;
 
-            if let Some(status) = self.last_status.as_ref() {
+            if let Some(status) = self.snapshot.as_ref() {
                 match status {
                     StatementStatus::Finished(finished) => return Ok(finished.result_set()),
                     StatementStatus::Failed(failed) => {
@@ -194,7 +180,7 @@ impl StatementHandle {
                     }
                     StatementStatus::Cancelled(cancelled) => {
                         return Err(Error::new(
-                            ErrorKind::StatementFailed,
+                            ErrorKind::StatementCancelled,
                             format!("statement {} was cancelled", cancelled.statement_id),
                         ));
                     }
@@ -209,21 +195,16 @@ impl StatementHandle {
         }
     }
 
-    /// Backward-compatible alias for [`StatementHandle::wait`].
-    #[deprecated(note = "use wait")]
-    pub async fn fetch(&mut self) -> Result<ResultSet, Error> {
-        self.wait().await
-    }
-
-    /// Cancels execution and returns the complete status, including a result or
-    /// error when the statement finished before cancellation took effect.
+    /// Requests cancellation and caches the observed status. Pending or Running
+    /// means cancellation has not yet been observed; call wait() to settle it.
+    /// A completion race returns the full result or original execution failure.
     pub async fn cancel(&mut self) -> Result<StatementStatus, Error> {
-        if let Some(status) = self.last_status.as_ref().filter(|s| s.is_terminated()) {
+        if let Some(status) = self.snapshot.as_ref().filter(|s| s.is_terminated()) {
             return Ok(status.clone());
         }
         match self.client.cancel_statement(self.statement_id).await? {
             Response::Success(status) => {
-                self.last_status = Some(status.clone());
+                self.snapshot = Some(status.clone());
                 Ok(status)
             }
             Response::Failed(err) => Err(err.into_error(ErrorKind::Unexpected)),
@@ -235,7 +216,7 @@ impl StatementHandle {
             client,
             statement_id,
             format,
-            last_status: None,
+            snapshot: None,
         }
     }
 }

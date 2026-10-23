@@ -1,6 +1,6 @@
 # ScopeDB SDK for Rust
 
-`scopedb-client` is an async Rust client for ScopeDB. It supports statements, read-only REST catalog discovery, direct NDJSON table appends, and bounded concurrent streaming writes.
+`scopedb-client` is an async Rust client for ScopeDB. It supports statements, declarative catalog reads and conditional updates, direct NDJSON table appends, and bounded concurrent streaming writes.
 
 This development version requires ScopeDB 0.6.0 or later and uses its native Statement, declarative Catalog, and table ingest APIs. These changes are not yet published.
 
@@ -48,11 +48,11 @@ This SDK sends ScopeQL statements to ScopeDB; the language is documented separat
 
 ## Client configuration
 
-Applications that own TLS, proxy, timeout, or pooling settings can pass a compatible HTTP client through `.http_client(...)`. `Client::new(endpoint, http_client)` remains available when authentication is already configured on that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to avoid dependency-version mismatches.
+Applications that own TLS, proxy, timeout, or pooling settings can pass a compatible HTTP client through `.http_client(...)`. The SDK-owned HTTP client disables redirects and transport retries to avoid replaying writes; custom clients must use `.redirect(reqwest::redirect::Policy::none()).retry(reqwest::retry::never())` for the same guarantee. `Client::new(endpoint, http_client)` remains available when authentication is already configured on that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to avoid dependency-version mismatches.
 
 Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Configure it with `Client::builder(endpoint).write_timeout(Duration::from_secs(60))` before `build()`; it must be nonzero. `Client::new` uses the same default. Streams inherit the client timeout unless an append stream explicitly sets `attempt_timeout`. Shorter timeouts on a custom HTTP client still apply. Admission, retry backoff, and an entire `flush()`/`shutdown()` barrier are outside this budget.
 
-Client timeouts after an HTTP attempt begins preserve the existing error kind and source and add `Error::write_details()` with `reason: WriteErrorReason::Timeout` and `outcome: AppendState::Unknown`; `is_retryable()` is false. The structured details, source, and HTTP diagnostics remain available on subsequent errors returned by the stream and batch failure events. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Append streams retain their existing at-least-once retry policy for other transient unknown outcomes; those retries may duplicate committed rows.
+Append client timeouts after an HTTP attempt begins preserve the existing error kind and source and add `Error::write_details()` with `reason: WriteErrorReason::Timeout` and `outcome: AppendState::Unknown`; `is_retryable()` is false. The structured details, source, and HTTP diagnostics remain available on subsequent errors returned by the stream and batch failure events. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Streams retry temporary rejected batches by default. Unknown outcomes require explicit `.retry_unknown(true)`; this permits at-least-once delivery and can duplicate rows. Catalog interruptions use `catalog_commit_outcome_unknown` and are never replayed automatically.
 
 ```rust
 use scopedb_client::{AppendState, WriteErrorReason};
@@ -85,11 +85,11 @@ println!("{rows:?}");
 
 `raw_rows()` exposes the string-or-null wire cells without parsing. `to_values()` borrows the result while `into_values()` consumes it and moves owned string cells. `to_objects()` and `into_objects()` key values by output column name; they return an error when names are duplicated, so use the value form for intentionally duplicated columns. `first()` converts only the first row for point lookups and aggregates.
 
-For lifecycle control, call `client.statement(scopeql).submit()` and retain the returned handle. `last_status()` reads the latest cached snapshot without a network request, `status().await` fetches one current status, `wait()` polls to a terminal result, and `cancel()` requests cancellation. The statement ID and initial status snapshot are available immediately after submission.
+For lifecycle control, call `client.statement(scopeql).submit()` and retain the returned handle. `snapshot()` reads the latest cached status without a network request, `refresh().await` fetches one current status, `wait()` polls to a terminal result, and `cancel()` requests cancellation. The statement ID and initial snapshot are available immediately after submission. `cancel()` returns the observed status: a pending or running response still needs `wait()`; completion retains results and failure retains the original error. Cancellation is a distinct `ErrorKind::StatementCancelled` when waiting. Terminal snapshots are cached. Dropping a query, refresh, or wait future stops local waiting and does not cancel server execution; keep a handle and call `cancel()` explicitly.
 
 ## Browse the catalog
 
-Catalog reads return complete declarative definitions and an opaque ETag. Select the smallest subtree you need. Apply replaces that entire subtree, including its children; omitted fields are cleared. Preview with `dry_run`, apply with `if_match` to reject concurrent changes, and opt into `allow_destructive` only after reviewing data loss. Mutations never retry automatically. An interrupted or malformed mutation response has code `catalog_commit_outcome_unknown`; read the current state before deciding whether to retry. Use `raw()` to retain fields introduced by newer servers.
+Catalog reads return complete declarative definitions and an opaque ETag. Select the smallest subtree you need. Apply replaces that entire subtree, including its children; omitted fields are cleared. Preview with `dry_run`, apply with `if_match` to reject concurrent changes, and opt into `allow_destructive` only after reviewing data loss. Mutations never retry automatically. An interrupted or malformed mutation response has code `catalog_commit_outcome_unknown`; read the current state before deciding whether to retry. Typed definitions reject unknown fields, including nested fields, to prevent silent loss during replacement. Use `raw()` to read and apply newer definitions as `serde_json::Value`; arbitrary-precision JSON numbers are retained.
 
 ```rust
 use scopedb_client::CatalogOptions;
@@ -141,7 +141,7 @@ println!("Written: {} rows", report.committed_rows);
 # }
 ```
 
-`send()` adds one row to the SDK's pending writes; `send_all()` adds rows from an iterator. These calls do not wait for the rows to be written. Call `shutdown()` when you are finished to wait for writing to complete and close the stream.
+`send()` adds one row to the SDK's pending writes; `send_all()` adds rows from an iterator. These calls do not wait for the rows to be written. Call `shutdown()` when you are finished to wait for writing to complete and close the stream. If `send_all()` fails partway, its error includes the accepted count and `stats()` retains cumulative counts; still settle that accepted prefix with `shutdown()`.
 
 To wait for pending writes while keeping the stream open, call `flush()`:
 
@@ -155,6 +155,10 @@ println!("Written: {} rows", report.committed_rows);
 # Ok(())
 # }
 ```
+
+A report covers activity since the previous barrier. With the default Stop policy, a failed `flush()` or `shutdown()` returns the complete error, and `stats().last_report` retains partial settlement counts. Earlier batches may have committed; never replay the entire input blindly. `stats().last_failure.error` preserves the code, details, timeout reason, HTTP metadata, and source in Continue mode as well.
+
+Dropping an enqueued flush or started shutdown future stops waiting, but settlement continues. Call `shutdown()` again to observe the final result. Dropping all producer handles drains accepted rows while the Tokio runtime remains alive; runtime termination cannot guarantee delivery.
 
 ### Continue after a batch fails
 
@@ -203,7 +207,7 @@ println!("Written: {} rows", result.num_rows_inserted);
 | Send rows with a stream              | [`append_stream.rs`][append-stream-example]       |
 | Import many rows                     | [`bulk_append.rs`][bulk-append-example]           |
 | Write logs or events                 | [`telemetry.rs`][telemetry-example]               |
-| Shape source fields before appending | [`append_transform.rs`][append-transform-example] |
+| Import an NDJSON file                | [`import_ndjson.rs`][import-ndjson-example]       |
 
 ## Inspecting errors
 
@@ -238,7 +242,9 @@ if let Some(details) = error.statement_details() {
 let table = client.table("events").with_schema("public");
 println!("identifier = {}", table.identifier());
 
-let description = table.describe().await?;
+let snapshot = table.catalog().get().await?;
+let description = snapshot.definition;
+println!("etag = {}", snapshot.etag);
 println!("columns = {}", description.columns.len());
 # Ok(())
 # }
@@ -248,9 +254,13 @@ println!("columns = {}", description.columns.len());
 
 - Replace `with_exec_timeout` with `with_max_elapsed(Duration)`; `with_max_estimated(Duration)` independently limits estimated execution time. Durations must be positive. Elapsed time includes queueing; omitted limits use server defaults.
 - Replace `list_*`, `fetch_*`, and `iterate_*` Catalog calls with `client.catalog().get()` or a database/schema/table/view selector followed by `.get()`. Reads return the complete `definition` and an `etag`, without pagination.
-- `Table::describe()` returns `CatalogTable`; use `distinct` and `retention_days`, replacing `distinct_on` and `data_retention_days`. Use `Table::apply()` or a catalog resource for complete replacements. `raw()` retains fields unknown to this SDK.
+- Replace `Table::describe()` and `table_schema()` with `table.catalog().get()`, returning both `definition` and `etag`. Replace `Table::apply()` with `table.catalog().apply()`. Use `distinct` and `retention_days`, replacing `distinct_on` and `data_retention_days`. Typed definitions reject unsupported fields; `.raw()` preserves them. `Table::drop()` remains available; use Catalog `delete()` when a precondition or preview is needed.
 - `cancel()` returns and caches the complete `StatementStatus`, including any finished result or original failure. Failed states require `error`; cancelled states have no server message. `Error::code()` and `details()` retain structured errors, including unknown codes. Progress includes `compute_seconds`.
-- Table appends use `/v1/catalog/databases/{db}/schemas/{schema}/tables/{table}/ingest`. The public `append_state` field and stream delivery rules remain; serde maps the new wire `status` and nested `details.status` fields. Missing or unreadable outcomes remain unknown.
+- Table appends use `/v1/catalog/databases/{db}/schemas/{schema}/tables/{table}/ingest`. Rename `AppendRowsResult::append_state` and `AppendErrorDetails::append_state` to `status`, matching the native response. Missing or unreadable outcomes remain unknown. Stream unknown retries now require `.retry_unknown(true)`; client timeouts are never replayed.
+- Replace `last_status()` with `snapshot()`, `status()` / `fetch_once()` with `refresh()`, and `fetch()` with `wait()`. Read progress from `snapshot().map(StatementStatus::progress)` and match `StatementStatus::Finished` to inspect cached results. `wait()` also returns cached results without another request.
+- Replace the removed `json_rows()` alias with `raw_rows()`, which directly returns the slice. Replace stream builder aliases `batch_bytes`, `max_pending_bytes`, and `max_in_flight_requests` with `target_batch_bytes`, `max_buffered_bytes`, and `max_concurrent_batches`.
+- Read `stats().last_failure.error` instead of separate message/status fields. Its complete `Error` retains diagnostics across barriers. `AppendStreamStats` no longer implements equality because errors carry sources.
+- `Table::identifier()` always includes the database and schema defaults, so SQL queries and `drop()` select the same table as Append and Catalog, including when only the database is configured. The legacy `u_int` type spelling is removed; use `uint`.
 
 Upgrading the server from 0.5 clears statement history and saved results. Previously saved statement handles cannot be resumed. The removed transform Ingest API requires the migration below.
 
@@ -258,7 +268,7 @@ Upgrading the server from 0.5 clears statement history and saved results. Previo
 
 `Client::insert`, `Client::ingest_stream`, `IngestStream`, `IngestStreamBuilder`, and `IngestResult` have been removed. Use `Table::append` for one NDJSON request or `Table::append_stream` to batch Rust values. This SDK version requires ScopeDB 0.6.0 or later.
 
-Append accepts rows matching the destination columns, not a ScopeQL statement. Move field renaming, type conversion, filtering, and routing into the producer before calling `send`. See [`append_transform.rs`][append-transform-example] for a runnable example. For transformations that must run in ScopeQL, append the original event into an `object` column in a staging table, then execute a separate `FROM ... SELECT ... INSERT INTO ...` statement. Staging and transformation are separate commits; track processed batches before retrying the transformation.
+Append accepts rows matching the destination columns, not a ScopeQL statement. Move field renaming, type conversion, filtering, and routing into the producer before calling `send`. For transformations that must run in ScopeQL, append the original event into an `object` column in a staging table, then execute a separate `FROM ... SELECT ... INSERT INTO ...` statement. Staging and transformation are separate commits; track processed batches before retrying the transformation.
 
 ```rust
 # async fn demo() -> Result<(), scopedb_client::Error> {
@@ -285,7 +295,7 @@ Review these behavior changes when migrating:
 - Append stream `build()` returns a `Result`; handle configuration errors with `?` before sending records.
 - `flush()` and `shutdown()` return an `AppendDeliveryReport` for activity since the previous report. Read `committed_rows` instead of `num_rows_inserted`, and check `outcome` when using the continue policy. Direct `append()` still returns `num_rows_inserted`.
 - Append streams send up to four batches concurrently by default. Use `.max_concurrent_batches(1)` for sequential requests; queries still require `ORDER BY` for ordered results.
-- Append streams may retry transient unknown outcomes, which can duplicate rows. Use `.max_retries(0)` to preserve the old stream's no-replay behavior. Client timeouts are never retried. Direct `append()` makes one attempt.
+- Append streams retry temporary rejections, where no rows committed. Use `.retry_unknown(true)` only if duplicate rows are acceptable, or `.max_retries(0)` to disable all retries. Client timeouts are never retried. Direct `append()` makes one attempt.
 
 ## Examples
 
@@ -303,7 +313,7 @@ Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses
 [catalog-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/catalog.rs
 [changelog]: https://github.com/scopedb/scopedb-client/blob/main/CHANGELOG.md
 [example-guide]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/README.md
-[append-transform-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/append_transform.rs
+[import-ndjson-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/import_ndjson.rs
 [release]: https://github.com/scopedb/scopedb-client/blob/main/RELEASE.md
 [rust-http-api]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/docs/rust-http-api.md
 [telemetry-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/telemetry.rs
@@ -316,4 +326,4 @@ From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` to an authe
 cargo test -p scopedb-client --test native_06 -- --ignored --nocapture
 ```
 
-The test creates a uniquely named schema and checks dry-run, ETag conflicts, committed and rejected appends, statement errors, elapsed timeout, and a cancellation racing with completion. It deletes its schema before returning. Running cancellation is covered separately with controlled HTTP responses in the unit tests.
+The test creates a uniquely named schema and checks dry-run, ETag conflicts, direct and concurrent streaming appends, row rejections, statement errors, elapsed timeout, and cancellation racing with completion. It deletes its schema before returning. For an isolated local engine, `SCOPEDB_TENANT_ID` supplies tenant identity instead of a platform API key. Running cancellation, lost acknowledgements, and stale responses after dropping a future are covered by controlled HTTP tests.

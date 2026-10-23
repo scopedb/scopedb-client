@@ -18,7 +18,7 @@ PUT replaces the selected subtree, including all its children. Omitted collectio
 
 `CatalogOptions` maps `dry_run` and `allow_destructive` to query parameters and `if_match` to the `If-Match` header. A dry run validates and rolls back the changes; its ETag identifies the base version. A stale precondition returns HTTP 412 with code `catalog_version_mismatch`. Potentially destructive changes require explicit authorization. Keep the ETag exactly as returned, including its quotes.
 
-Definitions include databases, schemas, tables, views, comments, computed-column `expression`, explicit column `indexes`, partitioning, clustering, `distinct`, and `retention_days`. Storage is accepted on creation and omitted from exports. `raw()` reads and applies `serde_json::Value` to retain fields unknown to this SDK.
+Definitions include databases, schemas, tables, views, comments, computed-column `expression`, explicit column `indexes`, partitioning, clustering, `distinct`, and `retention_days`. Storage is accepted on creation and omitted from exports. Typed definitions reject unknown fields at every modeled level. `raw()` reads and applies `serde_json::Value` to retain unknown fields and arbitrary-precision JSON numbers.
 
 Mutations use the client's `write_timeout` and never retry automatically. A transport or response-decoding interruption after sending produces `catalog_commit_outcome_unknown`; read the current definition before deciding whether to replay. A dry run cannot commit, so it does not receive this code solely for a transport failure.
 
@@ -30,7 +30,7 @@ Content-Type: application/x-ndjson
 Content-Encoding: zstd
 ```
 
-Each non-empty line is one row object matching an existing table. The SDK limits each uncompressed request to 8 MiB; the server also limits requests to 200,000 rows. A successful response is:
+Each non-empty line is one row object matching an existing table. The SDK and server limit each uncompressed request to 8 MiB and 200,000 rows. A successful response is:
 
 ```json
 { "status": "committed", "num_rows_inserted": 2 }
@@ -50,9 +50,9 @@ A rejected request can include row-level errors:
 }
 ```
 
-`committed` means all request rows committed, `rejected` means none committed, and `unknown` means the outcome cannot be determined. Row indexes are zero-based within the request. Missing or malformed outcome details are treated as unknown. The public `AppendRowsResult::append_state` and `AppendErrorDetails::append_state` fields retain their names while serde uses the new wire fields.
+`committed` means all request rows committed, `rejected` means none committed, and `unknown` means the outcome cannot be determined. Row indexes are zero-based within the request. Missing or malformed outcome details are treated as unknown. Both `AppendRowsResult::status` and `AppendErrorDetails::status` match the native wire fields.
 
-Direct `Table::append` makes one attempt. `Table::append_stream` batches values and may retry transient outcomes under its delivery policy; replays can duplicate rows. Client timeouts are never automatically replayed. Use `flush` or `shutdown` to observe completion and delivery reports. See the [writing guide](../README.md#writing-rows) for batching, concurrency, and failure policies.
+Direct `Table::append` makes one attempt. `Table::append_stream` batches values and retries temporary rejections. Replaying transient unknown outcomes requires `.retry_unknown(true)` and can duplicate rows. Client timeouts are never automatically replayed. Use `flush` or `shutdown` to observe completion and delivery reports. See the [writing guide](../README.md#writing-rows) for batching, concurrency, and failure policies.
 
 ## Statements
 
@@ -77,7 +77,7 @@ A submission request is:
 
 All three endpoints return the same complete status family: pending, running, finished, failed, or cancelled. Each includes `statement_id`, `created_at`, and progress with `compute_seconds`. Finished responses contain `result_set`; failed responses contain required `error: { code, message, details? }`. Neither failed nor cancelled responses require a top-level message. HTTP success alone does not mean execution succeeded.
 
-`last_status` returns the cached snapshot, `status` fetches an active statement once, and `wait` polls to a terminal state. `cancel` returns and caches the complete response; when execution finishes before cancellation, its result or original failure remains available. Terminal cached states do not trigger another request. Upgrading from 0.5 clears saved statement history and results.
+`snapshot` returns the cached snapshot, `refresh` fetches an active statement once, and `wait` polls to a terminal state. `cancel` returns and caches the complete response; when execution finishes before cancellation, its result or original failure remains available. Pending or running cancellation responses are observations, not cancellation acknowledgements; continue waiting for a terminal state. `wait()` returns `StatementCancelled` for cancellation and `StatementFailed` for execution failure. Terminal cached states do not trigger another request. Dropping a waiting future does not cancel server execution. Upgrading from 0.5 clears saved statement history and results.
 
 The JSON result format encodes cells as strings or null, with field metadata providing their types. `raw_rows` preserves those wire cells. Use value or object conversions for typed values; duplicate field names are rejected by object conversion.
 

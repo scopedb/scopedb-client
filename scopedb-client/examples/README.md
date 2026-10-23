@@ -20,7 +20,7 @@ These examples can run against a reachable ScopeDB endpoint without modifying da
 
 Every write example refuses to start unless `SCOPEDB_TABLE` names an existing, disposable table. Do not point these examples at production unless the writes are intentional.
 
-The append, stream, telemetry, and transform examples can share this schema:
+The append, stream, telemetry, and file import examples can share this schema:
 
 ```sql
 CREATE TABLE public.sdk_example_events (
@@ -53,19 +53,21 @@ $env:SCOPEDB_TABLE = "sdk_example_events"
 
 ## Choose a write example
 
-| Example                                      | Shows                                | Run                                    |
-| -------------------------------------------- | ------------------------------------ | -------------------------------------- |
-| [`append.rs`](append.rs)                     | Write NDJSON                         | `cargo run --example append`           |
-| [`append_stream.rs`](append_stream.rs)       | Send rows with a stream              | `cargo run --example append_stream`    |
-| [`bulk_append.rs`](bulk_append.rs)           | Import many rows                     | `cargo run --example bulk_append`      |
-| [`telemetry.rs`](telemetry.rs)               | Write logs or events                 | `cargo run --example telemetry`        |
-| [`append_transform.rs`](append_transform.rs) | Shape source fields before appending | `cargo run --example append_transform` |
+| Example                                      | Shows                                | Run                                                  |
+| -------------------------------------------- | ------------------------------------ | ---------------------------------------------------- |
+| [`append.rs`](append.rs)                     | Write NDJSON                         | `cargo run --example append`                         |
+| [`append_stream.rs`](append_stream.rs)       | Send rows with a stream              | `cargo run --example append_stream`                  |
+| [`bulk_append.rs`](bulk_append.rs)           | Import many rows                     | `cargo run --example bulk_append`                    |
+| [`telemetry.rs`](telemetry.rs)               | Write logs or events                 | `cargo run --example telemetry`                      |
+| [`import_ndjson.rs`](import_ndjson.rs)       | Import a bounded NDJSON file stream  | `cargo run --example import_ndjson -- events.ndjson` |
 
 `append.rs` writes prepared NDJSON with `table.append()`. Each line is one JSON object.
 
 `append_stream.rs` and `bulk_append.rs` create a stream with `table.append_stream().build()`. Use `send()` for one row or `send_all()` for an iterator of rows. These calls add data to the SDK's pending writes. Call `shutdown()` when finished to wait for writing to complete and close the stream. Use `flush()` if you want to wait for pending writes and then keep using the stream.
 
 `telemetry.rs` configures `.failure_policy(AppendFailurePolicy::Continue)` so the stream keeps running after a batch fails. It uses `try_send()` to add a row without waiting. Check its return value, and read the report returned by `shutdown()` for the write results.
+
+`import_ndjson.rs` reads a real file one record at a time, bounds record size and pending bytes, and settles the accepted prefix if input parsing fails. Input fields must match the destination table; map fields in the producer before sending when needed. It uses the default policy that never replays an unknown outcome. Review the printed delivery counts before restarting an interrupted import.
 
 ## Check the examples
 

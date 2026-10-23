@@ -28,9 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let statement_id = handle.statement_id();
     println!(
         "statement {statement_id} submitted: {:?}",
-        handle.last_status()
+        handle.snapshot()
     );
-    let status = handle.status().await?;
+    let status = handle.refresh().await?;
     println!("statement {statement_id}: {status:?}");
     let result = handle.wait().await?;
     println!("handle rows: {:?}", result.into_objects()?);
