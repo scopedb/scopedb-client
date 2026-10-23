@@ -76,21 +76,22 @@ impl ResultSet {
         }
     }
 
-    /// Backward-compatible alias for [`ResultSet::raw_rows`].
-    #[deprecated(note = "use raw_rows")]
-    pub fn json_rows(&self) -> Option<&[Vec<Option<String>>]> {
-        Some(self.raw_rows())
-    }
-
     /// Converts all result cells to their typed Rust representation.
     pub fn to_values(&self) -> Result<Vec<Vec<Value>>, Error> {
         self.validate_shape()?;
         self.raw_rows()
             .iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(index, row)| {
                 row.iter()
                     .zip(self.schema.fields.iter())
-                    .map(|(cell, field)| parse_cell(cell.as_deref(), field.data_type()))
+                    .map(|(cell, field)| {
+                        parse_cell(cell.as_deref(), field.data_type()).map_err(|error| {
+                            error
+                                .with_context("row", index)
+                                .with_context("column", field.name())
+                        })
+                    })
                     .collect()
             })
             .collect()
@@ -104,10 +105,17 @@ impl ResultSet {
             ResultSetData::Json { rows } => rows,
         };
         rows.into_iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(index, row)| {
                 row.into_iter()
                     .zip(schema.fields.iter())
-                    .map(|(cell, field)| parse_owned_cell(cell, field.data_type()))
+                    .map(|(cell, field)| {
+                        parse_owned_cell(cell, field.data_type()).map_err(|error| {
+                            error
+                                .with_context("row", index)
+                                .with_context("column", field.name())
+                        })
+                    })
                     .collect()
             })
             .collect()
@@ -137,29 +145,22 @@ impl ResultSet {
     /// Consumes the result set and returns rows keyed by output column name.
     pub fn into_objects(self) -> Result<Vec<ResultObject>, Error> {
         self.validate_unique_fields()?;
-        self.validate_shape()?;
-        let ResultSet { schema, data, .. } = self;
-        let names = schema
+        let names = self
+            .schema
             .fields
             .iter()
             .map(|field| field.name.clone())
             .collect::<Vec<_>>();
-        let rows = match data {
-            ResultSetData::Json { rows } => rows,
-        };
-        rows.into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .zip(schema.fields.iter())
-                    .map(|(cell, field)| parse_owned_cell(cell, field.data_type()))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|values| names.iter().cloned().zip(values).collect())
-            })
-            .collect()
+        self.into_values().map(|rows| {
+            rows.into_iter()
+                .map(|values| names.iter().cloned().zip(values).collect())
+                .collect()
+        })
     }
 
     /// Returns the first row keyed by output column name, or `None` when empty.
     pub fn first(&self) -> Result<Option<ResultObject>, Error> {
+        self.validate_row_count()?;
         let Some(row) = self.raw_rows().first() else {
             return Ok(None);
         };
@@ -168,7 +169,13 @@ impl ResultSet {
         let values = row
             .iter()
             .zip(self.schema.fields.iter())
-            .map(|(cell, field)| parse_cell(cell.as_deref(), field.data_type()))
+            .map(|(cell, field)| {
+                parse_cell(cell.as_deref(), field.data_type()).map_err(|error| {
+                    error
+                        .with_context("row", 0)
+                        .with_context("column", field.name())
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(
             self.schema
@@ -180,7 +187,7 @@ impl ResultSet {
         ))
     }
 
-    fn validate_shape(&self) -> Result<(), Error> {
+    fn validate_row_count(&self) -> Result<(), Error> {
         let rows = self.raw_rows();
         if rows.len() != self.num_rows {
             return Err(Error::new(
@@ -192,6 +199,12 @@ impl ResultSet {
                 ),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> Result<(), Error> {
+        self.validate_row_count()?;
+        let rows = self.raw_rows();
         let expected = self.schema.fields.len();
         if let Some((index, row)) = rows
             .iter()
@@ -273,12 +286,21 @@ fn parse_cell(value: Option<&str>, data_type: DataType) -> Result<Value, Error> 
                 format!("failed to parse uint value: {err}"),
             )
         }),
-        DataType::Float => f64::from_str(value).map(Value::Float).map_err(|err| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("failed to parse float value: {err}"),
-            )
-        }),
+        DataType::Float => {
+            let parsed = f64::from_str(value).map_err(|err| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    format!("failed to parse float value: {err}"),
+                )
+            })?;
+            if !parsed.is_finite() && !matches!(value, "NaN" | "inf" | "-inf") {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "float value is outside the f64 range",
+                ));
+            }
+            Ok(Value::Float(parsed))
+        }
         DataType::Timestamp => jiff::Timestamp::from_str(value)
             .map(Value::Timestamp)
             .map_err(|err| {
@@ -551,6 +573,76 @@ mod tests {
             vec![],
         );
         assert!(result.first().unwrap().is_none());
+    }
+
+    #[test]
+    fn numeric_boundaries_and_raw_json_are_lossless() {
+        for (kind, wire) in [
+            (DataType::Int, "-9223372036854775808"),
+            (DataType::Int, "9223372036854775807"),
+            (DataType::Int, "9007199254740993"),
+            (DataType::UInt, "18446744073709551615"),
+            (DataType::Object, r#"{"id":184467440737095516160}"#),
+            (DataType::Array, "[0.12345678901234567890123456789]"),
+        ] {
+            let result = result(vec![("value", kind)], vec![vec![Some(wire)]]);
+            assert_eq!(result.raw_rows()[0][0].as_deref(), Some(wire));
+            assert_eq!(result.to_values().unwrap()[0][0].to_string(), wire);
+            assert_eq!(
+                result.clone().into_objects().unwrap()[0]["value"].to_string(),
+                wire
+            );
+            assert_eq!(result.first().unwrap().unwrap()["value"].to_string(), wire);
+        }
+        for (kind, wire) in [
+            (DataType::Int, "9223372036854775808"),
+            (DataType::Int, "-9223372036854775809"),
+            (DataType::UInt, "18446744073709551616"),
+            (DataType::UInt, "-1"),
+            (DataType::Float, "1e309"),
+        ] {
+            let result = result(vec![("value", kind)], vec![vec![Some(wire)]]);
+            for error in [
+                result.to_values().unwrap_err(),
+                result.clone().into_values().unwrap_err(),
+                result.clone().into_objects().unwrap_err(),
+                result.first().unwrap_err(),
+            ] {
+                let diagnostic = error.to_string();
+                assert!(diagnostic.contains("row: 0") && diagnostic.contains("column: value"));
+            }
+        }
+    }
+
+    #[test]
+    fn float_boundaries_preserve_server_special_values() {
+        for (wire, expected) in [
+            ("1.7976931348623157e308", f64::MAX),
+            ("5e-324", f64::from_bits(1)),
+            ("inf", f64::INFINITY),
+            ("-inf", f64::NEG_INFINITY),
+        ] {
+            let Value::Float(value) = parse_cell(Some(wire), DataType::Float).unwrap() else {
+                panic!("expected float")
+            };
+            assert_eq!(value, expected);
+        }
+        assert!(
+            matches!(parse_cell(Some("NaN"), DataType::Float).unwrap(), Value::Float(value) if value.is_nan())
+        );
+    }
+
+    #[test]
+    fn first_rejects_missing_rows_advertised_by_metadata() {
+        let mut result = result(vec![("id", DataType::Int)], vec![]);
+        result.num_rows = 1;
+        assert!(
+            result
+                .first()
+                .unwrap_err()
+                .message()
+                .contains("row count mismatch")
+        );
     }
 
     #[test]

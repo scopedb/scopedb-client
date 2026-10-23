@@ -17,7 +17,6 @@ use std::str::FromStr;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use jiff::SignedDuration;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
@@ -54,7 +53,7 @@ impl fmt::Display for AppendState {
 /// The result of a committed table append.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResult {
-    pub append_state: AppendState,
+    pub status: AppendState,
     pub num_rows_inserted: i64,
 }
 
@@ -69,7 +68,7 @@ pub struct AppendRowError {
 /// Structured failure details returned by the table append API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
-    pub append_state: AppendState,
+    pub status: AppendState,
     #[serde(default)]
     pub row_errors: Vec<AppendRowError>,
     #[serde(default)]
@@ -80,114 +79,7 @@ pub struct AppendErrorDetails {
 pub(crate) struct AppendRowsErrorPayload {
     #[serde(rename = "message")]
     pub _message: String,
-    #[serde(flatten)]
     pub details: AppendErrorDetails,
-}
-
-/// Pagination options for catalog list requests.
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CatalogListOptions {
-    /// Number of resources to return. The server accepts values from 1 to 1000.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub page_size: Option<usize>,
-    /// Opaque token returned as `next_page_token` by the previous page.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub page_token: Option<String>,
-}
-
-impl CatalogListOptions {
-    pub(crate) fn validate(&self) -> Result<(), Error> {
-        if self
-            .page_size
-            .is_some_and(|size| !(1..=1000).contains(&size))
-        {
-            return Err(Error::new(
-                ErrorKind::ConfigInvalid,
-                "catalog page_size must be an integer from 1 to 1000",
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// One page of catalog resources.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogPage<T> {
-    pub items: Vec<T>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_page_token: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DatabaseResource {
-    pub name: String,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SchemaResource {
-    pub database: String,
-    pub name: String,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableResourceSummary {
-    pub database: String,
-    pub schema: String,
-    pub name: String,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableColumnSpec {
-    pub name: String,
-    pub data_type: DataType,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableDistinctSpec {
-    pub on: Vec<String>,
-    pub by: Vec<String>,
-}
-
-/// The public specification of a table resource.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableSpec {
-    pub columns: Vec<TableColumnSpec>,
-    pub partition_by: Vec<String>,
-    pub cluster_by: Vec<String>,
-    pub distinct_on: TableDistinctSpec,
-    pub data_retention_days: Option<i32>,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableResource {
-    pub database: String,
-    pub schema: String,
-    pub name: String,
-    pub columns: Vec<TableColumnSpec>,
-    pub partition_by: Vec<String>,
-    pub cluster_by: Vec<String>,
-    pub distinct_on: TableDistinctSpec,
-    pub data_retention_days: Option<i32>,
-    pub comment: Option<String>,
-}
-
-impl TableResource {
-    /// Returns the reusable table specification without its catalog identity.
-    pub fn spec(&self) -> TableSpec {
-        TableSpec {
-            columns: self.columns.clone(),
-            partition_by: self.partition_by.clone(),
-            cluster_by: self.cluster_by.clone(),
-            distinct_on: self.distinct_on.clone(),
-            data_retention_days: self.data_retention_days,
-            comment: self.comment.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +120,8 @@ impl<T: DeserializeOwned> Response<T> {
 #[derive(Debug, Clone)]
 pub struct ErrorStatus {
     code: StatusCode,
+    api_code: Option<String>,
+    details: Option<serde_json::Value>,
     message: String,
     request_id: Option<String>,
     retry_after: Option<Duration>,
@@ -239,6 +133,8 @@ impl ErrorStatus {
         let parsed = parse_error_payload(payload);
         Self {
             code,
+            api_code: parsed.as_ref().and_then(|p| p.code.clone()),
+            details: parsed.as_ref().and_then(|p| p.details.clone()),
             message: parsed
                 .as_ref()
                 .map(|parsed| parsed.message.clone())
@@ -253,7 +149,10 @@ impl ErrorStatus {
     }
 
     pub(crate) fn into_error(self, kind: ErrorKind) -> Error {
-        let mut error = Error::new(kind, self.message).set_http_status(self.code);
+        let mut error = Error::new(kind, self.message)
+            .set_http_status(self.code)
+            .set_server_retryable(self.retryable)
+            .set_api_error(self.api_code, self.details);
         if let Some(request_id) = self.request_id {
             error = error.set_request_id(request_id);
         }
@@ -276,6 +175,8 @@ impl ErrorStatus {
 
 #[derive(Debug)]
 struct ParsedErrorPayload {
+    code: Option<String>,
+    details: Option<serde_json::Value>,
     message: String,
     request_id: Option<String>,
     retryable: Option<bool>,
@@ -286,6 +187,11 @@ fn parse_error_payload(payload: &[u8]) -> Option<ParsedErrorPayload> {
     let object = payload.as_object()?;
     if let Some(message) = object.get("message").and_then(serde_json::Value::as_str) {
         return Some(ParsedErrorPayload {
+            code: object
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            details: object.get("details").cloned(),
             message: message.to_string(),
             request_id: object
                 .get("request_id")
@@ -297,6 +203,11 @@ fn parse_error_payload(payload: &[u8]) -> Option<ParsedErrorPayload> {
 
     let nested = object.get("error")?.as_object()?;
     Some(ParsedErrorPayload {
+        code: nested
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        details: nested.get("details").cloned(),
         message: nested.get("message")?.as_str()?.to_string(),
         request_id: object
             .get("request_id")
@@ -349,44 +260,6 @@ impl fmt::Display for ErrorStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "format")]
-pub(crate) enum IngestData {
-    #[serde(rename = "json")]
-    Json { rows: String },
-}
-
-impl IngestData {
-    pub fn format(&self) -> &'static str {
-        match self {
-            Self::Json { .. } => "json",
-        }
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IngestType {
-    #[default]
-    #[serde(rename = "committed")]
-    Committed,
-    #[serde(rename = "buffered")]
-    Buffered,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestRequest {
-    #[serde(default)]
-    #[serde(rename = "type")]
-    pub ty: IngestType,
-    pub data: IngestData,
-    pub statement: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IngestResult {
-    pub num_rows_inserted: i64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ResultFormat {
     #[serde(rename = "json")]
@@ -406,17 +279,11 @@ pub struct StatementRequest {
     pub statement_id: Option<Uuid>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exec_timeout: Option<SignedDuration>,
+    pub max_elapsed_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_estimated_seconds: Option<f64>,
     #[serde(flatten)]
     pub params: StatementRequestParams,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatementCancelResult {
-    pub statement_id: Uuid,
-    pub status: String,
-    pub message: String,
-    pub created_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,9 +339,7 @@ pub struct StatementStatusFailed {
     pub statement_id: Uuid,
     pub created_at: jiff::Timestamp,
     pub progress: StatementEstimatedProgress,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<StatementErrorDetails>,
+    pub error: StatementErrorDetails,
 }
 
 /// Structured failure returned for a failed statement.
@@ -492,7 +357,6 @@ pub struct StatementStatusCancelled {
     pub statement_id: Uuid,
     pub created_at: jiff::Timestamp,
     pub progress: StatementEstimatedProgress,
-    pub message: String,
 }
 
 impl StatementStatus {
@@ -543,6 +407,7 @@ impl StatementStatus {
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct StatementEstimatedProgress {
     /// Total progress in percentage: `[0.0, 100.0]`.
+    #[serde(deserialize_with = "deserialize_progress_float")]
     pub total_percentage: f64,
     /// Duration in nanoseconds since the statement is submitted.
     pub nanos_from_submitted: i64,
@@ -552,8 +417,11 @@ pub struct StatementEstimatedProgress {
     pub details: StatementProgress,
 }
 
-#[derive(Default, Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatementProgress {
+    /// Compute consumed by the statement, in seconds.
+    #[serde(deserialize_with = "deserialize_progress_float")]
+    pub compute_seconds: f64,
     pub total_stages: i64,
     pub total_partitions: i64,
     pub total_rows: i64,
@@ -568,6 +436,14 @@ pub struct StatementProgress {
     pub skipped_rows: i64,
     pub skipped_compressed_bytes: i64,
     pub skipped_uncompressed_bytes: i64,
+}
+
+// Internally tagged enums and flattened fields buffer numbers through Serde.
+// Number understands serde_json's arbitrary-precision representation in that buffer.
+fn deserialize_progress_float<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    serde_json::Number::deserialize(d)?
+        .as_f64()
+        .ok_or_else(|| serde::de::Error::custom("progress number is outside the f64 range"))
 }
 
 impl StatementProgress {
@@ -618,7 +494,6 @@ pub struct FieldMetadata {
 pub enum DataType {
     #[serde(rename = "int")]
     Int,
-    #[serde(alias = "u_int")] // backward compatibility
     #[serde(rename = "uint")]
     UInt,
     #[serde(rename = "float")]
@@ -649,7 +524,7 @@ impl FromStr for DataType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "int" => Ok(Self::Int),
-            "uint" | "u_int" => Ok(Self::UInt),
+            "uint" => Ok(Self::UInt),
             "float" => Ok(Self::Float),
             "binary" => Ok(Self::Binary),
             "string" => Ok(Self::String),
@@ -678,11 +553,8 @@ mod tests {
 
     use super::AppendRowsErrorPayload;
     use super::AppendState;
-    use super::CatalogListOptions;
-    use super::DataType;
     use super::ErrorStatus;
     use super::StatementStatus;
-    use super::TableResource;
     use super::parse_error_payload;
     use super::parse_retry_after;
     use crate::ErrorKind;
@@ -690,10 +562,10 @@ mod tests {
     #[test]
     fn append_error_details_use_wire_defaults() {
         let payload: AppendRowsErrorPayload =
-            serde_json::from_str(r#"{"message":"not committed","append_state":"rejected"}"#)
+            serde_json::from_str(r#"{"code":"invalid_schema","message":"not committed","details":{"status":"rejected"}}"#)
                 .unwrap();
 
-        assert_eq!(payload.details.append_state, AppendState::Rejected);
+        assert_eq!(payload.details.status, AppendState::Rejected);
         assert!(payload.details.row_errors.is_empty());
         assert!(!payload.details.row_errors_truncated);
     }
@@ -707,6 +579,7 @@ mod tests {
                 "created_at":"2026-08-26T00:00:00Z",
                 "progress":{
                     "total_percentage":100.0,
+                    "compute_seconds":0.25,
                     "nanos_from_submitted":1,
                     "nanos_from_started":1,
                     "total_stages":1,
@@ -724,7 +597,6 @@ mod tests {
                     "skipped_compressed_bytes":0,
                     "skipped_uncompressed_bytes":0
                 },
-                "message":"row limit exceeded",
                 "error":{
                     "code":"row_limit_exceeded",
                     "message":"row limit exceeded",
@@ -737,7 +609,7 @@ mod tests {
         let StatementStatus::Failed(failed) = status else {
             panic!("expected failed statement status");
         };
-        let error = failed.error.unwrap();
+        let error = failed.error;
         assert_eq!(error.code, "row_limit_exceeded");
         assert_eq!(error.details.unwrap()["max_total_rows"], 100);
     }
@@ -801,37 +673,5 @@ mod tests {
             parse_retry_after(&headers, SystemTime::UNIX_EPOCH),
             Some(Duration::from_secs(10))
         );
-    }
-
-    #[test]
-    fn catalog_page_size_is_validated_locally() {
-        let options = CatalogListOptions {
-            page_size: Some(1001),
-            page_token: None,
-        };
-        let error = options.validate().unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ConfigInvalid);
-    }
-
-    #[test]
-    fn table_resource_deserializes_flattened_spec() {
-        let table: TableResource = serde_json::from_str(
-            r#"{
-                "database":"scopedb",
-                "schema":"public",
-                "name":"events",
-                "columns":[{"name":"message","data_type":"string","comment":null}],
-                "partition_by":["date(ts)"],
-                "cluster_by":["service"],
-                "distinct_on":{"on":[],"by":[]},
-                "data_retention_days":30,
-                "comment":"application events"
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(table.name, "events");
-        assert_eq!(table.columns[0].data_type, DataType::String);
-        assert_eq!(table.data_retention_days, Some(30));
     }
 }

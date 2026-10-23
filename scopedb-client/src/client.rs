@@ -24,13 +24,10 @@ use reqwest::header::CONTENT_ENCODING;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use crate::CatalogIterator;
 use crate::Error;
 use crate::ErrorKind;
-use crate::IngestStreamBuilder;
 use crate::ResultSet;
 use crate::Statement;
 use crate::Table;
@@ -38,22 +35,11 @@ use crate::protocol::AppendErrorDetails;
 use crate::protocol::AppendRowsErrorPayload;
 use crate::protocol::AppendRowsResult;
 use crate::protocol::AppendState;
-use crate::protocol::CatalogListOptions;
-use crate::protocol::CatalogPage;
-use crate::protocol::DatabaseResource;
-use crate::protocol::IngestData;
-use crate::protocol::IngestRequest;
-use crate::protocol::IngestResult;
-use crate::protocol::IngestType;
 use crate::protocol::Response;
 use crate::protocol::ResultFormat;
-use crate::protocol::SchemaResource;
-use crate::protocol::StatementCancelResult;
 use crate::protocol::StatementRequest;
 use crate::protocol::StatementRequestParams;
 use crate::protocol::StatementStatus;
-use crate::protocol::TableResource;
-use crate::protocol::TableResourceSummary;
 use crate::protocol::apply_response_metadata;
 use crate::statement::StatementHandle;
 
@@ -61,6 +47,7 @@ const JSON_CONTENT_ENCODING: &str = "zstd";
 const UNCOMPRESSED_CONTENT_LENGTH: &str = "X-ScopeDB-Uncompressed-Content-Length";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 pub(crate) const MAX_APPEND_BODY_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_APPEND_ROWS: usize = 200_000;
 const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -105,12 +92,13 @@ impl ClientBuilder {
     }
 
     /// Uses a preconfigured compatible HTTP client.
+    /// Disable redirects and automatic retries on this client to prevent replaying writes.
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
         self.client = Some(client);
         self
     }
 
-    /// Bounds each table append or transform-ingest HTTP request, including
+    /// Bounds each table append HTTP request, including
     /// reading the response body. Defaults to 30 seconds and must be nonzero.
     /// The budget starts after local encoding, compression, and request preparation.
     /// Stream `attempt_timeout` settings override this default. A timeout does
@@ -139,7 +127,18 @@ impl ClientBuilder {
                 "write_timeout is too large",
             ));
         }
-        let mut client = Client::new(self.endpoint, self.client.unwrap_or_default())?;
+        let http_client = match self.client {
+            Some(client) => client,
+            None => reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()
+                .map_err(|err| {
+                    Error::new(ErrorKind::ConfigInvalid, "failed to build HTTP client")
+                        .set_source(err)
+                })?,
+        };
+        let mut client = Client::new(self.endpoint, http_client)?;
         client.write_timeout = self.write_timeout;
         if let Some(api_key) = self.api_key {
             if api_key.is_empty() {
@@ -181,6 +180,18 @@ impl Client {
     pub fn new<E: IntoUrl>(endpoint: E, client: reqwest::Client) -> Result<Self, Error> {
         match endpoint.into_url() {
             Ok(mut endpoint) => {
+                if !matches!(endpoint.scheme(), "http" | "https")
+                    || endpoint.host_str().is_none()
+                    || !endpoint.username().is_empty()
+                    || endpoint.password().is_some()
+                    || endpoint.query().is_some()
+                    || endpoint.fragment().is_some()
+                {
+                    return Err(Error::new(
+                        ErrorKind::ConfigInvalid,
+                        "endpoint must be an HTTP(S) URL without credentials, query, or fragment",
+                    ));
+                }
                 if !endpoint.path().ends_with('/') {
                     let path = format!("{}/", endpoint.path());
                     endpoint.set_path(&path);
@@ -212,125 +223,14 @@ impl Client {
         Table::new(self.clone(), table.into())
     }
 
-    pub fn ingest_stream(&self, statement: impl Into<String>) -> IngestStreamBuilder {
-        IngestStreamBuilder::new(self.clone(), statement.into())
-    }
-
     /// Executes a ScopeQL statement and waits for all result rows.
     pub async fn query(&self, statement: impl Into<String>) -> Result<ResultSet, Error> {
         self.statement(statement).execute().await
     }
 
-    pub async fn list_databases(
-        &self,
-        options: CatalogListOptions,
-    ) -> Result<CatalogPage<DatabaseResource>, Error> {
-        self.fetch_catalog(&["databases"], Some(&options), "failed to list databases")
-            .await
-    }
-
-    /// Lazily iterates databases across every catalog page.
-    pub fn iterate_databases(
-        &self,
-        options: CatalogListOptions,
-    ) -> CatalogIterator<DatabaseResource> {
-        let client = self.clone();
-        CatalogIterator::new(options, move |options| {
-            let client = client.clone();
-            async move { client.list_databases(options).await }
-        })
-    }
-
-    pub async fn fetch_database(&self, database: &str) -> Result<DatabaseResource, Error> {
-        self.fetch_catalog(&["databases", database], None, "failed to fetch database")
-            .await
-    }
-
-    pub async fn list_schemas(
-        &self,
-        database: &str,
-        options: CatalogListOptions,
-    ) -> Result<CatalogPage<SchemaResource>, Error> {
-        self.fetch_catalog(
-            &["databases", database, "schemas"],
-            Some(&options),
-            "failed to list schemas",
-        )
-        .await
-    }
-
-    /// Lazily iterates schemas across every catalog page.
-    pub fn iterate_schemas(
-        &self,
-        database: impl Into<String>,
-        options: CatalogListOptions,
-    ) -> CatalogIterator<SchemaResource> {
-        let client = self.clone();
-        let database = database.into();
-        CatalogIterator::new(options, move |options| {
-            let client = client.clone();
-            let database = database.clone();
-            async move { client.list_schemas(&database, options).await }
-        })
-    }
-
-    pub async fn fetch_schema(
-        &self,
-        database: &str,
-        schema: &str,
-    ) -> Result<SchemaResource, Error> {
-        self.fetch_catalog(
-            &["databases", database, "schemas", schema],
-            None,
-            "failed to fetch schema",
-        )
-        .await
-    }
-
-    pub async fn list_tables(
-        &self,
-        database: &str,
-        schema: &str,
-        options: CatalogListOptions,
-    ) -> Result<CatalogPage<TableResourceSummary>, Error> {
-        self.fetch_catalog(
-            &["databases", database, "schemas", schema, "tables"],
-            Some(&options),
-            "failed to list tables",
-        )
-        .await
-    }
-
-    /// Lazily iterates table summaries across every catalog page.
-    pub fn iterate_tables(
-        &self,
-        database: impl Into<String>,
-        schema: impl Into<String>,
-        options: CatalogListOptions,
-    ) -> CatalogIterator<TableResourceSummary> {
-        let client = self.clone();
-        let database = database.into();
-        let schema = schema.into();
-        CatalogIterator::new(options, move |options| {
-            let client = client.clone();
-            let database = database.clone();
-            let schema = schema.clone();
-            async move { client.list_tables(&database, &schema, options).await }
-        })
-    }
-
-    pub async fn fetch_table(
-        &self,
-        database: &str,
-        schema: &str,
-        table: &str,
-    ) -> Result<TableResource, Error> {
-        self.fetch_catalog(
-            &["databases", database, "schemas", schema, "tables", table],
-            None,
-            "failed to fetch table",
-        )
-        .await
+    /// Selects the complete declarative catalog or an individual resource.
+    pub fn catalog(&self) -> crate::Catalog {
+        crate::Catalog::new(self.clone())
     }
 
     /// Appends at most 8 MiB of uncompressed newline-delimited JSON to a table.
@@ -366,22 +266,25 @@ impl Client {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .count();
+        if expected_rows > MAX_APPEND_ROWS {
+            return Err(append_rejected_error(format!(
+                "append payload exceeds the {MAX_APPEND_ROWS}-row limit",
+            )));
+        }
         let url = self.make_resource_url(&[
+            "catalog",
             "databases",
             database,
             "schemas",
             schema,
             "tables",
             table,
-            "rows",
+            "ingest",
         ])?;
         let body =
             zstd::stream::encode_all(ndjson.as_bytes(), ZSTD_COMPRESSION_LEVEL).map_err(|err| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    "failed to compress table append request body",
-                )
-                .set_source(err)
+                append_rejected_error("failed to compress table append request body")
+                    .set_source(err)
             })?;
         let request = self
             .request(Method::POST, url)
@@ -434,52 +337,9 @@ impl Client {
             _ => err,
         })
     }
-
-    pub async fn insert(&self, rows: String, transform: String) -> Result<IngestResult, Error> {
-        match self
-            .ingest(IngestRequest {
-                ty: IngestType::Committed,
-                data: IngestData::Json { rows },
-                statement: transform,
-            })
-            .await?
-        {
-            Response::Success(result) => Ok(result),
-            // Transform ingest does not report whether a failed request committed.
-            // An HTTP retry hint alone cannot make replay safe.
-            Response::Failed(err) => Err(map_failed_response(err).set_permanent()),
-        }
-    }
 }
 
 impl Client {
-    async fn fetch_catalog<T: DeserializeOwned>(
-        &self,
-        segments: &[&str],
-        options: Option<&CatalogListOptions>,
-        operation: &'static str,
-    ) -> Result<T, Error> {
-        if let Some(options) = options {
-            options.validate()?;
-        }
-        let url = self.make_resource_url(segments)?;
-        let mut request = self
-            .request(Method::GET, url)
-            .headers(traceparent_headers());
-        if let Some(options) = options {
-            request = request.query(options);
-        }
-        let response = request.send().await.map_err(|err| {
-            Error::new(ErrorKind::Unexpected, operation)
-                .set_source(err)
-                .set_temporary()
-        })?;
-        match Response::from_http_response(response).await? {
-            Response::Success(result) => Ok(result),
-            Response::Failed(err) => Err(map_failed_response(err)),
-        }
-    }
-
     #[fastrace::trace]
     pub(crate) async fn submit_statement(
         &self,
@@ -526,12 +386,15 @@ impl Client {
     pub(crate) async fn cancel_statement(
         &self,
         statement_id: Uuid,
-    ) -> Result<Response<StatementCancelResult>, Error> {
+    ) -> Result<Response<StatementStatus>, Error> {
         let path = format!("v1/statements/{statement_id}/cancel");
         let url = self.make_url(&path)?;
         let response = self
             .request(Method::POST, url)
             .headers(traceparent_headers())
+            .query(&StatementRequestParams {
+                format: ResultFormat::Json,
+            })
             .send()
             .await
             .map_err(|err| {
@@ -545,55 +408,6 @@ impl Client {
         Response::from_http_response(response).await
     }
 
-    #[fastrace::trace]
-    pub(crate) async fn ingest(
-        &self,
-        request: IngestRequest,
-    ) -> Result<Response<IngestResult>, Error> {
-        let format = request.data.format();
-        let url = self.make_url("v1/ingest")?;
-        let request = self
-            .post_json(url, &request)?
-            .headers(traceparent_headers());
-        let mut status = None;
-        let mut headers = reqwest::header::HeaderMap::new();
-        tokio::time::timeout(self.write_timeout, async {
-            let response = request.send().await.map_err(|err| {
-                ingest_unknown_error(format!(
-                    "failed to ingest data in {format}; commit outcome is unknown"
-                ))
-                .set_write_source(err)
-            })?;
-            status = Some(response.status());
-            headers = response.headers().clone();
-            let result: Response<IngestResult> = Response::from_http_response(response)
-                .await
-                .map_err(|err| {
-                    ingest_unknown_error("failed to read ingest response; commit outcome is unknown")
-                        .set_write_source(err)
-                })?;
-            if let Response::Success(result) = &result
-                && result.num_rows_inserted < 0
-            {
-                return Err(ingest_unknown_error(
-                    "ingest response reported negative num_rows_inserted; commit outcome is unknown",
-                ));
-            }
-            Ok(result)
-        })
-        .await
-        .unwrap_or_else(|err| {
-            Err(ingest_unknown_error("ingest request timed out; commit outcome is unknown")
-                .set_write_source(err))
-        })
-        .map_err(|err| match status {
-            Some(status) if err.http_status().is_none() => {
-                apply_response_metadata(err, status, &headers)
-            }
-            _ => err,
-        })
-    }
-
     #[track_caller]
     fn make_url(&self, path: &str) -> Result<Url, Error> {
         self.endpoint.join(path).map_err(|err| {
@@ -601,7 +415,13 @@ impl Client {
         })
     }
 
-    fn make_resource_url(&self, segments: &[&str]) -> Result<Url, Error> {
+    pub(crate) fn make_resource_url(&self, segments: &[&str]) -> Result<Url, Error> {
+        if segments.iter().any(|s| matches!(*s, "" | "." | "..")) {
+            return Err(Error::new(
+                ErrorKind::ConfigInvalid,
+                "resource names must not be empty or dot segments",
+            ));
+        }
         let mut url = self.make_url("v1/")?;
         let mut path = url.path_segments_mut().map_err(|_| {
             Error::new(
@@ -615,8 +435,15 @@ impl Client {
         Ok(url)
     }
 
-    fn request(&self, method: Method, url: Url) -> reqwest::RequestBuilder {
-        let request = self.client.request(method, url);
+    pub(crate) fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
+
+    pub(crate) fn request(&self, method: Method, url: Url) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .request(method, url)
+            .header("X-ScopeDB-Client", "scopedb-client");
         if let Some(authorization) = &self.authorization {
             request.header(AUTHORIZATION, authorization.clone())
         } else {
@@ -655,10 +482,6 @@ impl Client {
     }
 }
 
-fn map_failed_response(err: crate::protocol::ErrorStatus) -> Error {
-    err.into_error(ErrorKind::Unexpected)
-}
-
 fn decode_append_response(
     status: StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -667,8 +490,7 @@ fn decode_append_response(
     if status == StatusCode::OK {
         return match serde_json::from_slice::<AppendRowsResult>(payload) {
             Ok(result)
-                if result.append_state == AppendState::Committed
-                    && result.num_rows_inserted >= 0 =>
+                if result.status == AppendState::Committed && result.num_rows_inserted >= 0 =>
             {
                 Ok(result)
             }
@@ -699,16 +521,16 @@ fn decode_append_response(
     let http_error = crate::protocol::ErrorStatus::from_http_parts(status, headers, payload);
     if let Ok(payload) = serde_json::from_slice::<AppendRowsErrorPayload>(payload)
         && matches!(
-            payload.details.append_state,
+            payload.details.status,
             AppendState::Rejected | AppendState::Unknown
         )
     {
-        let append_state = payload.details.append_state;
+        let status = payload.details.status;
         let error = http_error
             .into_error(ErrorKind::AppendRowsFailed)
             .set_append_details(payload.details);
 
-        return Err(if append_state == AppendState::Unknown {
+        return Err(if status == AppendState::Unknown {
             error.set_persistent()
         } else {
             error
@@ -716,8 +538,13 @@ fn decode_append_response(
     }
 
     let metadata_error = http_error.into_error(ErrorKind::AppendRowsFailed);
-    let mut error =
-        append_unknown_error(metadata_error.message().to_string()).set_http_status(status);
+    let mut error = append_unknown_error(metadata_error.message().to_string())
+        .set_http_status(status)
+        .set_server_retryable(metadata_error.server_retryable())
+        .set_api_error(
+            metadata_error.code().map(str::to_string),
+            metadata_error.details().cloned(),
+        );
     if let Some(request_id) = metadata_error.request_id() {
         error = error.set_request_id(request_id.to_string());
     }
@@ -727,14 +554,10 @@ fn decode_append_response(
     Err(error)
 }
 
-fn ingest_unknown_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::Unexpected, message).set_persistent()
-}
-
 fn append_unknown_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::AppendRowsFailed, message)
         .set_append_details(AppendErrorDetails {
-            append_state: AppendState::Unknown,
+            status: AppendState::Unknown,
             row_errors: Vec::new(),
             row_errors_truncated: false,
         })
@@ -743,7 +566,7 @@ fn append_unknown_error(message: impl Into<String>) -> Error {
 
 fn append_rejected_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::AppendRowsFailed, message).set_append_details(AppendErrorDetails {
-        append_state: AppendState::Rejected,
+        status: AppendState::Rejected,
         row_errors: Vec::new(),
         row_errors_truncated: false,
     })
@@ -847,11 +670,11 @@ mod tests {
     fn committed_append_response_is_returned() {
         let result = decode(
             StatusCode::OK,
-            br#"{"append_state":"committed","num_rows_inserted":2}"#,
+            br#"{"status":"committed","num_rows_inserted":2}"#,
         )
         .unwrap();
 
-        assert_eq!(result.append_state, AppendState::Committed);
+        assert_eq!(result.status, AppendState::Committed);
         assert_eq!(result.num_rows_inserted, 2);
     }
 
@@ -859,19 +682,14 @@ mod tests {
     fn rejected_append_error_preserves_row_details_and_retry_status() {
         let error = decode(
             StatusCode::SERVICE_UNAVAILABLE,
-            br#"{
-                "message":"validation failed",
-                "append_state":"rejected",
-                "row_errors":[{"row_index":3,"column":"ts","message":"invalid timestamp"}],
-                "row_errors_truncated":true
-            }"#,
+            br#"{"message":"validation failed","code":"ingest_failure","details":{"status":"rejected","row_errors":[{"row_index":3,"column":"ts","message":"invalid timestamp"}],"row_errors_truncated":true}}"#,
         )
         .unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::AppendRowsFailed);
         assert!(error.is_temporary());
         let details = error.append_details().unwrap();
-        assert_eq!(details.append_state, AppendState::Rejected);
+        assert_eq!(details.status, AppendState::Rejected);
         assert_eq!(details.row_errors[0].row_index, 3);
         assert!(details.row_errors_truncated);
     }
@@ -884,12 +702,7 @@ mod tests {
         let error = decode_append_response(
             StatusCode::SERVICE_UNAVAILABLE,
             &headers,
-            br#"{
-                "message":"capacity is temporarily unavailable",
-                "request_id":"body-request",
-                "retryable":false,
-                "append_state":"rejected"
-            }"#,
+            br#"{"message":"capacity is temporarily unavailable","request_id":"body-request","retryable":false,"code":"ingest_failure","details":{"status":"rejected"}}"#,
         )
         .unwrap_err();
 
@@ -904,16 +717,13 @@ mod tests {
     fn unknown_append_outcome_is_never_retryable() {
         let error = decode(
             StatusCode::SERVICE_UNAVAILABLE,
-            br#"{"message":"coordinator unavailable","append_state":"unknown"}"#,
+            br#"{"message":"coordinator unavailable","code":"ingest_failure","details":{"status":"unknown"}}"#,
         )
         .unwrap_err();
 
         assert!(error.is_persistent());
         assert!(!error.is_temporary());
-        assert_eq!(
-            error.append_details().unwrap().append_state,
-            AppendState::Unknown
-        );
+        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 
     #[test]
@@ -921,10 +731,7 @@ mod tests {
         let error = decode(StatusCode::BAD_REQUEST, br#"{"message":"bad request"}"#).unwrap_err();
 
         assert!(error.is_persistent());
-        assert_eq!(
-            error.append_details().unwrap().append_state,
-            AppendState::Unknown
-        );
+        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 
     #[test]
@@ -937,9 +744,6 @@ mod tests {
 
         assert_eq!(error.message(), "unsupported path");
         assert!(error.is_persistent());
-        assert_eq!(
-            error.append_details().unwrap().append_state,
-            AppendState::Unknown
-        );
+        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 }

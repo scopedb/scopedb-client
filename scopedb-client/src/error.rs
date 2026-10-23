@@ -35,8 +35,14 @@ pub enum ErrorKind {
     /// A table append was rejected or its commit outcome is unknown.
     AppendRowsFailed,
 
-    /// A statement reached a failed or cancelled terminal state.
+    /// A statement reached a failed terminal state.
     StatementFailed,
+
+    /// A statement reached the cancelled terminal state.
+    StatementCancelled,
+
+    /// A declarative catalog operation failed.
+    CatalogFailed,
 }
 
 /// The client-side reason an in-flight write was interrupted.
@@ -88,6 +94,8 @@ impl From<ErrorKind> for &'static str {
             ErrorKind::ConfigInvalid => "ConfigInvalid",
             ErrorKind::AppendRowsFailed => "AppendRowsFailed",
             ErrorKind::StatementFailed => "StatementFailed",
+            ErrorKind::StatementCancelled => "StatementCancelled",
+            ErrorKind::CatalogFailed => "CatalogFailed",
         }
     }
 }
@@ -115,17 +123,18 @@ enum ErrorStatus {
     Persistent,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct HttpErrorMetadata {
     status: Option<StatusCode>,
     request_id: Option<String>,
     retry_after: Option<Duration>,
+    retryable: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ErrorDiagnostics {
-    context: Vec<(&'static str, String)>,
-    source: Option<std::sync::Arc<anyhow::Error>>,
+struct ApiErrorDetails {
+    code: Option<String>,
+    details: Option<serde_json::Value>,
 }
 
 impl fmt::Display for ErrorStatus {
@@ -138,12 +147,14 @@ impl fmt::Display for ErrorStatus {
     }
 }
 
+#[derive(Clone)]
 pub struct Error {
     kind: ErrorKind,
     message: String,
 
     status: ErrorStatus,
     context: Vec<(&'static str, String)>,
+    api_error: Option<Box<ApiErrorDetails>>,
     append_details: Option<AppendErrorDetails>,
     write_details: Option<WriteErrorDetails>,
     statement_details: Option<Box<StatementErrorDetails>>,
@@ -174,6 +185,9 @@ impl fmt::Display for Error {
             write!(f, " => {}", self.message)?;
         }
 
+        if let Some(code) = self.code() {
+            write!(f, ", code: {code}")?;
+        }
         if let Some(status) = self.http_status() {
             write!(f, ", http_status: {}", status.as_u16())?;
         }
@@ -207,6 +221,7 @@ impl fmt::Debug for Error {
             let mut de = f.debug_struct("Error");
             de.field("kind", &self.kind);
             de.field("message", &self.message);
+            de.field("api_error", &self.api_error);
             de.field("status", &self.status);
             de.field("context", &self.context);
             de.field("append_details", &self.append_details);
@@ -220,6 +235,9 @@ impl fmt::Debug for Error {
         write!(f, "{} ({})", self.kind, self.status)?;
         if !self.message.is_empty() {
             write!(f, " => {}", self.message)?;
+        }
+        if let Some(code) = self.code() {
+            write!(f, ", code: {code}")?;
         }
         if let Some(status) = self.http_status() {
             write!(f, ", http_status: {}", status.as_u16())?;
@@ -271,6 +289,7 @@ impl Error {
 
             status: ErrorStatus::Permanent,
             context: Vec::default(),
+            api_error: None,
             append_details: None,
             write_details: None,
             statement_details: None,
@@ -297,19 +316,6 @@ impl Error {
         self
     }
 
-    pub(crate) fn diagnostics(&self) -> ErrorDiagnostics {
-        ErrorDiagnostics {
-            context: self.context.clone(),
-            source: self.source.clone(),
-        }
-    }
-
-    pub(crate) fn with_diagnostics(mut self, diagnostics: ErrorDiagnostics) -> Self {
-        self.context = diagnostics.context;
-        self.source = diagnostics.source;
-        self
-    }
-
     pub(crate) fn set_write_source(mut self, src: impl Into<anyhow::Error>) -> Self {
         let source = src.into();
         if self.write_details.is_none() {
@@ -322,11 +328,6 @@ impl Error {
     /// Existing error kinds, sources, and HTTP diagnostics remain available.
     pub fn write_details(&self) -> Option<&WriteErrorDetails> {
         self.write_details.as_ref()
-    }
-
-    pub(crate) fn set_write_details(mut self, details: WriteErrorDetails) -> Self {
-        self.write_details = Some(details);
-        self
     }
 
     /// Return structured table-append failure details, when available.
@@ -364,6 +365,17 @@ impl Error {
         self
     }
 
+    pub(crate) fn set_server_retryable(mut self, retryable: Option<bool>) -> Self {
+        self.http_metadata_mut().retryable = retryable;
+        self
+    }
+
+    pub(crate) fn server_retryable(&self) -> Option<bool> {
+        self.http_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.retryable)
+    }
+
     fn http_metadata_mut(&mut self) -> &mut HttpErrorMetadata {
         self.http_metadata
             .get_or_insert_with(|| Box::new(HttpErrorMetadata::default()))
@@ -394,6 +406,33 @@ impl Error {
     /// Return the kind of this error.
     pub fn kind(&self) -> ErrorKind {
         self.kind
+    }
+
+    /// Returns the server error code, including codes introduced by newer servers.
+    pub fn code(&self) -> Option<&str> {
+        self.api_error
+            .as_deref()
+            .and_then(|e| e.code.as_deref())
+            .or_else(|| self.statement_details().map(|e| e.code.as_str()))
+    }
+
+    /// Returns the original structured server details, when provided.
+    pub fn details(&self) -> Option<&serde_json::Value> {
+        self.api_error
+            .as_deref()
+            .and_then(|e| e.details.as_ref())
+            .or_else(|| self.statement_details().and_then(|e| e.details.as_ref()))
+    }
+
+    pub(crate) fn set_api_error(
+        mut self,
+        code: Option<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        if code.is_some() || details.is_some() {
+            self.api_error = Some(Box::new(ApiErrorDetails { code, details }));
+        }
+        self
     }
 
     /// Return the error message.

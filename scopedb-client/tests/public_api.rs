@@ -49,20 +49,17 @@ fn structured_write_error_contract_is_public() {
 fn application_api_surface_compiles(client: &scopedb_client::Client) {
     let _query = client.query("SELECT 1");
     let mut handle = client.statement_handle(uuid::Uuid::nil());
-    let _last_status: Option<&scopedb_client::StatementStatus> = handle.last_status();
-    let status = handle.status();
+    let _last_status: Option<&scopedb_client::StatementStatus> = handle.snapshot();
+    let status = handle.refresh();
     drop(status);
     let wait = handle.wait();
     drop(wait);
-    let _databases = client.iterate_databases(scopedb_client::CatalogListOptions::default());
-    let _schemas = client.iterate_schemas("scopedb", scopedb_client::CatalogListOptions::default());
-    let _tables = client.iterate_tables(
-        "scopedb",
-        "public",
-        scopedb_client::CatalogListOptions::default(),
-    );
+    let catalog = client.catalog();
+    let _snapshot = catalog.get();
+    let _schema = catalog.schema("scopedb", "public");
     let table = client.table("events").with_schema("public");
-    let _description = table.describe();
+    let resource = table.catalog();
+    let _description = resource.get();
     let _stream = table
         .append_stream()
         .target_batch_bytes(1024)

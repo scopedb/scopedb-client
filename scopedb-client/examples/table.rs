@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("identifier: {}", table.identifier());
 
-    let description = table.describe().await?;
+    let description = table.catalog().get().await?.definition;
     for column in description.columns {
         println!("{}: {:?}", column.name, column.data_type);
     }

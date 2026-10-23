@@ -1,285 +1,88 @@
 # Rust HTTP API reference
 
-This document describes the HTTP surface modeled by the Rust SDK and the delivery rules that its higher-level helpers preserve. Public endpoints are rooted at `/v1`.
+This SDK requires ScopeDB 0.6.0 or later. All requests identify the client through `X-ScopeDB-Client: scopedb-client`. An optional API key is sent as a Bearer token.
 
-## REST catalog API
-
-Catalog endpoints are read-only. Every user-provided database, schema, and table name occupies one URL path segment; the SDK percent-encodes those segments.
-
-### Databases
+## Declarative Catalog
 
 ```text
-GET /v1/databases
-GET /v1/databases/{database}
+GET, PUT         /v1/catalog
+GET, PUT, DELETE /v1/catalog/databases/{database}
+GET, PUT, DELETE /v1/catalog/databases/{database}/schemas/{schema}
+GET, PUT, DELETE /v1/catalog/databases/{database}/schemas/{schema}/tables/{table}
+GET, PUT, DELETE /v1/catalog/databases/{database}/schemas/{schema}/views/{view}
 ```
 
-### Schemas
+Names occupy individual percent-encoded path segments. Empty names and dot segments are rejected before sending. `client.catalog()` selects the root; its `database`, `schema`, `table`, and `view` methods select subtrees. GET returns the complete definition and its opaque `ETag`, without pagination.
+
+PUT replaces the selected subtree, including all its children. Omitted collections are empty and omitted optional fields are cleared. The definition's `name` must match the path. DELETE removes the selected resource. A mutation returns `before`, `after`, and `destructive`, with absent resources represented by JSON null, plus an `ETag` header.
+
+`CatalogOptions` maps `dry_run` and `allow_destructive` to query parameters and `if_match` to the `If-Match` header. A dry run validates and rolls back the changes; its ETag identifies the base version. A stale precondition returns HTTP 412 with code `catalog_version_mismatch`. Potentially destructive changes require explicit authorization. Keep the ETag exactly as returned, including its quotes.
+
+Definitions include databases, schemas, tables, views, comments, computed-column `expression`, explicit column `indexes`, partitioning, clustering, `distinct`, and `retention_days`. Storage is accepted on creation and omitted from exports. Typed definitions reject unknown fields at every modeled level. `raw()` reads and applies `serde_json::Value` to retain unknown fields and arbitrary-precision JSON numbers.
+
+Mutations use the client's `write_timeout` and never retry automatically. A transport or response-decoding interruption after sending produces `catalog_commit_outcome_unknown`; read the current definition before deciding whether to replay. A dry run cannot commit, so it does not receive this code solely for a transport failure.
+
+## Table ingest
 
 ```text
-GET /v1/databases/{database}/schemas
-GET /v1/databases/{database}/schemas/{schema}
-```
-
-### Tables
-
-```text
-GET /v1/databases/{database}/schemas/{schema}/tables
-GET /v1/databases/{database}/schemas/{schema}/tables/{table}
-```
-
-### Pagination
-
-All list endpoints accept:
-
-- `page_size`: optional integer from 1 through 1000; the default is 100
-- `page_token`: optional opaque token returned by the previous page
-
-The Rust SDK exposes these as `CatalogListOptions`. A list response has the same shape for every resource type:
-
-```json
-{
-  "items": [],
-  "next_page_token": "opaque-token"
-}
-```
-
-`next_page_token` is omitted when there is no next page. Clients must pass it back unchanged and must not parse or synthesize it.
-
-`Client::iterate_databases`, `iterate_schemas`, and `iterate_tables` follow the token automatically, fetch pages lazily, and reject a repeated token instead of looping forever. The `list_*` methods expose one explicit page when an application needs page boundaries.
-
-### Resource shapes
-
-Database:
-
-```json
-{
-  "name": "scopedb",
-  "comment": "optional description"
-}
-```
-
-Schema:
-
-```json
-{
-  "database": "scopedb",
-  "name": "public",
-  "comment": "optional description"
-}
-```
-
-Table list endpoints return summaries:
-
-```json
-{
-  "database": "scopedb",
-  "schema": "public",
-  "name": "events",
-  "comment": "optional description"
-}
-```
-
-Fetching one table returns its full public specification:
-
-```json
-{
-  "database": "scopedb",
-  "schema": "public",
-  "name": "events",
-  "columns": [
-    {
-      "name": "occurred_at",
-      "data_type": "timestamp",
-      "comment": null
-    }
-  ],
-  "partition_by": [],
-  "cluster_by": [],
-  "distinct_on": {
-    "on": [],
-    "by": []
-  },
-  "data_retention_days": null,
-  "comment": null
-}
-```
-
-## Streaming write API
-
-The streaming write API appends rows that already match an existing table. It supports NDJSON only.
-
-### `POST /v1/databases/{database}/schemas/{schema}/tables/{table}/rows`
-
-Required request header:
-
-```http
+POST /v1/catalog/databases/{database}/schemas/{schema}/tables/{table}/ingest
 Content-Type: application/x-ndjson
+Content-Encoding: zstd
 ```
 
-Request body:
+Each non-empty line is one row object matching an existing table. The SDK and server limit each uncompressed request to 8 MiB and 200,000 rows. A successful response is:
 
-```ndjson
-{"id":1,"name":"first"}
-{"id":2,"name":"second"}
+```json
+{ "status": "committed", "num_rows_inserted": 2 }
 ```
 
-Each line is one complete JSON row object. A JSON array is not a valid replacement for multiple NDJSON lines. The body must not be empty. One request is limited to 16 MiB and 200,000 rows.
-
-A committed response is:
+A rejected request can include row-level errors:
 
 ```json
 {
-  "append_state": "committed",
-  "num_rows_inserted": 2
-}
-```
-
-`num_rows_inserted` is the number of rows written.
-
-### Structured append errors
-
-An append failure uses this payload when the outcome is known:
-
-```json
-{
+  "code": "invalid_schema",
   "message": "row validation failed",
-  "append_state": "rejected",
-  "row_errors": [
-    {
-      "row_index": 0,
-      "column": "id",
-      "message": "invalid value"
-    }
-  ],
-  "row_errors_truncated": false
-}
-```
-
-`append_state` has three meanings:
-
-- `committed`: all request rows committed
-- `rejected`: no request row committed
-- `unknown`: the commit outcome cannot be determined
-
-`row_index` is zero-based within the submitted NDJSON request. The server may truncate the row-error list; `row_errors_truncated` preserves that fact.
-
-### Writing with the SDK
-
-Create a stream with `table.append_stream().build()`. The SDK converts Rust values to NDJSON and writes them in batches.
-
-| Method       | Use                                                          |
-| ------------ | ------------------------------------------------------------ |
-| `send()`     | Add one row to the SDK's pending writes.                     |
-| `send_all()` | Add rows from an iterator.                                   |
-| `try_send()` | Try to add a row without waiting; check the returned result. |
-| `flush()`    | Wait for pending writes while keeping the stream open.       |
-| `shutdown()` | Wait for writing to complete and close the stream.           |
-
-`send()` and `send_all()` add rows to the SDK without waiting for the writes to finish. Call `shutdown()` when you are done sending rows.
-
-Set `.failure_policy(AppendFailurePolicy::Continue)` to keep the stream running after a batch fails. Read the report returned by `flush()` or `shutdown()` for the write results.
-
-See the [stream example](../README.md#write-with-a-stream) for a complete usage example.
-
-## Statement API
-
-### `POST /v1/statements`
-
-Submits a statement for execution.
-
-```json
-{
-  "statement_id": "uuid-v7-or-user-provided",
-  "statement": "SELECT 1",
-  "exec_timeout": "PT1S",
-  "format": "json"
-}
-```
-
-Request fields:
-
-- `statement_id`: optional from the SDK perspective
-- `statement`: required
-- `exec_timeout`: optional
-- `format`: `json` for the public Rust SDK
-
-The response is a tagged statement-state payload: `pending`, `running`, `finished`, `failed`, or `cancelled`. Statement failure and cancellation are in-band states, so HTTP success does not imply statement success.
-
-### `GET /v1/statements/{statement_id}?format=json`
-
-Fetches the latest state for a submitted statement and returns the same state payload family as statement submission. `StatementHandle::status().await` performs at most one fetch and updates the snapshot returned by `StatementHandle::last_status`; terminal snapshots are returned without another request. `StatementHandle::wait` polls with bounded exponential delay until a terminal state. The older `fetch_once` and `fetch` names remain deprecated aliases for `status` and `wait`, respectively.
-
-### `POST /v1/statements/{statement_id}/cancel`
-
-Cancels a pending or running statement. The response contains the post-cancel terminal status view:
-
-```json
-{
-  "statement_id": "uuid",
-  "status": "finished|failed|cancelled",
-  "message": "statement is ...",
-  "created_at": "timestamp"
-}
-```
-
-### Statement result shape
-
-A finished statement contains a JSON result set:
-
-```json
-{
-  "status": "finished",
-  "statement_id": "uuid",
-  "created_at": "timestamp",
-  "progress": {},
-  "result_set": {
-    "metadata": {
-      "fields": [
-        { "name": "col", "data_type": "string" }
-      ],
-      "num_rows": 1
-    },
-    "format": "json",
-    "rows": [["value"]]
+  "details": {
+    "status": "rejected",
+    "row_errors": [{ "row_index": 0, "column": "id", "message": "invalid value" }],
+    "row_errors_truncated": false
   }
 }
 ```
 
-## Transform-oriented ingest API
+`committed` means all request rows committed, `rejected` means none committed, and `unknown` means the outcome cannot be determined. Row indexes are zero-based within the request. Missing or malformed outcome details are treated as unknown. Both `AppendRowsResult::status` and `AppendErrorDetails::status` match the native wire fields.
 
-### `POST /v1/ingest`
+Direct `Table::append` makes one attempt. `Table::append_stream` batches values and retries temporary rejections. Replaying transient unknown outcomes requires `.retry_unknown(true)` and can duplicate rows. Client timeouts are never automatically replayed. Use `flush` or `shutdown` to observe completion and delivery reports. See the [writing guide](../README.md#writing-rows) for batching, concurrency, and failure policies.
 
-Ingests JSON lines through a transformation statement.
+## Statements
+
+```text
+POST /v1/statements
+GET  /v1/statements/{statement_id}?format=json
+POST /v1/statements/{statement_id}/cancel?format=json
+```
+
+A submission request is:
 
 ```json
 {
-  "type": "committed",
-  "data": {
-    "format": "json",
-    "rows": "{\"k\":1}\n{\"k\":2}"
-  },
-  "statement": "SELECT ... INSERT INTO target_table"
+  "statement": "SELECT 1",
+  "max_elapsed_seconds": 30,
+  "max_estimated_seconds": 5,
+  "format": "json"
 }
 ```
 
-The Rust SDK uses committed ingest with JSON-line data. A successful response is:
+`statement_id` is optional. Duration limits must be positive and finite; omitted values use server defaults. `with_max_elapsed(Duration)` includes queueing time, while `with_max_estimated(Duration)` limits estimated execution duration.
 
-```json
-{
-  "num_rows_inserted": 2
-}
-```
+All three endpoints return the same complete status family: pending, running, finished, failed, or cancelled. Each includes `statement_id`, `created_at`, and progress with `compute_seconds`. Finished responses contain `result_set`; failed responses contain required `error: { code, message, details? }`. Neither failed nor cancelled responses require a top-level message. HTTP success alone does not mean execution succeeded.
 
-This endpoint is useful when each input record needs a SQL transform. For rows already shaped like a table, use the streaming write API.
+`snapshot` returns the cached snapshot, `refresh` fetches an active statement once, and `wait` polls to a terminal state. `cancel` returns and caches the complete response; when execution finishes before cancellation, its result or original failure remains available. Pending or running cancellation responses are observations, not cancellation acknowledgements; continue waiting for a terminal state. `wait()` returns `StatementCancelled` for cancellation and `StatementFailed` for execution failure. Terminal cached states do not trigger another request. Dropping a waiting future does not cancel server execution. Upgrading from 0.5 clears saved statement history and results.
 
-## Generic error responses
+The JSON result format encodes cells as strings or null, with field metadata providing their types. `raw_rows` preserves those wire cells. Use value or object conversions for typed values; duplicate field names are rejected by object conversion.
 
-Non-append non-2xx responses generally use:
+## Errors and migration
 
-```json
-{
-  "message": "..."
-}
-```
+HTTP errors use `{ "code": "...", "message": "...", "details": ... }`. `Error::code()` and `details()` preserve unknown codes and structured details. `http_status()`, `request_id()`, and `retry_after()` expose transport diagnostics. Failed statements additionally expose `statement_details()`; append failures expose `append_details()`.
 
-Use `Error::message()` to read the error message. When available, `http_status()`, `request_id()`, and `retry_after()` provide the HTTP status, request ID, and suggested retry delay.
+The legacy transform Ingest API is removed. Shape events before appending, or append raw events and execute a separate ScopeQL transformation. These are separate commits. See the [0.6 migration](../README.md#migrate-to-scopedb-06) and [Ingest migration](../README.md#migrate-from-ingest).
