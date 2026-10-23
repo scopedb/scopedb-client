@@ -306,7 +306,7 @@ Review these behavior changes when migrating:
 
 The example guide in `examples/README.md` includes setup instructions and commands to run each example from the repository root.
 
-The wire-level endpoint and payload reference is in `docs/rust-http-api.md`. Release history and the maintainer runbook are in the repository's `CHANGELOG.md` and `RELEASE.md`.
+The wire-level endpoint and payload reference is in `docs/rust-http-api.md`. Release history is in the repository's `CHANGELOG.md`.
 
 ## License
 

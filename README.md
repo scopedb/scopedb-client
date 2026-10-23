@@ -62,7 +62,19 @@ cargo x check
 cargo x test --no-capture
 ```
 
-Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fixes. Run `cargo x --help` to list all development tasks. The maintainer runbook is in [RELEASE.md](RELEASE.md).
+Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fixes. Run `cargo x --help` to list all development tasks.
+
+### Live protocol validation
+
+From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` to an authenticated ScopeDB 0.6 endpoint, then run:
+
+```sh
+cargo test -p scopedb-client --test native_06 -- --ignored --nocapture
+```
+
+The test creates a uniquely named schema and checks dry-run, ETag conflicts, direct and concurrent streaming appends, row rejections, statement errors, elapsed timeout, and cancellation racing with completion. It deletes its schema before returning. For an isolated local engine, `SCOPEDB_TENANT_ID` supplies tenant identity instead of a platform API key. Running cancellation, lost acknowledgements, and stale responses after dropping a future are covered by controlled HTTP tests.
+
+To publish, push an annotated `vX.Y.Z` tag on the merged release commit in `main`; [release.yml](.github/workflows/release.yml) runs the checks and publishes to crates.io.
 
 ## License
 
