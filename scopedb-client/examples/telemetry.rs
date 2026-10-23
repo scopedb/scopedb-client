@@ -16,6 +16,7 @@ mod common;
 
 use std::time::Duration;
 
+use scopedb_client::AppendCircuitBreakerOptions;
 use scopedb_client::AppendDeliveryOutcome;
 use scopedb_client::AppendFailurePolicy;
 use scopedb_client::AppendStream;
@@ -48,11 +49,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let telemetry = table
         .append_stream()
         .failure_policy(AppendFailurePolicy::Continue)
+        .circuit_breaker(Some(AppendCircuitBreakerOptions::default()))
         .target_batch_bytes(1024 * 1024)
         .max_batch_rows(10_000)
         .flush_interval(Duration::from_secs(1))
         .max_buffered_bytes(32 * 1024 * 1024)
-        .max_concurrent_batches(2)
+        // This limit applies to each stream; include every application replica.
+        .max_concurrent_batches(1)
         .attempt_timeout(Duration::from_secs(10))
         .on_batch_failure(|event| {
             // A synchronous observer; use a separate diagnostics sink.

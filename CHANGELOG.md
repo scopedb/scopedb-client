@@ -6,9 +6,12 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## v0.4.0 (2026-10-23)
 
+The minimum supported Rust version remains 1.91.0, unchanged from v0.3.3.
+
 ### Breaking Changes
 
 * Require ScopeDB 0.6.0 or later. Replace `with_exec_timeout` with `with_max_elapsed(Duration)`. Remove `with_max_parallelism`; the new `with_max_estimated(Duration)` limits estimated execution time, not parallelism.
+* Upgrading the server from 0.5 to 0.6 clears statement history and invalidates saved query results. Previously saved `statement_id`s and handles cannot be resumed; export required results before the server upgrade.
 * Replace paginated Catalog APIs and `Table::describe()` / `table_schema()` with complete declarative definitions and ETags through `client.catalog()` and `table.catalog().get()`. See the [0.6 migration guide](scopedb-client/README.md#migrate-to-scopedb-06) for field and type replacements.
 * Remove `Client::insert`, `Client::ingest_stream`, and the transform Ingest types. Use table append APIs and shape rows in the producer; see the [migration guide](scopedb-client/README.md#migrate-from-ingest).
 * Rename statement cached reads to `snapshot()` and network refreshes to `refresh()`. Replace fetch aliases and handle progress/result accessors with the snapshot or `wait()`. `cancel()` returns the complete `StatementStatus`; waiting on cancellation returns `ErrorKind::StatementCancelled`.

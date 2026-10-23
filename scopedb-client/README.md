@@ -6,7 +6,7 @@ SDK 0.4 requires ScopeDB 0.6.0 or later and uses its native Statement, declarati
 
 ## Installation
 
-From your application crate:
+Requires Rust 1.91.0 or later. From your application crate:
 
 ```sh
 cargo add scopedb-client serde_json
@@ -50,7 +50,7 @@ This SDK sends ScopeQL statements to ScopeDB; the language is documented separat
 
 Applications that own TLS, proxy, timeout, or pooling settings can pass a compatible HTTP client through `.http_client(...)`. The SDK-owned HTTP client disables redirects and transport retries to avoid replaying writes; custom clients must use `.redirect(reqwest::redirect::Policy::none()).retry(reqwest::retry::never())` for the same guarantee. `Client::new(endpoint, http_client)` remains available when authentication is already configured on that client. Use the reqwest version re-exported as `scopedb_client::reqwest` to avoid dependency-version mismatches.
 
-Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Configure it with `Client::builder(endpoint).write_timeout(Duration::from_secs(60))` before `build()`; it must be nonzero. `Client::new` uses the same default. Streams inherit the client timeout unless an append stream explicitly sets `attempt_timeout`. Shorter timeouts on a custom HTTP client still apply. Admission, retry backoff, and an entire `flush()`/`shutdown()` barrier are outside this budget.
+Every table append or Catalog mutation HTTP request has a client timeout of 30 seconds by default. Its budget starts after local encoding, compression, and request preparation and covers one HTTP attempt through reading the complete response body. Configure it with `Client::builder(endpoint).write_timeout(Duration::from_secs(60))` before `build()`. `Client::new` uses the same default. Streams inherit the client timeout unless an append stream explicitly sets `attempt_timeout`. Both settings require a finite, positive duration; the Rust SDK has no option to disable this deadline. Increase the duration when a write needs more time. Shorter timeouts on a custom HTTP client still apply. Admission, retry backoff, and an entire `flush()`/`shutdown()` barrier are outside this budget.
 
 Append client timeouts after an HTTP attempt begins preserve the existing error kind and source and add `Error::write_details()` with `reason: WriteErrorReason::Timeout` and `outcome: AppendState::Unknown`; `is_retryable()` is false. The structured details, source, and HTTP diagnostics remain available on subsequent errors returned by the stream and batch failure events. A timeout does not roll back a write: reconcile a client-interrupted write before replaying it. A server HTTP 408 is still a server response; an explicitly rejected append follows the existing safe retry policy. Streams retry temporary rejected batches by default. Unknown outcomes require explicit `.retry_unknown(true)`; this permits at-least-once delivery and can duplicate rows. Catalog interruptions use `catalog_commit_outcome_unknown` and are never replayed automatically.
 
@@ -166,9 +166,12 @@ Dropping an enqueued flush or started shutdown future stops waiting, but settlem
 
 ### Continue after a batch fails
 
-For logs or telemetry that should keep running after a batch fails, set `AppendFailurePolicy::Continue`. Read the report returned by `flush()` or `shutdown()` to see the write results.
+To keep a log or telemetry sink running after batch failures, use `AppendFailurePolicy::Continue` and keep the circuit breaker enabled. The default `Stop` policy instead closes the stream after a batch failure. Continue mode is best effort: read `flush()`/`shutdown()` reports and `stats()` to account for failed, unknown, and locally dropped rows.
+
+For producers running on multiple application replicas, start with one concurrent batch per stream and tune against the shared service's capacity. The default is four per stream: ten replicas with one stream each can issue up to 40 concurrent batches, while `.max_concurrent_batches(1)` reduces that total to ten. Account for additional streams in each replica as well.
 
 ```rust
+use scopedb_client::AppendCircuitBreakerOptions;
 use scopedb_client::AppendFailurePolicy;
 
 # async fn demo() -> Result<(), scopedb_client::Error> {
@@ -177,14 +180,20 @@ let stream = client
     .table("events")
     .append_stream()
     .failure_policy(AppendFailurePolicy::Continue)
+    .circuit_breaker(Some(AppendCircuitBreakerOptions::default()))
+    .max_concurrent_batches(1)
     .build()?;
 
-stream.send(&serde_json::json!({"name": "request.completed"})).await?;
+if let Err(error) = stream.try_send(&serde_json::json!({"name": "request.completed"})) {
+    eprintln!("telemetry row not admitted: {error}");
+}
 let report = stream.shutdown().await?;
 println!("Write results: {report:?}");
 # Ok(())
 # }
 ```
+
+The circuit breaker is enabled by default. It pauses new batch dispatch after five consecutive availability failures and waits 30 seconds before probing recovery. `try_send()` returns immediately if the circuit is open or local capacity is full; use it when collecting telemetry must not wait for capacity. `send().await` provides backpressure instead. Send diagnostics to a separate sink and monitor dropped rows, failed batches, and unknown outcomes. See `examples/telemetry.rs` for a complete example.
 
 ### Append NDJSON
 

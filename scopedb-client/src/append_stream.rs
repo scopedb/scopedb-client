@@ -345,7 +345,7 @@ impl AppendStreamBuilder {
         self
     }
 
-    /// Sets the maximum number of append batches sent concurrently.
+    /// Sets the maximum number of append batches sent concurrently per stream (default 4).
     pub fn max_concurrent_batches(mut self, max_concurrent_batches: usize) -> Self {
         self.max_in_flight_requests = max_concurrent_batches;
         self
@@ -375,6 +375,7 @@ impl AppendStreamBuilder {
 
     /// Sets a timeout for each HTTP attempt, overriding the client's write timeout.
     /// A timeout has an unknown commit outcome. By default the client uses 30 seconds.
+    /// The duration must be finite and nonzero; this deadline cannot be disabled.
     pub fn attempt_timeout(mut self, attempt_timeout: Duration) -> Self {
         self.attempt_timeout = Some(attempt_timeout);
         self
