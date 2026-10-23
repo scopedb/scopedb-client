@@ -120,6 +120,7 @@ pub struct AppendDeliveryReport {
     pub unknown_batches: u64,
     pub retries: u64,
     /// Wall time spent waiting for this barrier.
+    /// A shared terminal failure report starts at the earliest outstanding barrier.
     pub duration: Duration,
 }
 
@@ -1173,7 +1174,7 @@ async fn run_append_worker(
 
     loop {
         if worker.fatal.is_some() {
-            worker.finish_fatal(&mut rx).await;
+            worker.finish_fatal(&mut rx, None).await;
             return;
         }
 
@@ -1192,12 +1193,14 @@ async fn run_append_worker(
                 match command {
                     Some(AppendCommand::Record(record)) => worker.buffer_record(record).await,
                     Some(AppendCommand::Flush(barrier)) => {
-                        worker.complete_barrier(barrier).await;
+                        if let Some(barrier) = worker.complete_barrier(barrier).await {
+                            worker.finish_fatal(&mut rx, Some(barrier)).await;
+                            return;
+                        }
                     }
                     Some(AppendCommand::Shutdown(barrier)) => {
-                        worker.complete_barrier(barrier).await;
-                        if worker.fatal.is_some() {
-                            worker.finish_fatal(&mut rx).await;
+                        if let Some(barrier) = worker.complete_barrier(barrier).await {
+                            worker.finish_fatal(&mut rx, Some(barrier)).await;
                         } else {
                             worker.finish_closed();
                         }
@@ -1207,7 +1210,7 @@ async fn run_append_worker(
                         worker.dispatch_buffered().await;
                         worker.drain_in_flight().await;
                         if worker.fatal.is_some() {
-                            worker.finish_fatal(&mut rx).await;
+                            worker.finish_fatal(&mut rx, None).await;
                         } else {
                             let dropped = lock(&worker.shared).dropped_rows;
                             let report = worker.take_report(dropped, Instant::now());
@@ -1400,15 +1403,15 @@ impl AppendWorker {
         }
     }
 
-    async fn complete_barrier(&mut self, barrier: BarrierCommand) {
+    async fn complete_barrier(&mut self, barrier: BarrierCommand) -> Option<BarrierCommand> {
         self.dispatch_buffered().await;
         self.drain_in_flight().await;
-        if let Some(fatal) = &self.fatal {
-            let _ = barrier.ack.send(Err(fatal.clone()));
-            return;
+        if self.fatal.is_some() {
+            return Some(barrier);
         }
         let report = self.take_report(barrier.dropped_rows_at_barrier, barrier.started_at);
         let _ = barrier.ack.send(Ok(report));
+        None
     }
 
     async fn drain_in_flight(&mut self) {
@@ -1558,14 +1561,18 @@ impl AppendWorker {
         drop(records);
     }
 
-    async fn finish_fatal(&mut self, rx: &mut mpsc::Receiver<AppendCommand>) {
+    async fn finish_fatal(
+        &mut self,
+        rx: &mut mpsc::Receiver<AppendCommand>,
+        barrier: Option<BarrierCommand>,
+    ) {
         rx.close();
         let buffered = std::mem::take(&mut self.rows);
         self.mark_records_failed(buffered);
         self.current_bytes = 0;
         self.batch_deadline = None;
 
-        let mut barriers = Vec::new();
+        let mut barriers: Vec<_> = barrier.into_iter().collect();
         while let Some(command) = rx.recv().await {
             match command {
                 AppendCommand::Record(record) => {
@@ -1573,10 +1580,16 @@ impl AppendWorker {
                     self.mark_records_failed(vec![record]);
                 }
                 AppendCommand::Flush(barrier) | AppendCommand::Shutdown(barrier) => {
-                    barriers.push(barrier.ack);
+                    barriers.push(barrier);
                 }
             }
         }
+        // All outstanding barriers observe this settlement; retain the earliest wait.
+        let started_at = barriers
+            .iter()
+            .map(|barrier| barrier.started_at)
+            .min()
+            .unwrap_or_else(Instant::now);
         self.drain_in_flight().await;
 
         let fatal = self
@@ -1600,15 +1613,15 @@ impl AppendWorker {
             shared.in_flight_batches = 0;
         }
         let dropped = lock(&self.shared).dropped_rows;
-        self.take_report(dropped, Instant::now());
+        self.take_report(dropped, started_at);
         {
             let mut shared = lock(&self.shared);
             shared.lifecycle = AppendStreamState::Failed;
             shared.fatal = Some(fatal.clone());
             shared.final_result = Some(Err(fatal.clone()));
         }
-        for ack in barriers {
-            let _ = ack.send(Err(fatal.clone()));
+        for barrier in barriers {
+            let _ = barrier.ack.send(Err(fatal.clone()));
         }
         self.pending_bytes.close();
         self.shutdown_notify.notify_waiters();
@@ -3338,6 +3351,56 @@ mod tests {
             stream.try_send(&serde_json::json!({"id": 3})),
             Err(AppendTrySendError::Closed)
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_barriers_report_the_time_spent_waiting() {
+        for shutdown in [false, true] {
+            let (arrived_tx, arrived_rx) = oneshot::channel();
+            let arrived_tx = Mutex::new(Some(arrived_tx));
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = Mutex::new(release_rx);
+            let server = MockServer::start(move |_, _| {
+                lock(&arrived_tx).take().unwrap().send(()).unwrap();
+                lock(&release_rx)
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap();
+                MockResponse::json(
+                    422,
+                    r#"{"message":"invalid","code":"invalid_schema","details":{"status":"rejected"}}"#,
+                )
+            });
+            let stream = server
+                .client()
+                .table("events")
+                .append_stream()
+                .flush_interval(Duration::from_secs(60))
+                .build()
+                .unwrap();
+            stream.send(&serde_json::json!({"id":1})).await.unwrap();
+            let mut barrier = Box::pin(async {
+                if shutdown {
+                    stream.shutdown().await
+                } else {
+                    stream.flush().await
+                }
+            });
+            tokio::select! {
+                _ = &mut barrier => panic!("response must remain gated"),
+                arrived = arrived_rx => arrived.unwrap(),
+            }
+            let waiting = Instant::now();
+            // Measure an actual wait after the barrier has dispatched its batch.
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let minimum_duration = waiting.elapsed();
+            release_tx.send(()).unwrap();
+            assert!(barrier.await.is_err());
+            let report = stream.stats().last_report.unwrap();
+            assert_eq!(report.accepted_rows, 1);
+            assert_eq!(report.failed_rows, 1);
+            assert!(report.duration >= minimum_duration, "{report:?}");
+            assert_eq!(server.requests().len(), 1);
+        }
     }
 
     #[tokio::test]
