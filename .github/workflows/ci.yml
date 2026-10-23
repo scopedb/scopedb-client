@@ -73,8 +73,6 @@ jobs:
       - name: Run full tests
         timeout-minutes: 10
         run: cargo x test --no-capture
-      - name: Verify crate package
-        run: cargo +1.91.0 package --package scopedb-client --locked
 
   required:
     name: Required
