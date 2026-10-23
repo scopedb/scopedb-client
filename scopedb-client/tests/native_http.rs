@@ -42,18 +42,19 @@ fn serve(
     etag: Option<&str>,
     before_response: impl FnMut(usize) + Send + 'static,
 ) -> (Client, thread::JoinHandle<Vec<String>>) {
-    serve_responses(responses, etag, before_response, false)
+    serve_responses(responses, etag, before_response, Vec::new())
 }
 
 fn truncated_server(responses: Vec<(u16, String)>) -> (Client, thread::JoinHandle<Vec<String>>) {
-    serve_responses(responses, Some("\"opaque\""), |_| {}, true)
+    let truncated = (0..responses.len()).collect();
+    serve_responses(responses, Some("\"opaque\""), |_| {}, truncated)
 }
 
 fn serve_responses(
     responses: Vec<(u16, String)>,
     etag: Option<&str>,
     mut before_response: impl FnMut(usize) + Send + 'static,
-    truncate_body: bool,
+    truncated_responses: Vec<usize>,
 ) -> (Client, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/proxy/", listener.local_addr().unwrap());
@@ -92,7 +93,7 @@ fn serve_responses(
             }
             requests.push(headers + &String::from_utf8(request_body).unwrap());
             before_response(index);
-            let content_length = if truncate_body {
+            let content_length = if truncated_responses.contains(&index) {
                 body.len() + 1
             } else {
                 body.len()
@@ -115,6 +116,115 @@ fn serve_responses(
         .build()
         .unwrap();
     (client, task)
+}
+
+#[tokio::test]
+async fn query_poll_failures_resume_the_existing_statement() {
+    for truncated in [false, true] {
+        let id = uuid::Uuid::now_v7();
+        let running = json!({"status":"running","statement_id":id,"created_at":"2026-10-23T00:00:00Z","progress":StatementEstimatedProgress::default()});
+        let mut finished = running.clone();
+        finished["status"] = json!("finished");
+        finished["result_set"] = json!({"metadata":{"fields":[{"name":"id","data_type":"int"}],"num_rows":1},"format":"json","rows":[["7"]]});
+        let failure = if truncated {
+            (200, finished.to_string())
+        } else {
+            (503, json!({"code":"unavailable","message":"status unavailable","request_id":"poll-request","retryable":true,"details":{"reason":"busy"}}).to_string())
+        };
+        let (client, task) = serve_responses(
+            vec![
+                (200, running.to_string()),
+                failure,
+                (200, finished.to_string()),
+            ],
+            None,
+            |_| {},
+            if truncated { vec![1] } else { Vec::new() },
+        );
+
+        let error = client
+            .query("SELECT 7 AS id INSERT INTO events")
+            .await
+            .unwrap_err();
+        assert!(!error.is_retryable());
+        assert_eq!(error.statement_id(), Some(id));
+        assert_eq!(
+            error.http_status().unwrap().as_u16(),
+            if truncated { 200 } else { 503 }
+        );
+        if truncated {
+            assert!(std::error::Error::source(&error).is_some());
+        } else {
+            assert_eq!(error.code(), Some("unavailable"));
+            assert_eq!(error.request_id(), Some("poll-request"));
+            assert_eq!(error.details().unwrap()["reason"], "busy");
+        }
+        let result = client
+            .statement_handle(error.statement_id().unwrap())
+            .wait()
+            .await
+            .unwrap();
+        assert_eq!(result.raw_rows()[0][0].as_deref(), Some("7"));
+        let requests = task.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("POST /proxy/v1/statements "));
+        for request in &requests[1..] {
+            assert!(request.starts_with(&format!("GET /proxy/v1/statements/{id}?format=json ")));
+        }
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_statement_submissions_are_not_retryable() {
+    for id in [None, Some(uuid::Uuid::now_v7())] {
+        for (status, body) in [
+            (502, "gateway lost upstream response".to_string()),
+            (
+                503,
+                json!({"code":"unavailable","message":"gateway failure","retryable":true})
+                    .to_string(),
+            ),
+            (408, "request timed out".to_string()),
+            (200, "invalid response".to_string()),
+        ] {
+            let (client, task) = server(vec![(status, body)]);
+            let mut statement = client.statement("SELECT 1 AS id INSERT INTO events");
+            if let Some(id) = id {
+                statement = statement.with_statement_id(id);
+            }
+            let error = statement.submit().await.unwrap_err();
+            assert!(error.is_persistent(), "{error:?}");
+            assert!(!error.is_retryable());
+            assert_eq!(error.statement_id(), id);
+            assert_eq!(error.http_status().unwrap().as_u16(), status);
+            if status == 503 {
+                assert_eq!(error.code(), Some("unavailable"));
+            }
+            assert_eq!(task.join().unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn statement_rejections_and_handle_polling_keep_safe_retries() {
+    let id = uuid::Uuid::now_v7();
+    let (client, task) = server(vec![
+        (
+            429,
+            json!({"code":"rate_limited","message":"not admitted","retryable":true}).to_string(),
+        ),
+        (
+            503,
+            json!({"code":"unavailable","message":"status unavailable"}).to_string(),
+        ),
+    ]);
+    let rejection = client.statement("SELECT 1").submit().await.unwrap_err();
+    assert!(rejection.is_retryable());
+    assert_eq!(rejection.code(), Some("rate_limited"));
+    let error = client.statement_handle(id).wait().await.unwrap_err();
+    assert!(error.is_retryable());
+    assert_eq!(error.statement_id(), Some(id));
+    assert_eq!(task.join().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -234,14 +344,16 @@ async fn cancellation_retains_full_terminal_snapshots() {
             StatementStatus::Finished(_) => assert_eq!(handle.wait().await.unwrap().num_rows(), 1),
             StatementStatus::Failed(_) => {
                 let error = handle.wait().await.unwrap_err();
+                assert_eq!(error.statement_id(), Some(handle.statement_id()));
                 assert_eq!(error.code(), Some("future_failure"));
                 assert_eq!(error.message(), "precise failure");
                 assert_eq!(error.details().unwrap()["limit"], 7);
             }
-            StatementStatus::Cancelled(_) => assert_eq!(
-                handle.wait().await.unwrap_err().kind(),
-                ErrorKind::StatementCancelled
-            ),
+            StatementStatus::Cancelled(_) => {
+                let error = handle.wait().await.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::StatementCancelled);
+                assert_eq!(error.statement_id(), Some(handle.statement_id()));
+            }
             _ => panic!("expected terminal state"),
         }
         let requests = task.join().unwrap();
@@ -504,6 +616,10 @@ async fn response_body_interruptions_follow_operation_retry_safety() {
     let cancel = handle.cancel().await.unwrap_err();
     let submit = client.statement("SELECT 1").submit().await.unwrap_err();
 
+    assert_eq!(refresh.statement_id(), Some(handle.statement_id()));
+    assert_eq!(cancel.statement_id(), Some(handle.statement_id()));
+    assert!(std::error::Error::source(&submit).is_some());
+    assert!(submit.is_persistent());
     for error in [catalog_get, catalog_dry_run, refresh, cancel] {
         assert!(error.is_retryable());
         assert_eq!(error.http_status().map(|status| status.as_u16()), Some(200));

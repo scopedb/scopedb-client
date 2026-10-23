@@ -51,6 +51,9 @@ impl Statement {
         self
     }
 
+    /// Submits one statement. An interrupted response does not establish whether
+    /// execution started. Supply an ID with [`Self::with_statement_id`] to look it
+    /// up after such a failure without submitting another execution.
     pub async fn submit(self) -> Result<StatementHandle, Error> {
         if self.max_elapsed.is_some_and(|d| d.is_zero())
             || self.max_estimated.is_some_and(|d| d.is_zero())
@@ -76,7 +79,11 @@ impl Statement {
                 max_estimated_seconds: max_estimated.map(|v| v.as_secs_f64()),
                 format: "json",
             })
-            .await?;
+            .await
+            .map_err(|error| match statement_id {
+                Some(id) => error.set_statement_id(id),
+                None => error,
+            })?;
 
         Ok(StatementHandle {
             client,
@@ -87,8 +94,16 @@ impl Statement {
 
     /// Submits and waits. Dropping this future stops polling, not server execution.
     /// Retain a submitted handle to request cancellation explicitly.
+    /// Errors after submission retain [`Error::statement_id`] and never indicate
+    /// that resubmitting is safe. Resume with [`Client::statement_handle`] instead.
     pub async fn execute(self) -> Result<ResultSet, Error> {
-        self.submit().await?.wait().await
+        self.submit().await?.wait().await.map_err(|error| {
+            if error.is_retryable() {
+                error.set_persistent()
+            } else {
+                error
+            }
+        })
     }
 
     pub(crate) fn new(client: Client, statement: String) -> Self {
@@ -134,7 +149,12 @@ impl StatementHandle {
                 .expect("terminal snapshot is present"));
         }
 
-        self.snapshot = Some(self.client.fetch_statement(self.statement_id).await?);
+        self.snapshot = Some(
+            self.client
+                .fetch_statement(self.statement_id)
+                .await
+                .map_err(|error| error.set_statement_id(self.statement_id))?,
+        );
         Ok(self.snapshot.as_ref().expect("status was just assigned"))
     }
 
@@ -155,13 +175,15 @@ impl StatementHandle {
                             ErrorKind::StatementFailed,
                             failed.error.message.clone(),
                         )
+                        .set_statement_id(self.statement_id)
                         .set_statement_details(failed.error.clone()));
                     }
                     StatementStatus::Cancelled(cancelled) => {
                         return Err(Error::new(
                             ErrorKind::StatementCancelled,
                             format!("statement {} was cancelled", cancelled.statement_id),
-                        ));
+                        )
+                        .set_statement_id(self.statement_id));
                     }
                     StatementStatus::Pending(..) | StatementStatus::Running(..) => {
                         sleep(delay).await;
@@ -181,7 +203,11 @@ impl StatementHandle {
         if let Some(status) = self.snapshot.as_ref().filter(|s| s.is_terminated()) {
             return Ok(status.clone());
         }
-        let status = self.client.cancel_statement(self.statement_id).await?;
+        let status = self
+            .client
+            .cancel_statement(self.statement_id)
+            .await
+            .map_err(|error| error.set_statement_id(self.statement_id))?;
         self.snapshot = Some(status.clone());
         Ok(status)
     }

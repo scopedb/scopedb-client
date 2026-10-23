@@ -15,3 +15,4 @@
 
 - Keep an `## Unreleased` section and dated `## vX.Y.Z (YYYY-MM-DD)` release headings. Preserve published version numbers and dates. Use `*` bullets and only nonempty sections, ordered as `Breaking Changes`, `New Features`, `Bug Fixes`, and `Improvements`.
 - Compare the final behavior with the latest published release. Describe user-visible outcomes, migration steps for breaking changes, and replacements for deprecated APIs. Include documentation or metadata changes only when they affect users; omit internal tests, refactors, CI maintenance, and unreleased intermediate changes.
+- Before adding a bug-fix entry, verify that the faulty behavior shipped in the latest release. If the affected API or behavior is itself unreleased, describe only its final contract in the relevant feature entry and omit the development-only correction.

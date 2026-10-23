@@ -221,6 +221,8 @@ impl Client {
     }
 
     /// Executes a ScopeQL statement and waits for all result rows.
+    /// Errors after submission retain [`Error::statement_id`] for resuming the
+    /// existing execution with [`Self::statement_handle`], not resubmitting it.
     pub async fn query(&self, statement: impl Into<String>) -> Result<ResultSet, Error> {
         self.statement(statement).execute().await
     }
@@ -349,9 +351,25 @@ impl Client {
             .send()
             .await
             .map_err(|err| {
-                Error::new(ErrorKind::Unexpected, "failed to submit statement").set_source(err)
+                Error::new(ErrorKind::Unexpected, "failed to submit statement")
+                    .set_source(err)
+                    .set_persistent()
             })?;
-        decode_statement_response(response, false).await
+        decode_statement_response(response, false)
+            .await
+            .map_err(|error| {
+                // A gateway failure or unreadable response can follow successful execution.
+                // HTTP status alone cannot authorize another submission in those cases.
+                if error.http_status().is_none_or(|status| {
+                    status.is_success()
+                        || status.is_server_error()
+                        || status == StatusCode::REQUEST_TIMEOUT
+                }) {
+                    error.set_persistent()
+                } else {
+                    error
+                }
+            })
     }
 
     #[fastrace::trace]

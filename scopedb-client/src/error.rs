@@ -16,6 +16,7 @@ use std::fmt;
 use std::time::Duration;
 
 use reqwest::StatusCode;
+use uuid::Uuid;
 
 use crate::protocol::AppendErrorDetails;
 use crate::protocol::AppendState;
@@ -134,6 +135,12 @@ struct ApiErrorDetails {
     details: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct StatementErrorMetadata {
+    id: Option<Uuid>,
+    details: Option<StatementErrorDetails>,
+}
+
 impl fmt::Display for ErrorStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -154,7 +161,7 @@ pub struct Error {
     api_error: Option<Box<ApiErrorDetails>>,
     append_details: Option<AppendErrorDetails>,
     write_details: Option<WriteErrorDetails>,
-    statement_details: Option<Box<StatementErrorDetails>>,
+    statement_metadata: Option<Box<StatementErrorMetadata>>,
     http_metadata: Option<Box<HttpErrorMetadata>>,
 
     source: Option<std::sync::Arc<anyhow::Error>>,
@@ -184,6 +191,9 @@ impl fmt::Display for Error {
 
         if let Some(code) = self.code() {
             write!(f, ", code: {code}")?;
+        }
+        if let Some(id) = self.statement_id() {
+            write!(f, ", statement_id: {id}")?;
         }
         if let Some(status) = self.http_status() {
             write!(f, ", http_status: {}", status.as_u16())?;
@@ -223,7 +233,8 @@ impl fmt::Debug for Error {
             de.field("context", &self.context);
             de.field("append_details", &self.append_details);
             de.field("write_details", &self.write_details);
-            de.field("statement_details", &self.statement_details);
+            de.field("statement_id", &self.statement_id());
+            de.field("statement_details", &self.statement_details());
             de.field("http_metadata", &self.http_metadata);
             de.field("source", &self.source);
             return de.finish();
@@ -235,6 +246,9 @@ impl fmt::Debug for Error {
         }
         if let Some(code) = self.code() {
             write!(f, ", code: {code}")?;
+        }
+        if let Some(id) = self.statement_id() {
+            write!(f, ", statement_id: {id}")?;
         }
         if let Some(status) = self.http_status() {
             write!(f, ", http_status: {}", status.as_u16())?;
@@ -289,7 +303,7 @@ impl Error {
             api_error: None,
             append_details: None,
             write_details: None,
-            statement_details: None,
+            statement_metadata: None,
             http_metadata: None,
             source: None,
         }
@@ -339,11 +353,29 @@ impl Error {
 
     /// Return structured statement failure details, when available.
     pub fn statement_details(&self) -> Option<&StatementErrorDetails> {
-        self.statement_details.as_deref()
+        self.statement_metadata
+            .as_ref()
+            .and_then(|m| m.details.as_ref())
     }
 
     pub(crate) fn set_statement_details(mut self, details: StatementErrorDetails) -> Self {
-        self.statement_details = Some(Box::new(details));
+        self.statement_metadata
+            .get_or_insert_with(Default::default)
+            .details = Some(details);
+        self
+    }
+
+    /// Returns the statement identifier, when known. Use [`crate::Client::statement_handle`]
+    /// to inspect the existing execution instead of resubmitting it. An identifier
+    /// supplied before submission does not confirm that the server accepted it.
+    pub fn statement_id(&self) -> Option<Uuid> {
+        self.statement_metadata.as_ref().and_then(|m| m.id)
+    }
+
+    pub(crate) fn set_statement_id(mut self, id: Uuid) -> Self {
+        self.statement_metadata
+            .get_or_insert_with(Default::default)
+            .id = Some(id);
         self
     }
 
@@ -459,6 +491,8 @@ impl Error {
     }
 
     /// Return whether retrying this operation is currently appropriate.
+    /// For statement handles, retry on the same handle. Errors from `query()` or
+    /// `execute()` after submission never indicate that resubmitting is safe.
     pub fn is_retryable(&self) -> bool {
         self.is_temporary()
     }
