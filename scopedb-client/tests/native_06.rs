@@ -430,11 +430,12 @@ async fn exercise_data_paths(client: &Client, schema: &str) -> Result<()> {
     ensure!(distinct.first()?.unwrap()["n"].to_string() == "25001");
     println!("BULK 25001 unique rows, bounded concurrent batches, separate flush intervals");
 
+    // Bound both join inputs independently; cancellation timing must not turn
+    // this integration check into a load test on a shared server.
+    let input = format!("(FROM {} SELECT id LIMIT 128)", bulk.identifier());
     let mut active = client
         .statement(format!(
-            "FROM {} AS a JOIN {} AS b ON a.id != b.id AGGREGATE sum(a.id + b.id) AS total",
-            bulk.identifier(),
-            bulk.identifier()
+            "FROM {input} AS a JOIN {input} AS b ON a.id != b.id AGGREGATE sum(a.id + b.id) AS total"
         ))
         .with_max_elapsed(Duration::from_secs(3))
         .submit()
