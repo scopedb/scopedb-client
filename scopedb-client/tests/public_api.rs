@@ -39,10 +39,6 @@ fn structured_write_error_contract_is_public() {
         scopedb_client::WriteErrorReason::Timeout.to_string(),
         "timeout"
     );
-    assert_eq!(
-        scopedb_client::WriteErrorReason::Cancelled.to_string(),
-        "cancelled"
-    );
 }
 
 #[allow(dead_code)]

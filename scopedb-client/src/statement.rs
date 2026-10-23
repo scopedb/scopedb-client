@@ -20,10 +20,7 @@ use uuid::Uuid;
 use crate::Error;
 use crate::ErrorKind;
 use crate::client::Client;
-use crate::protocol::Response;
-use crate::protocol::ResultFormat;
 use crate::protocol::StatementRequest;
-use crate::protocol::StatementRequestParams;
 use crate::protocol::StatementStatus;
 use crate::result::ResultSet;
 
@@ -34,7 +31,6 @@ pub struct Statement {
     statement_id: Option<Uuid>,
     max_elapsed: Option<Duration>,
     max_estimated: Option<Duration>,
-    format: ResultFormat,
 }
 
 impl Statement {
@@ -70,28 +66,23 @@ impl Statement {
             statement_id,
             max_elapsed,
             max_estimated,
-            format,
         } = self;
 
-        let resp = client
+        let snapshot = client
             .submit_statement(StatementRequest {
                 statement,
                 statement_id,
                 max_elapsed_seconds: max_elapsed.map(|v| v.as_secs_f64()),
                 max_estimated_seconds: max_estimated.map(|v| v.as_secs_f64()),
-                params: StatementRequestParams { format },
+                format: "json",
             })
             .await?;
 
-        match resp {
-            Response::Success(response) => Ok(StatementHandle {
-                client,
-                statement_id: response.statement_id(),
-                format,
-                snapshot: Some(response),
-            }),
-            Response::Failed(err) => Err(err.into_error(ErrorKind::Unexpected)),
-        }
+        Ok(StatementHandle {
+            client,
+            statement_id: snapshot.statement_id(),
+            snapshot: Some(snapshot),
+        })
     }
 
     /// Submits and waits. Dropping this future stops polling, not server execution.
@@ -107,7 +98,6 @@ impl Statement {
             statement_id: None,
             max_elapsed: None,
             max_estimated: None,
-            format: ResultFormat::Json,
         }
     }
 }
@@ -116,7 +106,6 @@ impl Statement {
 pub struct StatementHandle {
     client: Client,
     statement_id: Uuid,
-    format: ResultFormat,
     snapshot: Option<StatementStatus>,
 }
 
@@ -145,18 +134,8 @@ impl StatementHandle {
                 .expect("terminal snapshot is present"));
         }
 
-        let (format, statement_id) = (self.format, self.statement_id);
-        match self
-            .client
-            .fetch_statement(statement_id, StatementRequestParams { format })
-            .await?
-        {
-            Response::Success(status) => {
-                self.snapshot = Some(status);
-                Ok(self.snapshot.as_ref().expect("status was just assigned"))
-            }
-            Response::Failed(err) => Err(err.into_error(ErrorKind::Unexpected)),
-        }
+        self.snapshot = Some(self.client.fetch_statement(self.statement_id).await?);
+        Ok(self.snapshot.as_ref().expect("status was just assigned"))
     }
 
     /// Waits for the statement to terminate and returns its result set.
@@ -202,20 +181,15 @@ impl StatementHandle {
         if let Some(status) = self.snapshot.as_ref().filter(|s| s.is_terminated()) {
             return Ok(status.clone());
         }
-        match self.client.cancel_statement(self.statement_id).await? {
-            Response::Success(status) => {
-                self.snapshot = Some(status.clone());
-                Ok(status)
-            }
-            Response::Failed(err) => Err(err.into_error(ErrorKind::Unexpected)),
-        }
+        let status = self.client.cancel_statement(self.statement_id).await?;
+        self.snapshot = Some(status.clone());
+        Ok(status)
     }
 
-    pub(crate) fn new(client: Client, statement_id: Uuid, format: ResultFormat) -> Self {
+    pub(crate) fn new(client: Client, statement_id: Uuid) -> Self {
         Self {
             client,
             statement_id,
-            format,
             snapshot: None,
         }
     }

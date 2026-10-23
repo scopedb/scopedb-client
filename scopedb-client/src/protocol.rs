@@ -21,7 +21,6 @@ use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::Error;
@@ -75,101 +74,70 @@ pub struct AppendErrorDetails {
     pub row_errors_truncated: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct AppendRowsErrorPayload {
-    #[serde(rename = "message")]
-    pub _message: String,
-    pub details: AppendErrorDetails,
-}
-
-#[derive(Debug, Clone)]
-pub enum Response<T> {
-    Success(T),
-    Failed(ErrorStatus),
-}
-
-impl<T: DeserializeOwned> Response<T> {
-    pub async fn from_http_response(r: reqwest::Response) -> Result<Self, Error> {
-        let code = r.status();
-        let headers = r.headers().clone();
-        let payload = r.bytes().await.map_err(|err| {
+pub(crate) async fn decode_statement_response(
+    r: reqwest::Response,
+) -> Result<StatementStatus, Error> {
+    let code = r.status();
+    let headers = r.headers().clone();
+    let payload = r.bytes().await.map_err(|err| {
+        apply_response_metadata(
+            Error::new(ErrorKind::Unexpected, "failed to read response body").set_source(err),
+            code,
+            &headers,
+        )
+    })?;
+    if code.is_success() {
+        let result = serde_json::from_slice(&payload).map_err(|err| {
             apply_response_metadata(
-                Error::new(ErrorKind::Unexpected, "failed to read response body").set_source(err),
+                Error::new(ErrorKind::Unexpected, "failed to decode response body").set_source(err),
                 code,
                 &headers,
             )
         })?;
-        if code.is_success() {
-            let result = serde_json::from_slice(&payload).map_err(|err| {
-                apply_response_metadata(
-                    Error::new(ErrorKind::Unexpected, "failed to decode response body")
-                        .set_source(err),
-                    code,
-                    &headers,
-                )
-            })?;
-            return Ok(Response::Success(result));
-        }
-
-        Ok(Response::Failed(ErrorStatus::from_http_parts(
-            code, &headers, &payload,
-        )))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ErrorStatus {
-    code: StatusCode,
-    api_code: Option<String>,
-    details: Option<serde_json::Value>,
-    message: String,
-    request_id: Option<String>,
-    retry_after: Option<Duration>,
-    retryable: Option<bool>,
-}
-
-impl ErrorStatus {
-    pub(crate) fn from_http_parts(code: StatusCode, headers: &HeaderMap, payload: &[u8]) -> Self {
-        let parsed = parse_error_payload(payload);
-        Self {
-            code,
-            api_code: parsed.as_ref().and_then(|p| p.code.clone()),
-            details: parsed.as_ref().and_then(|p| p.details.clone()),
-            message: parsed
-                .as_ref()
-                .map(|parsed| parsed.message.clone())
-                .unwrap_or_else(|| String::from_utf8_lossy(payload).into_owned()),
-            request_id: parsed
-                .as_ref()
-                .and_then(|parsed| parsed.request_id.clone())
-                .or_else(|| header_string(headers, "x-request-id")),
-            retry_after: parse_retry_after(headers, SystemTime::now()),
-            retryable: parsed.and_then(|parsed| parsed.retryable),
-        }
+        return Ok(result);
     }
 
-    pub(crate) fn into_error(self, kind: ErrorKind) -> Error {
-        let mut error = Error::new(kind, self.message)
-            .set_http_status(self.code)
-            .set_server_retryable(self.retryable)
-            .set_api_error(self.api_code, self.details);
-        if let Some(request_id) = self.request_id {
-            error = error.set_request_id(request_id);
-        }
-        if let Some(retry_after) = self.retry_after {
-            error = error.set_retry_after(retry_after);
-        }
-        let retryable = self.retryable.unwrap_or_else(|| {
-            matches!(
-                self.code,
-                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
-            ) || self.code.is_server_error()
-        });
-        if retryable {
-            error.set_temporary()
-        } else {
-            error.set_permanent()
-        }
+    Err(decode_http_error(
+        code,
+        &headers,
+        &payload,
+        ErrorKind::Unexpected,
+    ))
+}
+
+pub(crate) fn decode_http_error(
+    status: StatusCode,
+    headers: &HeaderMap,
+    payload: &[u8],
+    kind: ErrorKind,
+) -> Error {
+    let parsed = parse_error_payload(payload).unwrap_or_else(|| ParsedErrorPayload {
+        code: None,
+        details: None,
+        message: String::from_utf8_lossy(payload).into_owned(),
+        request_id: None,
+        retryable: None,
+    });
+    let mut error = apply_response_metadata(
+        Error::new(kind, parsed.message)
+            .set_server_retryable(parsed.retryable)
+            .set_api_error(parsed.code, parsed.details),
+        status,
+        headers,
+    );
+    if let Some(request_id) = parsed.request_id {
+        error = error.set_request_id(request_id);
+    }
+    let retryable = parsed.retryable.unwrap_or_else(|| {
+        matches!(
+            status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+        ) || status.is_server_error()
+    });
+    if retryable {
+        error.set_temporary()
+    } else {
+        error.set_permanent()
     }
 }
 
@@ -248,31 +216,8 @@ fn parse_retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     Some(at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
-impl fmt::Display for ErrorStatus {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{} ({}): {}",
-            self.code.canonical_reason().unwrap_or("Unknown"),
-            self.code.as_u16(),
-            self.message,
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ResultFormat {
-    #[serde(rename = "json")]
-    Json,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatementRequestParams {
-    pub format: ResultFormat,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatementRequest {
+#[derive(Debug, Serialize)]
+pub(crate) struct StatementRequest {
     pub statement: String,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,8 +227,7 @@ pub struct StatementRequest {
     pub max_elapsed_seconds: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_estimated_seconds: Option<f64>,
-    #[serde(flatten)]
-    pub params: StatementRequestParams,
+    pub format: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,24 +495,11 @@ mod tests {
     use reqwest::header::HeaderMap;
     use reqwest::header::HeaderValue;
 
-    use super::AppendRowsErrorPayload;
-    use super::AppendState;
-    use super::ErrorStatus;
     use super::StatementStatus;
+    use super::decode_http_error;
     use super::parse_error_payload;
     use super::parse_retry_after;
     use crate::ErrorKind;
-
-    #[test]
-    fn append_error_details_use_wire_defaults() {
-        let payload: AppendRowsErrorPayload =
-            serde_json::from_str(r#"{"code":"invalid_schema","message":"not committed","details":{"status":"rejected"}}"#)
-                .unwrap();
-
-        assert_eq!(payload.details.status, AppendState::Rejected);
-        assert!(payload.details.row_errors.is_empty());
-        assert!(!payload.details.row_errors_truncated);
-    }
 
     #[test]
     fn failed_statement_preserves_structured_error_details() {
@@ -636,12 +567,12 @@ mod tests {
         headers.insert("x-request-id", HeaderValue::from_static("header-request"));
         headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("7"));
 
-        let error = ErrorStatus::from_http_parts(
+        let error = decode_http_error(
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
             &headers,
             br#"{"message":"busy","request_id":"body-request","retryable":false}"#,
-        )
-        .into_error(ErrorKind::Unexpected);
+            ErrorKind::Unexpected,
+        );
 
         assert_eq!(error.message(), "busy");
         assert_eq!(
@@ -652,12 +583,12 @@ mod tests {
         assert_eq!(error.retry_after(), Some(Duration::from_secs(7)));
         assert!(!error.is_retryable());
 
-        let nested = ErrorStatus::from_http_parts(
+        let nested = decode_http_error(
             reqwest::StatusCode::BAD_REQUEST,
             &HeaderMap::new(),
             br#"{"error":{"message":"try later","retryable":true}}"#,
-        )
-        .into_error(ErrorKind::Unexpected);
+            ErrorKind::Unexpected,
+        );
         assert_eq!(nested.message(), "try later");
         assert!(nested.is_retryable());
     }

@@ -52,15 +52,12 @@ pub enum ErrorKind {
 pub enum WriteErrorReason {
     /// A client or transport deadline expired.
     Timeout,
-    /// The caller cancelled an in-flight write.
-    Cancelled,
 }
 
 impl fmt::Display for WriteErrorReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Timeout => "timeout",
-            Self::Cancelled => "cancelled",
         })
     }
 }
@@ -324,7 +321,7 @@ impl Error {
         self.set_source(source)
     }
 
-    /// Returns client timeout or cancellation details after sending began.
+    /// Returns client timeout details after sending began.
     /// Existing error kinds, sources, and HTTP diagnostics remain available.
     pub fn write_details(&self) -> Option<&WriteErrorDetails> {
         self.write_details.as_ref()

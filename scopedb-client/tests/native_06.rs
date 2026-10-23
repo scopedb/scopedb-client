@@ -43,6 +43,32 @@ async fn native_06_lifecycle() -> Result<()> {
         builder = builder.api_key(api_key);
     }
     let client = builder.build()?;
+    if std::env::var("SCOPEDB_API_KEY").is_ok() {
+        let unauthorized = Client::builder(std::env::var("SCOPEDB_ENDPOINT")?)
+            .api_key("deliberately-invalid-sdk-test-key")
+            .build()?;
+        let errors = [
+            unauthorized.query("SELECT 1").await.unwrap_err(),
+            unauthorized.catalog().get().await.unwrap_err(),
+            unauthorized
+                .table("unreachable")
+                .append("{\"id\":1}")
+                .await
+                .unwrap_err(),
+        ];
+        for error in errors {
+            ensure!(error.http_status().is_some_and(|s| s.as_u16() == 401));
+            ensure!(error.request_id().is_some() && !error.is_retryable());
+            ensure!(
+                !error
+                    .to_string()
+                    .contains("deliberately-invalid-sdk-test-key")
+            );
+        }
+        println!(
+            "AUTH rejected invalid credentials on query, Catalog, and Append with request IDs"
+        );
+    }
     let name = format!("sdk06_rust_{}", uuid::Uuid::now_v7().simple());
     let resource = client.catalog().schema("scopedb", &name);
     let definition: scopedb_client::CatalogSchema = serde_json::from_value(
@@ -181,6 +207,7 @@ async fn native_06_lifecycle() -> Result<()> {
             .ok_or_else(|| anyhow!("expected server timeout"))?;
         ensure!(timeout.code().is_some_and(|code| code.contains("timeout")));
         println!("TIMEOUT code={}", timeout.code().unwrap());
+        exercise_data_paths(&client, &name).await?;
         Ok(())
     }
     .await;
@@ -196,5 +223,236 @@ async fn native_06_lifecycle() -> Result<()> {
     result?;
     cleanup?;
     println!("PASS native 0.6 lifecycle");
+    Ok(())
+}
+
+async fn row_count(client: &Client, table: &scopedb_client::Table) -> Result<u64> {
+    let result = client
+        .query(format!(
+            "FROM {} AGGREGATE count() AS n",
+            table.identifier()
+        ))
+        .await?;
+    Ok(
+        result.first()?.ok_or_else(|| anyhow!("missing count"))?["n"]
+            .to_string()
+            .parse()?,
+    )
+}
+
+async fn exercise_data_paths(client: &Client, schema: &str) -> Result<()> {
+    use scopedb_client::AppendFailurePolicy;
+    use scopedb_client::AppendTrySendError;
+    use scopedb_client::Value;
+
+    let table = client.table("events / ` 验证").with_schema(schema);
+    let definition: scopedb_client::CatalogTable = serde_json::from_value(json!({
+        "name": "events / ` 验证", "retention_days": 7, "columns": [
+            {"name":"id", "data_type":"int"},
+            {"name":"message", "data_type":"string", "indexes":[{"type":"search","analyzer":"log"}]},
+            {"name":"attributes", "data_type":"object"},
+            {"name":"tags", "data_type":"array"},
+            {"name":"unsigned", "data_type":"uint"},
+            {"name":"doubled", "data_type":"int", "expression":"id * 2"}
+        ]
+    }))?;
+    table
+        .catalog()
+        .apply(&definition, CatalogOptions::default())
+        .await?;
+    table.append("{\"id\":1,\"message\":\"hello 世界\",\"attributes\":{\"n\":9007199254740993},\"tags\":[1,\"a\"],\"unsigned\":9223372036854775807}\n{\"id\":2}").await?;
+    let rows = client
+        .query(format!("FROM {} ORDER BY id", table.identifier()))
+        .await?
+        .into_objects()?;
+    ensure!(rows[0]["doubled"] == Value::Int(2));
+    ensure!(rows[0]["unsigned"] == Value::UInt(i64::MAX as u64));
+    ensure!(
+        rows[0]["attributes"]
+            .to_string()
+            .contains("9007199254740993")
+    );
+    ensure!(rows[1]["message"] == Value::Null);
+    let oversized_uint = table
+        .append("{\"id\":3,\"unsigned\":18446744073709551615}")
+        .await
+        .unwrap_err();
+    ensure!(
+        oversized_uint
+            .append_details()
+            .is_some_and(|d| d.status == AppendState::Rejected)
+    );
+    let mixed = table
+        .append("{\"id\":3}\n{\"id\":\"bad\"}")
+        .await
+        .unwrap_err();
+    ensure!(mixed.code() == Some("invalid_schema"));
+    ensure!(mixed.append_details().unwrap().row_errors[0].row_index == 1);
+    ensure!(row_count(client, &table).await? == 2);
+
+    let view = client.catalog().view("scopedb", schema, "computed_view");
+    view.apply(
+        &scopedb_client::CatalogView {
+            name: "computed_view".into(),
+            statement: format!("FROM {} SELECT id, doubled", table.identifier()),
+            comment: None,
+        },
+        CatalogOptions::default(),
+    )
+    .await?;
+    ensure!(
+        client
+            .query(format!(
+                "FROM {}",
+                client
+                    .table("computed_view")
+                    .with_schema(schema)
+                    .identifier()
+            ))
+            .await?
+            .num_rows()
+            == 2
+    );
+    let snapshot = table.catalog().get().await?;
+    let mut changed = snapshot.definition;
+    changed.comment = Some("retained computed columns and indexes".into());
+    table
+        .catalog()
+        .apply(
+            &changed,
+            CatalogOptions {
+                if_match: Some(snapshot.etag),
+                ..Default::default()
+            },
+        )
+        .await?;
+    ensure!(table.catalog().get().await?.definition == changed);
+    let dependent = table
+        .catalog()
+        .delete(CatalogOptions {
+            dry_run: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    ensure!(dependent.code() == Some("invalid_request"));
+    ensure!(
+        dependent
+            .http_status()
+            .is_some_and(|status| status.as_u16() == 422)
+    );
+    view.delete(CatalogOptions::default()).await?;
+    let preview = table
+        .catalog()
+        .delete(CatalogOptions {
+            dry_run: true,
+            ..Default::default()
+        })
+        .await?;
+    ensure!(preview.destructive && preview.before.is_some() && preview.after.is_none());
+    let denied = table
+        .catalog()
+        .delete(CatalogOptions::default())
+        .await
+        .unwrap_err();
+    ensure!(denied.code() == Some("catalog_destructive_change"));
+    ensure!(row_count(client, &table).await? == 2);
+    println!(
+        "CATALOG encoded names, views, computed columns, indexes, retention, and destructive guard"
+    );
+
+    let stream = table
+        .append_stream()
+        .failure_policy(AppendFailurePolicy::Continue)
+        .max_batch_rows(1)
+        .max_concurrent_batches(2)
+        .build()?;
+    ensure!(matches!(
+        stream.try_send(&7),
+        Err(AppendTrySendError::InvalidRecord)
+    ));
+    stream
+        .send_all([json!({"id":3}), json!({"id":"bad"}), json!({"id":4})])
+        .await?;
+    let report = stream.shutdown().await?;
+    ensure!(
+        (
+            report.accepted_rows,
+            report.committed_rows,
+            report.failed_rows,
+            report.dropped_rows
+        ) == (3, 2, 1, 1)
+    );
+    ensure!(report.unknown_rows == 0 && report.retries == 0);
+    let stats = stream.stats();
+    ensure!(stats.pending_rows == 0 && stats.pending_bytes == 0 && stats.in_flight_batches == 0);
+    ensure!(stats.last_failure.unwrap().error.code() == Some("invalid_schema"));
+    ensure!(row_count(client, &table).await? == 4);
+    println!(
+        "APPEND atomic rejection, uint input boundary, continue-mode partial report, and local drops"
+    );
+
+    let bulk = client.table("bulk").with_schema(schema);
+    bulk.catalog()
+        .raw()
+        .apply(
+            &json!({"name":"bulk","columns":[
+                {"name":"id","data_type":"int"},{"name":"payload","data_type":"string"}
+            ]}),
+            CatalogOptions::default(),
+        )
+        .await?;
+    let stream = bulk
+        .append_stream()
+        .max_buffered_bytes(8 * 1024 * 1024)
+        .max_concurrent_batches(3)
+        .build()?;
+    let payload = "event data 世界 ".repeat(40);
+    let admitted = stream
+        .send_all((0..25_000).map(|id| json!({"id":id,"payload":payload})))
+        .await?;
+    ensure!(admitted.accepted_rows == 25_000);
+    let first = stream.flush().await?;
+    ensure!(first.committed_rows == 25_000 && first.committed_batches > 1);
+    stream
+        .send(&json!({"id":25_000,"payload":"after flush"}))
+        .await?;
+    let final_report = stream.shutdown().await?;
+    ensure!(final_report.committed_rows == 1);
+    ensure!(stream.stats().committed_rows == 25_001 && stream.stats().pending_bytes == 0);
+    ensure!(row_count(client, &bulk).await? == 25_001);
+    let distinct = client
+        .query(format!(
+            "FROM {} AGGREGATE count_distinct(id) AS n",
+            bulk.identifier()
+        ))
+        .await?;
+    ensure!(distinct.first()?.unwrap()["n"].to_string() == "25001");
+    println!("BULK 25001 unique rows, bounded concurrent batches, separate flush intervals");
+
+    let mut active = client
+        .statement(format!(
+            "FROM {} AS a JOIN {} AS b ON a.id != b.id AGGREGATE sum(a.id + b.id) AS total",
+            bulk.identifier(),
+            bulk.identifier()
+        ))
+        .with_max_elapsed(Duration::from_secs(3))
+        .submit()
+        .await?;
+    let initial_terminal = active.snapshot().unwrap().is_terminated();
+    let cancelled = active.cancel().await?;
+    let settled = active.wait().await;
+    if matches!(cancelled, StatementStatus::Cancelled(_)) {
+        ensure!(settled.unwrap_err().kind() == scopedb_client::ErrorKind::StatementCancelled);
+        println!(
+            "CANCEL active statement reached cancelled state; initially_terminal={initial_terminal}"
+        );
+    } else {
+        println!(
+            "CANCEL raced with terminal execution: {:?}",
+            active.snapshot()
+        );
+        settled?;
+    }
     Ok(())
 }
