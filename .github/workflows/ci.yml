@@ -43,9 +43,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: typos-cli,taplo-cli,hawkeye,actionlint
+          tool: typos-cli,taplo-cli,hawkeye
       - name: Check GitHub Actions workflows
-        run: actionlint
+        run: |
+          curl --fail --silent --show-error --location \
+            https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash \
+            --output "$RUNNER_TEMP/download-actionlint.bash"
+          bash "$RUNNER_TEMP/download-actionlint.bash" 1.7.12 "$RUNNER_TEMP"
+          "$RUNNER_TEMP/actionlint"
       - name: Lint Rust SDK
         run: cargo x lint
       - name: Check feature matrix
