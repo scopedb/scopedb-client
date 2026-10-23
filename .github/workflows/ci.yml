@@ -45,7 +45,7 @@ jobs:
           tool: typos-cli,taplo-cli,hawkeye
       - name: Lint Rust SDK
         run: cargo x lint
-      - name: Check feature matrix
+      - name: Check Rust SDK
         run: cargo x check
 
   audit:

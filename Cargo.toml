@@ -25,7 +25,6 @@ rust-version = "1.91.0"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.104" }
-cargo_metadata = { version = "0.23.1" }
 clap = { version = "4.6.6" }
 fastrace = { version = "0.7.19" }
 fastrace-reqwest = { version = "0.3.0" }

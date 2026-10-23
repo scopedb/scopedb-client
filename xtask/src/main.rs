@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
 use std::process::Command as StdCommand;
 use std::time::Duration;
 
@@ -45,7 +44,7 @@ impl Command {
 enum SubCommand {
     #[clap(about = "Compile workspace packages.")]
     Build(CommandBuild),
-    #[clap(about = "Check scopedb-client under the feature matrix.")]
+    #[clap(about = "Check scopedb-client.")]
     Check(CommandCheck),
     #[clap(about = "Run workspace quality checks.")]
     Lint(CommandLint),
@@ -72,15 +71,7 @@ struct CommandCheck;
 
 impl CommandCheck {
     fn run(self) {
-        let features = scopedb_client_features();
-
-        run_command(make_check_cmd(&[]));
-        for feature in features.chunks(1) {
-            run_command(make_check_cmd(feature));
-        }
-        if features.len() > 1 {
-            run_command(make_check_cmd(&features));
-        }
+        run_command(make_check_cmd());
     }
 }
 
@@ -92,31 +83,8 @@ struct CommandTest {
 
 impl CommandTest {
     fn run(self) {
-        run_command(make_test_cmd(self.no_capture, &scopedb_client_features()));
+        run_command(make_test_cmd(self.no_capture));
     }
-}
-
-fn scopedb_client_features() -> Vec<String> {
-    use cargo_metadata::Metadata;
-    use cargo_metadata::MetadataCommand;
-
-    let manifest = Path::new(env!("CARGO_WORKSPACE_DIR")).join("Cargo.toml");
-    let Metadata { packages, .. } = MetadataCommand::new()
-        .manifest_path(manifest)
-        .exec()
-        .expect("failed to get cargo metadata");
-    let package = packages
-        .into_iter()
-        .find(|package| package.name == PACKAGE_NAME)
-        .expect("failed to find scopedb-client package");
-
-    let mut features = package
-        .features
-        .into_keys()
-        .filter(|feature| feature != "default")
-        .collect::<Vec<_>>();
-    features.sort();
-    features
 }
 
 #[derive(Parser)]
@@ -287,19 +255,16 @@ fn make_build_cmd(locked: bool) -> StdCommand {
     cmd
 }
 
-fn make_test_cmd(no_capture: bool, features: &[String]) -> StdCommand {
+fn make_test_cmd(no_capture: bool) -> StdCommand {
     let mut cmd = find_command("cargo");
-    cmd.args(["test", "--workspace", "--no-default-features"]);
-    for feature in features {
-        cmd.args(["--features", feature]);
-    }
+    cmd.args(["test", "--workspace"]);
     if no_capture {
         cmd.args(["--", "--nocapture"]);
     }
     cmd
 }
 
-fn make_check_cmd(features: &[String]) -> StdCommand {
+fn make_check_cmd() -> StdCommand {
     let mut cmd = find_command("cargo");
     cmd.env("RUSTFLAGS", "-Dwarnings");
     cmd.args([
@@ -308,11 +273,7 @@ fn make_check_cmd(features: &[String]) -> StdCommand {
         "--package",
         PACKAGE_NAME,
         "--all-targets",
-        "--no-default-features",
     ]);
-    for feature in features {
-        cmd.args(["--features", feature]);
-    }
     cmd
 }
 
