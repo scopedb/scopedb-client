@@ -95,7 +95,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Bounds each table append HTTP request, including
+    /// Bounds each table append and Catalog mutation HTTP request, including
     /// reading the response body. Defaults to 30 seconds and must be nonzero.
     /// The budget starts after local encoding, compression, and request preparation.
     /// Stream `attempt_timeout` settings override this default. A timeout does
@@ -295,23 +295,25 @@ impl Client {
         let mut headers = reqwest::header::HeaderMap::new();
         tokio::time::timeout(timeout.unwrap_or(self.write_timeout), async {
             let response = request.send().await.map_err(|err| {
-                let message = if err.is_timeout() {
-                    "table append request timed out; commit outcome is unknown"
+                let error = if err.is_timeout() {
+                    append_unknown_error("table append request timed out; commit outcome is unknown")
+                        .set_write_timeout()
                 } else {
-                    "failed to send table append request"
+                    append_unknown_error("failed to send table append request")
                 };
-                append_unknown_error(message).set_write_source(err)
+                error.set_source(err)
             })?;
             let response_status = response.status();
             status = Some(response_status);
             headers = response.headers().clone();
             let payload = response.bytes().await.map_err(|err| {
-                let message = if err.is_timeout() {
-                    "table append request timed out; commit outcome is unknown"
+                let error = if err.is_timeout() {
+                    append_unknown_error("table append request timed out; commit outcome is unknown")
+                        .set_write_timeout()
                 } else {
-                    "failed to read table append response"
+                    append_unknown_error("failed to read table append response")
                 };
-                append_unknown_error(message).set_write_source(err)
+                error.set_source(err)
             })?;
             let result = decode_append_response(response_status, &headers, &payload)?;
             if result.num_rows_inserted != expected_rows as i64 {
@@ -326,7 +328,8 @@ impl Client {
         .unwrap_or_else(|err| {
             Err(
                 append_unknown_error("table append request timed out; commit outcome is unknown")
-                    .set_write_source(err),
+                    .set_write_timeout()
+                    .set_source(err),
             )
         })
         .map_err(|err| match status {

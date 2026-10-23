@@ -160,7 +160,7 @@ println!("Written: {} rows", report.committed_rows);
 # }
 ```
 
-A report covers activity since the previous barrier. With the default Stop policy, a failed `flush()` or `shutdown()` returns the complete error, and `stats().last_report` retains partial settlement counts. Earlier batches may have committed; never replay the entire input blindly. `stats().last_failure.error` preserves the code, details, timeout reason, HTTP metadata, and source in Continue mode as well.
+A report covers activity since the previous barrier. With the default Stop policy, a failed `flush()` or `shutdown()` returns the complete error, and `stats().last_report` retains partial settlement counts. Earlier batches may have committed. Reports and failure events expose aggregate counts without identifying individual input records; use application-owned business keys to reconcile stored rows before selecting records to replay. `stats().last_failure.error` preserves the code, details, timeout reason, HTTP metadata, and source in Continue mode as well.
 
 Dropping an enqueued flush or started shutdown future stops waiting, but settlement continues. Call `shutdown()` again to observe the final result. Dropping all producer handles drains accepted rows while the Tokio runtime remains alive; runtime termination cannot guarantee delivery.
 

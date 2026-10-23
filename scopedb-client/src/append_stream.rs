@@ -18,8 +18,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -105,6 +103,8 @@ pub struct AppendAdmissionResult {
 }
 
 /// Aggregate settlement information since the previous delivery barrier.
+/// Counts do not identify individual input records. Use application-owned
+/// business keys to reconcile rows before replaying them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendDeliveryReport {
     pub outcome: AppendDeliveryOutcome,
@@ -549,7 +549,6 @@ struct BufferedRecord {
 struct PendingBytesBudget {
     capacity: usize,
     semaphore: Arc<Semaphore>,
-    closed: AtomicBool,
 }
 
 impl PendingBytesBudget {
@@ -557,7 +556,6 @@ impl PendingBytesBudget {
         Self {
             capacity,
             semaphore: Arc::new(Semaphore::new(capacity)),
-            closed: AtomicBool::new(false),
         }
     }
 
@@ -565,28 +563,16 @@ impl PendingBytesBudget {
         if bytes > self.capacity {
             return Err(PendingAcquireError::ExceedsCapacity);
         }
-        if self.closed.load(Ordering::Acquire) {
-            return Err(PendingAcquireError::Closed);
-        }
-        let permit = self
-            .semaphore
+        self.semaphore
             .clone()
             .acquire_many_owned(bytes as u32)
             .await
-            .map_err(|_| PendingAcquireError::Closed)?;
-        if self.closed.load(Ordering::Acquire) {
-            drop(permit);
-            return Err(PendingAcquireError::Closed);
-        }
-        Ok(permit)
+            .map_err(|_| PendingAcquireError::Closed)
     }
 
     fn try_acquire(&self, bytes: usize) -> Result<OwnedSemaphorePermit, PendingAcquireError> {
         if bytes > self.capacity {
             return Err(PendingAcquireError::ExceedsCapacity);
-        }
-        if self.closed.load(Ordering::Acquire) {
-            return Err(PendingAcquireError::Closed);
         }
         self.semaphore
             .clone()
@@ -598,7 +584,6 @@ impl PendingBytesBudget {
     }
 
     fn close(&self) {
-        self.closed.store(true, Ordering::Release);
         self.semaphore.close();
     }
 }
@@ -1931,7 +1916,9 @@ mod tests {
     use std::io::Write;
     use std::net::TcpListener;
     use std::net::TcpStream;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::thread;
 
     use super::*;
@@ -2478,6 +2465,12 @@ mod tests {
         }
         assert_eq!(stream.stats().accepted_rows, 1);
         assert_eq!(stream.stats().pending_bytes, bytes);
+        let mut blocked = Box::pin(stream.send(&row));
+        std::future::poll_fn(|cx| {
+            assert!(blocked.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         {
             let mut shutdown = Box::pin(stream.shutdown());
             std::future::poll_fn(|cx| {
@@ -2490,6 +2483,7 @@ mod tests {
         assert!(stream.send(&row).await.is_err());
         release_tx.send(()).unwrap();
         let report = stream.shutdown().await.unwrap();
+        assert!(blocked.await.is_err());
         assert_eq!(report.accepted_rows, 1);
         assert_eq!(report.committed_rows, 1);
         assert_eq!(stream.stats().pending_rows, 0);
