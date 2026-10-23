@@ -54,6 +54,7 @@ test "$manifest_version" = "$scopedb_rust_version"
 cargo x lint
 cargo x check
 cargo x test --no-capture
+cargo audit
 cargo x semver --release-version "$scopedb_rust_version"
 cargo +1.91.0 publish --package scopedb-client --dry-run --locked
 cargo +1.91.0 package --package scopedb-client --list --locked
