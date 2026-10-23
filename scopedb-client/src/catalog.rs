@@ -24,8 +24,8 @@ use crate::Client;
 use crate::DataType;
 use crate::Error;
 use crate::ErrorKind;
-use crate::protocol::ErrorStatus;
 use crate::protocol::apply_response_metadata;
+use crate::protocol::decode_http_error;
 
 /// Complete tenant catalog. Apply replaces the entire selected subtree.
 /// Typed definitions reject unknown fields; use [`Catalog::raw`] for newer definitions.
@@ -316,8 +316,7 @@ impl<T> CatalogResource<T> {
             read_response.await?
         };
         if !status.is_success() {
-            let error = ErrorStatus::from_http_parts(status, &headers, &bytes)
-                .into_error(ErrorKind::CatalogFailed);
+            let error = decode_http_error(status, &headers, &bytes, ErrorKind::CatalogFailed);
             return Err(if writing {
                 if error.code().is_none() {
                     error

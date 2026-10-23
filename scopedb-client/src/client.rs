@@ -32,15 +32,12 @@ use crate::ResultSet;
 use crate::Statement;
 use crate::Table;
 use crate::protocol::AppendErrorDetails;
-use crate::protocol::AppendRowsErrorPayload;
 use crate::protocol::AppendRowsResult;
 use crate::protocol::AppendState;
-use crate::protocol::Response;
-use crate::protocol::ResultFormat;
 use crate::protocol::StatementRequest;
-use crate::protocol::StatementRequestParams;
 use crate::protocol::StatementStatus;
 use crate::protocol::apply_response_metadata;
+use crate::protocol::decode_statement_response;
 use crate::statement::StatementHandle;
 
 const JSON_CONTENT_ENCODING: &str = "zstd";
@@ -216,7 +213,7 @@ impl Client {
     }
 
     pub fn statement_handle(&self, statement_id: Uuid) -> StatementHandle {
-        StatementHandle::new(self.clone(), statement_id, ResultFormat::Json)
+        StatementHandle::new(self.clone(), statement_id)
     }
 
     pub fn table(&self, table: impl Into<String>) -> Table {
@@ -344,7 +341,7 @@ impl Client {
     pub(crate) async fn submit_statement(
         &self,
         request: StatementRequest,
-    ) -> Result<Response<StatementStatus>, Error> {
+    ) -> Result<StatementStatus, Error> {
         let url = self.make_url("v1/statements")?;
         let response = self
             .post_json(url, &request)?
@@ -354,21 +351,20 @@ impl Client {
             .map_err(|err| {
                 Error::new(ErrorKind::Unexpected, "failed to submit statement").set_source(err)
             })?;
-        Response::from_http_response(response).await
+        decode_statement_response(response).await
     }
 
     #[fastrace::trace]
     pub(crate) async fn fetch_statement(
         &self,
         statement_id: Uuid,
-        params: StatementRequestParams,
-    ) -> Result<Response<StatementStatus>, Error> {
+    ) -> Result<StatementStatus, Error> {
         let path = format!("v1/statements/{statement_id}");
         let url = self.make_url(&path)?;
         let response = self
             .request(Method::GET, url)
             .headers(traceparent_headers())
-            .query(&params)
+            .query(&[("format", "json")])
             .send()
             .await
             .map_err(|err| {
@@ -379,22 +375,20 @@ impl Client {
                 .set_source(err)
                 .set_temporary()
             })?;
-        Response::from_http_response(response).await
+        decode_statement_response(response).await
     }
 
     #[fastrace::trace]
     pub(crate) async fn cancel_statement(
         &self,
         statement_id: Uuid,
-    ) -> Result<Response<StatementStatus>, Error> {
+    ) -> Result<StatementStatus, Error> {
         let path = format!("v1/statements/{statement_id}/cancel");
         let url = self.make_url(&path)?;
         let response = self
             .request(Method::POST, url)
             .headers(traceparent_headers())
-            .query(&StatementRequestParams {
-                format: ResultFormat::Json,
-            })
+            .query(&[("format", "json")])
             .send()
             .await
             .map_err(|err| {
@@ -405,7 +399,7 @@ impl Client {
                 .set_source(err)
                 .set_temporary()
             })?;
-        Response::from_http_response(response).await
+        decode_statement_response(response).await
     }
 
     #[track_caller]
@@ -518,17 +512,15 @@ fn decode_append_response(
         ));
     }
 
-    let http_error = crate::protocol::ErrorStatus::from_http_parts(status, headers, payload);
-    if let Ok(payload) = serde_json::from_slice::<AppendRowsErrorPayload>(payload)
-        && matches!(
-            payload.details.status,
-            AppendState::Rejected | AppendState::Unknown
-        )
+    let error =
+        crate::protocol::decode_http_error(status, headers, payload, ErrorKind::AppendRowsFailed);
+    if let Some(details) = error
+        .details()
+        .and_then(|value| serde_json::from_value::<AppendErrorDetails>(value.clone()).ok())
+        && matches!(details.status, AppendState::Rejected | AppendState::Unknown)
     {
-        let status = payload.details.status;
-        let error = http_error
-            .into_error(ErrorKind::AppendRowsFailed)
-            .set_append_details(payload.details);
+        let status = details.status;
+        let error = error.set_append_details(details);
 
         return Err(if status == AppendState::Unknown {
             error.set_persistent()
@@ -537,21 +529,13 @@ fn decode_append_response(
         });
     }
 
-    let metadata_error = http_error.into_error(ErrorKind::AppendRowsFailed);
-    let mut error = append_unknown_error(metadata_error.message().to_string())
-        .set_http_status(status)
-        .set_server_retryable(metadata_error.server_retryable())
-        .set_api_error(
-            metadata_error.code().map(str::to_string),
-            metadata_error.details().cloned(),
-        );
-    if let Some(request_id) = metadata_error.request_id() {
-        error = error.set_request_id(request_id.to_string());
-    }
-    if let Some(retry_after) = metadata_error.retry_after() {
-        error = error.set_retry_after(retry_after);
-    }
-    Err(error)
+    Err(error
+        .set_append_details(AppendErrorDetails {
+            status: AppendState::Unknown,
+            row_errors: Vec::new(),
+            row_errors_truncated: false,
+        })
+        .set_persistent())
 }
 
 fn append_unknown_error(message: impl Into<String>) -> Error {
@@ -745,5 +729,21 @@ mod tests {
         assert_eq!(error.message(), "unsupported path");
         assert!(error.is_persistent());
         assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
+    }
+
+    #[test]
+    fn nested_append_rejection_keeps_its_outcome_and_diagnostics() {
+        let error = decode(
+            StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"request_id":"proxy-request","error":{"message":"try later","code":"ingest_failure","retryable":false,"details":{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"invalid int"}]}}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), Some("ingest_failure"));
+        assert_eq!(error.request_id(), Some("proxy-request"));
+        assert_eq!(error.http_status(), Some(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!error.is_retryable());
+        let details = error.append_details().unwrap();
+        assert_eq!(details.status, AppendState::Rejected);
+        assert_eq!(details.row_errors[0].row_index, 1);
     }
 }

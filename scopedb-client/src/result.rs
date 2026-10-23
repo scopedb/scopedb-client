@@ -350,7 +350,9 @@ fn parse_owned_cell(value: Option<String>, data_type: DataType) -> Result<Value,
     }
 }
 
-#[derive(Clone)]
+/// A typed result cell. Equality compares encoded array, object, any, and binary
+/// values as strings; floats use Rust's usual equality, including NaN != NaN.
+#[derive(Clone, PartialEq)]
 pub enum Value {
     /// Signed integer value.
     Int(i64),

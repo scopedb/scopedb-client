@@ -6,7 +6,7 @@ The official async Rust client for [ScopeDB](https://www.scopedb.io). Run ScopeQ
 
 ## Runtime support
 
-Requires Rust 1.91.0 or later and a Tokio runtime. Use the SDK in a trusted server-side process and keep API keys out of source control.
+Requires ScopeDB 0.6.0 or later, Rust 1.91.0 or later, and a Tokio runtime. Use the SDK in a trusted server-side process and keep API keys out of source control. Applications upgrading from SDK 0.3 should follow the [migration guide](scopedb-client/README.md#migrate-to-scopedb-06).
 
 ## Installation
 

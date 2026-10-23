@@ -54,6 +54,8 @@ A rejected request can include row-level errors:
 
 Direct `Table::append` makes one attempt. `Table::append_stream` batches values and retries temporary rejections. Replaying transient unknown outcomes requires `.retry_unknown(true)` and can duplicate rows. Client timeouts are never automatically replayed. Use `flush` or `shutdown` to observe completion and delivery reports. See the [writing guide](../README.md#writing-rows) for batching, concurrency, and failure policies.
 
+ScopeDB 0.6's NDJSON input decoder is limited to signed 64-bit integers, even for `uint` columns. This input restriction does not apply to query results, whose `uint` cells support the full unsigned 64-bit range.
+
 ## Statements
 
 ```text

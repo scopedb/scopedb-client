@@ -13,7 +13,7 @@ Compare each entry with the latest released version. Explain the impact and migr
 1. Set the SDK version without a leading `v`, then confirm that exact version is not already present on crates.io:
 
    ```sh
-   export scopedb_rust_version=0.3.3
+   export scopedb_rust_version=0.4.0
    if cargo info --registry crates-io "scopedb-client@$scopedb_rust_version" >/dev/null 2>&1; then
      echo "scopedb-client $scopedb_rust_version already exists" >&2
      exit 1
@@ -37,7 +37,7 @@ Compare each entry with the latest released version. Explain the impact and migr
    test "$(git branch --show-current)" = main
    test -z "$(git status --porcelain)"
    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-   export scopedb_rust_version=0.3.3
+   export scopedb_rust_version=0.4.0
    if cargo info --registry crates-io "scopedb-client@$scopedb_rust_version" >/dev/null 2>&1; then
      echo "scopedb-client $scopedb_rust_version already exists" >&2
      exit 1

@@ -2,7 +2,7 @@
 
 `scopedb-client` is an async Rust client for ScopeDB. It supports statements, declarative catalog reads and conditional updates, direct NDJSON table appends, and bounded concurrent streaming writes.
 
-This development version requires ScopeDB 0.6.0 or later and uses its native Statement, declarative Catalog, and table ingest APIs. These changes are not yet published.
+SDK 0.4 requires ScopeDB 0.6.0 or later and uses its native Statement, declarative Catalog, and table ingest APIs. See the [migration guide](#migrate-to-scopedb-06) when upgrading from SDK 0.3.
 
 ## Installation
 
@@ -84,6 +84,8 @@ println!("{rows:?}");
 ```
 
 `raw_rows()` exposes the string-or-null wire cells without parsing. `to_values()` borrows the result while `into_values()` consumes it and moves owned string cells. `to_objects()` and `into_objects()` key values by output column name; they return an error when names are duplicated, so use the value form for intentionally duplicated columns. `first()` converts only the first row for point lookups and aggregates.
+
+Typed values support `PartialEq`, so applications can compare cells and result rows directly. Array, object, any, and binary values retain their encoded strings and compare those strings; floating-point values follow Rust's usual equality rules.
 
 For lifecycle control, call `client.statement(scopeql).submit()` and retain the returned handle. `snapshot()` reads the latest cached status without a network request, `refresh().await` fetches one current status, `wait()` polls to a terminal result, and `cancel()` requests cancellation. The statement ID and initial snapshot are available immediately after submission. `cancel()` returns the observed status: a pending or running response still needs `wait()`; completion retains results and failure retains the original error. Cancellation is a distinct `ErrorKind::StatementCancelled` when waiting. Terminal snapshots are cached. Dropping a query, refresh, or wait future stops local waiting and does not cancel server execution; keep a handle and call `cancel()` explicitly.
 
@@ -186,6 +188,8 @@ println!("Write results: {report:?}");
 
 Use `append()` when your data is already newline-delimited JSON: one JSON object per line.
 
+ScopeDB 0.6's NDJSON decoder accepts integer inputs only within the signed 64-bit range, including inputs for `uint` columns and nested JSON values. Larger integers are rejected by the server; the SDK does not silently narrow them. Query results still support the full `u64` range.
+
 ```rust
 # async fn demo() -> Result<(), scopedb_client::Error> {
 # let client = scopedb_client::Client::new("http://127.0.0.1:6543", scopedb_client::reqwest::Client::new())?;
@@ -261,6 +265,7 @@ println!("columns = {}", description.columns.len());
 - Replace the removed `json_rows()` alias with `raw_rows()`, which directly returns the slice. Replace stream builder aliases `batch_bytes`, `max_pending_bytes`, and `max_in_flight_requests` with `target_batch_bytes`, `max_buffered_bytes`, and `max_concurrent_batches`.
 - Read `stats().last_failure.error` instead of separate message/status fields. Its complete `Error` retains diagnostics across barriers. `AppendStreamStats` no longer implements equality because errors carry sources.
 - `Table::identifier()` always includes the database and schema defaults, so SQL queries and `drop()` select the same table as Append and Catalog, including when only the database is configured. The legacy `u_int` type spelling is removed; use `uint`.
+- Remove matches on `WriteErrorReason::Cancelled`; the SDK never returned it. Dropping an append future stops local waiting without returning an error or cancelling the server write. For an append stream, call `shutdown()` to observe settlement of admitted rows; a dropped shutdown waiter can be resumed by calling it again.
 
 Upgrading the server from 0.5 clears statement history and saved results. Previously saved statement handles cannot be resumed. The removed transform Ingest API requires the migration below.
 
