@@ -76,15 +76,19 @@ pub struct AppendErrorDetails {
 
 pub(crate) async fn decode_statement_response(
     r: reqwest::Response,
+    retryable_transport: bool,
 ) -> Result<StatementStatus, Error> {
     let code = r.status();
     let headers = r.headers().clone();
     let payload = r.bytes().await.map_err(|err| {
-        apply_response_metadata(
-            Error::new(ErrorKind::Unexpected, "failed to read response body").set_source(err),
-            code,
-            &headers,
-        )
+        let error =
+            Error::new(ErrorKind::Unexpected, "failed to read response body").set_source(err);
+        let error = if retryable_transport {
+            error.set_temporary()
+        } else {
+            error
+        };
+        apply_response_metadata(error, code, &headers)
     })?;
     if code.is_success() {
         let result = serde_json::from_slice(&payload).map_err(|err| {
