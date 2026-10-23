@@ -24,6 +24,8 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### Bug Fixes
 
+* Return `RecordTooLarge` instead of `BufferFull` when a `try_send` row exceeds the configured buffer capacity, so callers do not retry a permanently inadmissible row.
+* Mark transport interruptions for Catalog reads and dry-runs and statement refresh or cancellation as retryable while preserving ambiguous mutation outcomes.
 * Settle every admitted row before publishing stream shutdown completion, including after the waiting future is dropped. Keep partial delivery reports on Stop-mode failures and preserve original diagnostics through subsequent stream errors.
 * Preserve a batch's unknown outcome when later retries are rejected or exhausted, and honor explicit server retry refusal. Retain rejection details from nested error envelopes instead of misclassifying them as unknown.
 * Fully qualify table identifiers so database-only selectors target the same table through SQL, Catalog, and Append.

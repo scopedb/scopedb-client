@@ -40,7 +40,20 @@ fn server_with_etag(
 fn serve(
     responses: Vec<(u16, String)>,
     etag: Option<&str>,
+    before_response: impl FnMut(usize) + Send + 'static,
+) -> (Client, thread::JoinHandle<Vec<String>>) {
+    serve_responses(responses, etag, before_response, false)
+}
+
+fn truncated_server(responses: Vec<(u16, String)>) -> (Client, thread::JoinHandle<Vec<String>>) {
+    serve_responses(responses, Some("\"opaque\""), |_| {}, true)
+}
+
+fn serve_responses(
+    responses: Vec<(u16, String)>,
+    etag: Option<&str>,
     mut before_response: impl FnMut(usize) + Send + 'static,
+    truncate_body: bool,
 ) -> (Client, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/proxy/", listener.local_addr().unwrap());
@@ -79,10 +92,14 @@ fn serve(
             }
             requests.push(headers + &String::from_utf8(request_body).unwrap());
             before_response(index);
+            let content_length = if truncate_body {
+                body.len() + 1
+            } else {
+                body.len()
+            };
             let _ = write!(
                 socket,
-                "HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\n{etag}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
+                "HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\n{etag}Content-Length: {content_length}\r\nConnection: close\r\n\r\n{body}"
             );
         }
         requests
@@ -444,4 +461,55 @@ async fn catalog_write_budget_preserves_a_shorter_custom_http_timeout() {
     assert!(!error.is_retryable());
     release_tx.send(()).unwrap();
     assert_eq!(task.join().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn response_body_interruptions_follow_operation_retry_safety() {
+    let running = json!({
+        "status":"running",
+        "statement_id":uuid::Uuid::nil(),
+        "created_at":"2026-10-23T00:00:00Z",
+        "progress":StatementEstimatedProgress::default()
+    });
+    let (client, task) = truncated_server(vec![
+        (200, json!({"name":"events"}).to_string()),
+        (
+            200,
+            json!({"before":null,"after":null,"destructive":false}).to_string(),
+        ),
+        (
+            200,
+            json!({"before":null,"after":null,"destructive":false}).to_string(),
+        ),
+        (200, running.to_string()),
+        (200, running.to_string()),
+        (200, running.to_string()),
+    ]);
+    let resource = client.table("events").catalog();
+
+    let catalog_get = resource.get().await.unwrap_err();
+    let catalog_dry_run = resource
+        .delete(CatalogOptions {
+            dry_run: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    let catalog_write = resource
+        .delete(CatalogOptions::default())
+        .await
+        .unwrap_err();
+    let mut handle = client.statement_handle(uuid::Uuid::nil());
+    let refresh = handle.refresh().await.unwrap_err();
+    let cancel = handle.cancel().await.unwrap_err();
+    let submit = client.statement("SELECT 1").submit().await.unwrap_err();
+
+    for error in [catalog_get, catalog_dry_run, refresh, cancel] {
+        assert!(error.is_retryable());
+        assert_eq!(error.http_status().map(|status| status.as_u16()), Some(200));
+    }
+    assert!(!catalog_write.is_retryable());
+    assert_eq!(catalog_write.code(), Some("catalog_commit_outcome_unknown"));
+    assert!(!submit.is_retryable());
+    assert_eq!(task.join().unwrap().len(), 6);
 }

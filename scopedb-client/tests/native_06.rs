@@ -443,17 +443,31 @@ async fn exercise_data_paths(client: &Client, schema: &str) -> Result<()> {
     let initial_terminal = active.snapshot().unwrap().is_terminated();
     let cancelled = active.cancel().await?;
     let settled = active.wait().await;
-    if matches!(cancelled, StatementStatus::Cancelled(_)) {
-        ensure!(settled.unwrap_err().kind() == scopedb_client::ErrorKind::StatementCancelled);
-        println!(
-            "CANCEL active statement reached cancelled state; initially_terminal={initial_terminal}"
-        );
-    } else {
-        println!(
-            "CANCEL raced with terminal execution: {:?}",
-            active.snapshot()
-        );
-        settled?;
+    match (active.snapshot().unwrap(), settled) {
+        (StatementStatus::Finished(_), Ok(_)) => {}
+        (StatementStatus::Failed(_), Err(error)) => {
+            ensure!(error.kind() == scopedb_client::ErrorKind::StatementFailed);
+        }
+        (StatementStatus::Cancelled(_), Err(error)) => {
+            ensure!(error.kind() == scopedb_client::ErrorKind::StatementCancelled);
+        }
+        (StatementStatus::Pending(_) | StatementStatus::Running(_), _) => {
+            return Err(anyhow!(
+                "wait returned with a nonterminal statement snapshot"
+            ));
+        }
+        (_, Ok(_)) => {
+            return Err(anyhow!("wait returned rows for a non-finished statement"));
+        }
+        (_, Err(error)) => {
+            return Err(anyhow!(
+                "wait error did not match the terminal snapshot: {error}"
+            ));
+        }
     }
+    println!(
+        "CANCEL response={cancelled:?}, terminal={:?}, initially_terminal={initial_terminal}",
+        active.snapshot()
+    );
     Ok(())
 }

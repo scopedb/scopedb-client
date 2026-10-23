@@ -351,7 +351,7 @@ impl Client {
             .map_err(|err| {
                 Error::new(ErrorKind::Unexpected, "failed to submit statement").set_source(err)
             })?;
-        decode_statement_response(response).await
+        decode_statement_response(response, false).await
     }
 
     #[fastrace::trace]
@@ -375,7 +375,7 @@ impl Client {
                 .set_source(err)
                 .set_temporary()
             })?;
-        decode_statement_response(response).await
+        decode_statement_response(response, true).await
     }
 
     #[fastrace::trace]
@@ -399,7 +399,7 @@ impl Client {
                 .set_source(err)
                 .set_temporary()
             })?;
-        decode_statement_response(response).await
+        decode_statement_response(response, true).await
     }
 
     #[track_caller]

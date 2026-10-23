@@ -807,9 +807,16 @@ impl AppendStream {
                 note_drop(&mut lock(&self.inner.shared), DropReason::Closed);
                 return Err(AppendTrySendError::Closed);
             }
-            Err(PendingAcquireError::Full | PendingAcquireError::ExceedsCapacity) => {
+            Err(PendingAcquireError::Full) => {
                 note_drop(&mut lock(&self.inner.shared), DropReason::BufferFull);
                 return Err(AppendTrySendError::BufferFull);
+            }
+            Err(PendingAcquireError::ExceedsCapacity) => {
+                note_drop(&mut lock(&self.inner.shared), DropReason::RecordTooLarge);
+                return Err(AppendTrySendError::RecordTooLarge {
+                    bytes: reserved_bytes,
+                    limit: self.inner.pending_bytes.capacity,
+                });
             }
         };
         let permit = match self.inner.tx.try_reserve() {
@@ -3441,7 +3448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_send_accounts_for_local_drops() {
+    async fn try_send_rejects_rows_exceeding_buffer_capacity() {
         let client = Client::new("http://127.0.0.1:1", reqwest::Client::new()).unwrap();
         let stream = client
             .table("events")
@@ -3453,12 +3460,13 @@ mod tests {
 
         assert!(matches!(
             stream.try_send(&serde_json::json!({"id": 1})),
-            Err(AppendTrySendError::BufferFull)
+            Err(AppendTrySendError::RecordTooLarge { bytes: 9, limit: 1 })
         ));
         let report = stream.shutdown().await.unwrap();
         assert_eq!(report.outcome, AppendDeliveryOutcome::Failed);
         assert_eq!(report.accepted_rows, 0);
         assert_eq!(report.dropped_rows, 1);
-        assert_eq!(stream.stats().dropped_by_reason.buffer_full, 1);
+        assert_eq!(stream.stats().dropped_by_reason.buffer_full, 0);
+        assert_eq!(stream.stats().dropped_by_reason.record_too_large, 1);
     }
 }

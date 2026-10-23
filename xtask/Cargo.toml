@@ -23,7 +23,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

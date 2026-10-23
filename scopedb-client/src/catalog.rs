@@ -335,7 +335,7 @@ impl<T> CatalogResource<T> {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 apply_response_metadata(
-                    catalog_transport_error(writing, "catalog response is missing ETag"),
+                    catalog_response_error(writing, "catalog response is missing ETag"),
                     status,
                     &headers,
                 )
@@ -343,7 +343,7 @@ impl<T> CatalogResource<T> {
             .to_string();
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             apply_response_metadata(
-                catalog_transport_error(writing, "invalid catalog response").set_source(e),
+                catalog_response_error(writing, "invalid catalog response").set_source(e),
                 status,
                 &headers,
             )
@@ -358,14 +358,14 @@ impl<T> CatalogResource<T> {
                         .is_some_and(serde_json::Value::is_boolean)))
         {
             return Err(apply_response_metadata(
-                catalog_transport_error(writing, "invalid catalog response"),
+                catalog_response_error(writing, "invalid catalog response"),
                 status,
                 &headers,
             ));
         }
         let result = serde_json::from_value(value).map_err(|e| {
             apply_response_metadata(
-                catalog_transport_error(
+                catalog_response_error(
                     writing,
                     "cannot decode catalog definition; use raw() to retain unsupported fields",
                 )
@@ -419,6 +419,15 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
 }
 
 fn catalog_transport_error(writing: bool, message: &str) -> Error {
+    let error = catalog_response_error(writing, message);
+    if writing {
+        error
+    } else {
+        error.set_temporary()
+    }
+}
+
+fn catalog_response_error(writing: bool, message: &str) -> Error {
     let error = Error::new(ErrorKind::CatalogFailed, message);
     if writing {
         error

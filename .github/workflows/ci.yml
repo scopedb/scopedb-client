@@ -46,8 +46,20 @@ jobs:
           tool: typos-cli,taplo-cli,hawkeye
       - name: Lint Rust SDK
         run: cargo x lint
-      - name: Check feature matrix
+      - name: Check Rust SDK
         run: cargo x check
+
+  audit:
+    name: Audit dependencies
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Check RustSec advisories
+        run: cargo audit
 
   test:
     name: Build and test
@@ -68,14 +80,21 @@ jobs:
     runs-on: ubuntu-24.04
     if: ${{ always() }}
     needs:
+      - audit
       - check
       - test
     steps:
       - name: Guardian
         run: |
+          audit_result="${{ needs.audit.result }}"
           check_result="${{ needs.check.result }}"
           test_result="${{ needs.test.result }}"
           event_name="${{ github.event_name }}"
+
+          if [[ "$audit_result" != "success" ]]; then
+            echo "The audit job did not complete successfully: $audit_result"
+            exit 1
+          fi
 
           if [[ "$test_result" != "success" ]]; then
             echo "The test job did not complete successfully: $test_result"
