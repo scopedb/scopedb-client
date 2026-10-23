@@ -327,15 +327,15 @@ impl Error {
         self
     }
 
-    pub(crate) fn set_write_source(mut self, src: impl Into<anyhow::Error>) -> Self {
-        let source = src.into();
-        if self.write_details.is_none() {
-            self.write_details = write_error_details_from_source(source.as_ref());
-        }
-        self.set_source(source)
+    pub(crate) fn set_write_timeout(mut self) -> Self {
+        self.write_details = Some(WriteErrorDetails {
+            reason: WriteErrorReason::Timeout,
+            outcome: AppendState::Unknown,
+        });
+        self
     }
 
-    /// Returns client timeout details after sending began.
+    /// Returns client timeout details for a table append after sending began.
     /// Existing error kinds, sources, and HTTP diagnostics remain available.
     pub fn write_details(&self) -> Option<&WriteErrorDetails> {
         self.write_details.as_ref()
@@ -511,29 +511,4 @@ impl Error {
     pub fn is_persistent(&self) -> bool {
         self.status == ErrorStatus::Persistent
     }
-}
-
-fn write_error_details_from_source(
-    source: &(dyn std::error::Error + 'static),
-) -> Option<WriteErrorDetails> {
-    let mut current = Some(source);
-    while let Some(error) = current {
-        if error.is::<tokio::time::error::Elapsed>()
-            || error
-                .downcast_ref::<reqwest::Error>()
-                .is_some_and(reqwest::Error::is_timeout)
-        {
-            return Some(WriteErrorDetails {
-                reason: WriteErrorReason::Timeout,
-                outcome: AppendState::Unknown,
-            });
-        }
-        if let Some(error) = error.downcast_ref::<Error>()
-            && error.write_details.is_some()
-        {
-            return error.write_details;
-        }
-        current = error.source();
-    }
-    None
 }
