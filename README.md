@@ -6,7 +6,7 @@ The official async Rust client for [ScopeDB](https://www.scopedb.io). Run ScopeQ
 
 ## Runtime support
 
-Requires ScopeDB 0.6.0 or later, Rust 1.91.0 or later, and a Tokio runtime. Use the SDK in a trusted server-side process and keep API keys out of source control. Applications upgrading from SDK 0.3 should follow the [migration guide](scopedb-client/README.md#migrate-to-scopedb-06).
+Requires Rust 1.91.0 or later and a Tokio runtime. Use the SDK in a trusted server-side process and keep API keys out of source control. Applications upgrading from SDK 0.3 should follow [Upgrade from 0.3 to 0.4](scopedb-client/docs/migration-0.4.md).
 
 ## Installation
 
@@ -22,12 +22,16 @@ cargo add tokio --features macros,rt-multi-thread
 Set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` using the [connection guide](https://www.scopedb.io/docs/guides/connect-to-scopedb). Save this program as `src/main.rs` and run `cargo run`:
 
 ```rust,no_run
+use std::error::Error;
+
 use scopedb_client::Client;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::builder(std::env::var("SCOPEDB_ENDPOINT")?)
-        .api_key(std::env::var("SCOPEDB_API_KEY")?)
+async fn main() -> Result<(), Box<dyn Error>> {
+    let endpoint = std::env::var("SCOPEDB_ENDPOINT")?;
+    let api_key = std::env::var("SCOPEDB_API_KEY")?;
+    let client = Client::builder(endpoint)
+        .api_key(api_key)
         .build()?;
 
     let result = client.query("SELECT 1 AS ready").await?;
@@ -40,7 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - [SDK guide](https://www.scopedb.io/docs/developer/rust)
 - [API reference](https://docs.rs/scopedb-client)
-- [Client configuration and usage](scopedb-client/README.md)
+- [Quickstart](scopedb-client/README.md)
+- [Upgrade from 0.3 to 0.4](scopedb-client/docs/migration-0.4.md)
 - [Examples](scopedb-client/examples/README.md)
 - [HTTP wire reference](scopedb-client/docs/rust-http-api.md)
 - [Changelog](CHANGELOG.md)
@@ -66,7 +71,7 @@ Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fix
 
 ### Live protocol validation
 
-From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` to an authenticated ScopeDB 0.6 endpoint, then run:
+From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` for your test environment, then run:
 
 ```sh
 cargo test -p scopedb-client --test native_06 -- --ignored --nocapture

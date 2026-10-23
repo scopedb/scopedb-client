@@ -5,6 +5,12 @@
 - Keep each semantic prose paragraph and each list item on one source line; do not hard-wrap within a paragraph or list item.
 - Format Markdown tables with aligned pipe columns.
 
+## User documentation
+
+- Keep the crate landing page short: installation, a runnable query, a small write example, and links by task. Put configuration and error contracts on the relevant API items instead of expanding the introduction into a manual.
+- Organize migration guides by SDK versions, with concrete old-to-new replacements. Include Ingest and other API changes in the same guide for that upgrade.
+- ScopeDB Cloud manages its service upgrades. Do not present internal backend versions or rollout steps as SDK user prerequisites or migration tasks.
+
 ## Releases
 
 - Prepare version changes in a PR: update `scopedb-client/Cargo.toml`, refresh `Cargo.lock`, and update `CHANGELOG.md` and affected user documentation before merging into `main`.

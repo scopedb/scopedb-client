@@ -151,6 +151,17 @@ impl fmt::Display for ErrorStatus {
     }
 }
 
+/// A failure with a message, optional HTTP diagnostics, and operation details.
+///
+/// Start with [`Self::message`], [`Self::http_status`], and [`Self::request_id`].
+/// Use [`Self::statement_details`] for a failed query, [`Self::append_details`]
+/// for a rejected or uncertain append, and [`Self::write_details`] for a write
+/// timeout. A timed-out write may already have committed; reconcile it before
+/// replaying.
+///
+/// [`Self::is_retryable`] describes the failed operation. For a query that was
+/// already submitted, resume its [`Self::statement_id`] through
+/// [`crate::Client::statement_handle`] instead of submitting another query.
 #[derive(Clone)]
 pub struct Error {
     kind: ErrorKind,

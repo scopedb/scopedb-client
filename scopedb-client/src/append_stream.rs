@@ -266,6 +266,36 @@ struct RetryConfig {
 ///
 /// Retries temporary rejections by default. Replaying unknown outcomes requires
 /// [`Self::retry_unknown`] because an unacknowledged attempt may have committed.
+///
+/// # Telemetry
+///
+/// For a log or telemetry sink that should keep running after batch failures,
+/// use [`AppendFailurePolicy::Continue`] and keep the circuit breaker enabled.
+/// Start with one concurrent batch per stream when producers run on multiple
+/// application replicas; tune the total concurrency across all producers.
+///
+/// ```no_run
+/// use scopedb_client::AppendFailurePolicy;
+///
+/// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
+/// let stream = client.table("events").append_stream()
+///     .failure_policy(AppendFailurePolicy::Continue)
+///     .max_concurrent_batches(1)
+///     .build()?;
+///
+/// if let Err(error) = stream.try_send(&serde_json::json!({"name": "request.completed"})) {
+///     eprintln!("telemetry row not admitted: {error}");
+/// }
+/// let report = stream.shutdown().await?;
+/// println!("Write results: {report:?}");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Continue mode is best effort. Monitor reports and [`AppendStream::stats`]
+/// for failed, unknown, and locally dropped rows. Send failure diagnostics to
+/// a separate sink. [`AppendStream::try_send`] never waits for capacity;
+/// [`AppendStream::send`] provides backpressure instead.
 pub struct AppendStreamBuilder {
     client: Client,
     database: String,
@@ -310,6 +340,7 @@ impl AppendStreamBuilder {
         }
     }
 
+    /// Chooses whether to stop or continue after a batch fails. Defaults to Stop.
     pub fn failure_policy(mut self, failure_policy: AppendFailurePolicy) -> Self {
         self.failure_policy = failure_policy;
         self
@@ -382,6 +413,8 @@ impl AppendStreamBuilder {
     }
 
     /// Configures the continue-mode availability circuit, or disables it with `None`.
+    /// Enabled by default: five consecutive availability failures pause dispatch
+    /// for 30 seconds before probing recovery.
     pub fn circuit_breaker(mut self, circuit_breaker: Option<AppendCircuitBreakerOptions>) -> Self {
         self.circuit_breaker = circuit_breaker;
         self
@@ -758,6 +791,7 @@ impl AppendStream {
     }
 
     /// Attempts synchronous local admission without waiting for capacity.
+    /// Returns an error if the circuit is open or local capacity is full.
     pub fn try_send<T>(&self, row: &T) -> Result<(), AppendTrySendError>
     where
         T: Serialize + ?Sized,
@@ -847,6 +881,10 @@ impl AppendStream {
     }
 
     /// Admits an iterator of rows sequentially with bounded memory.
+    ///
+    /// If admission fails partway, the error includes the accepted count.
+    /// Call [`Self::shutdown`] to settle those rows; [`Self::stats`] retains
+    /// cumulative counts.
     pub async fn send_all<I>(&self, rows: I) -> Result<AppendAdmissionResult, Error>
     where
         I: IntoIterator,
@@ -863,6 +901,9 @@ impl AppendStream {
     }
 
     /// Dispatches rows admitted before this barrier and waits for their outcomes.
+    ///
+    /// The report covers activity since the previous barrier. On a Stop-mode
+    /// failure, partial counts remain available in [`Self::stats`].
     ///
     /// Committed rows have at least one successful acknowledgement; earlier
     /// unknown attempts may also have committed. A failed barrier may include

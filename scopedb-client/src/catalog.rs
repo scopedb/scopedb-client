@@ -93,7 +93,7 @@ pub struct CatalogColumn {
     pub indexes: Vec<CatalogColumnIndex>,
 }
 
-/// Additional column index. ScopeDB 0.6 supports type "search" and analyzer "log".
+/// Additional column index. Supports type "search" and analyzer "log".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogColumnIndex {
@@ -147,6 +147,24 @@ pub struct CatalogResult<T> {
     pub etag: String,
 }
 
+/// Reads database, schema, table, and view definitions.
+///
+/// Select the smallest resource you need, then call [`CatalogResource::get`].
+/// Each read returns the complete definition and an ETag for conditional changes.
+///
+/// ```no_run
+/// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
+/// let snapshot = client.catalog().schema("scopedb", "public").get().await?;
+/// for table in snapshot.definition.tables {
+///     println!("{}: {} columns", table.name, table.columns.len());
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Use [`CatalogResource::apply`] to change a definition and
+/// [`CatalogResource::delete`] to remove a resource. Both support previews and
+/// ETag preconditions through [`CatalogOptions`].
 #[derive(Debug, Clone)]
 pub struct Catalog {
     resource: CatalogResource<CatalogDocument>,
@@ -226,6 +244,11 @@ impl Catalog {
 
 /// A selected subtree. Names are unescaped identifiers. Apply replaces the whole
 /// definition; it is not a patch. Mutations never retry automatically.
+///
+/// An interrupted or malformed mutation response reports
+/// `catalog_commit_outcome_unknown`. Read the current state before deciding
+/// whether to retry. Typed definitions reject unsupported fields; [`Self::raw`]
+/// preserves them, including arbitrary-precision JSON numbers.
 #[derive(Debug, Clone)]
 pub struct CatalogResource<T> {
     client: Client,
@@ -379,6 +402,7 @@ impl<T> CatalogResource<T> {
 }
 
 impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
+    /// Reads the complete definition and its ETag.
     pub async fn get(&self) -> Result<CatalogSnapshot<T>, Error> {
         let (definition, etag) = self
             .request(Method::GET, None, CatalogOptions::default())
@@ -386,6 +410,44 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
         Ok(CatalogSnapshot { definition, etag })
     }
 
+    /// Replaces the selected definition, including its children. Omitted fields
+    /// are cleared. Start from a snapshot to retain fields you are not changing.
+    ///
+    /// Preview with `dry_run` and use `if_match` to reject concurrent changes.
+    /// Set `allow_destructive` only after reviewing the potential data loss.
+    ///
+    /// ```no_run
+    /// use scopedb_client::CatalogOptions;
+    ///
+    /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
+    /// let resource = client.table("events").catalog();
+    /// let snapshot = resource.get().await?;
+    /// let mut definition = snapshot.definition;
+    /// definition.comment = Some("Application events".to_string());
+    ///
+    /// let preview = resource
+    ///     .apply(
+    ///         &definition,
+    ///         CatalogOptions {
+    ///             dry_run: true,
+    ///             if_match: Some(snapshot.etag),
+    ///             ..Default::default()
+    ///         },
+    ///     )
+    ///     .await?;
+    /// println!("destructive = {}", preview.destructive);
+    /// resource
+    ///     .apply(
+    ///         &definition,
+    ///         CatalogOptions {
+    ///             if_match: Some(preview.etag),
+    ///             ..Default::default()
+    ///         },
+    ///     )
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn apply(
         &self,
         definition: &T,
@@ -404,6 +466,8 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
         Ok(result)
     }
 
+    /// Deletes the selected resource. Use `dry_run` to preview the change and
+    /// `if_match` to require the ETag from a prior read or preview.
     pub async fn delete(&self, options: CatalogOptions) -> Result<CatalogResult<T>, Error> {
         if self.path.len() == 1 {
             return Err(Error::new(

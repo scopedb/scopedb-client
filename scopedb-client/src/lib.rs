@@ -14,6 +14,9 @@
 
 #![doc = include_str!("../README.md")]
 
+#[doc = include_str!("../docs/migration-0.4.md")]
+pub mod migration {}
+
 mod append_stream;
 mod catalog;
 mod client;
