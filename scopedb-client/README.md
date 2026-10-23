@@ -322,13 +322,3 @@ Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses
 [release]: https://github.com/scopedb/scopedb-client/blob/main/RELEASE.md
 [rust-http-api]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/docs/rust-http-api.md
 [telemetry-example]: https://github.com/scopedb/scopedb-client/blob/v0.4.0/scopedb-client/examples/telemetry.rs
-
-## Live protocol validation
-
-From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` to an authenticated ScopeDB 0.6 endpoint, then run:
-
-```sh
-cargo test -p scopedb-client --test native_06 -- --ignored --nocapture
-```
-
-The test creates a uniquely named schema and checks dry-run, ETag conflicts, direct and concurrent streaming appends, row rejections, statement errors, elapsed timeout, and cancellation racing with completion. It deletes its schema before returning. For an isolated local engine, `SCOPEDB_TENANT_ID` supplies tenant identity instead of a platform API key. Running cancellation, lost acknowledgements, and stale responses after dropping a future are covered by controlled HTTP tests.

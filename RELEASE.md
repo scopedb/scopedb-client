@@ -60,6 +60,16 @@ cargo +1.91.0 publish --package scopedb-client --dry-run --locked
 cargo +1.91.0 package --package scopedb-client --list --locked
 ```
 
+### Live protocol validation
+
+From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` to an authenticated ScopeDB 0.6 endpoint, then run:
+
+```sh
+cargo test -p scopedb-client --test native_06 -- --ignored --nocapture
+```
+
+The test creates a uniquely named schema and checks dry-run, ETag conflicts, direct and concurrent streaming appends, row rejections, statement errors, elapsed timeout, and cancellation racing with completion. It deletes its schema before returning. For an isolated local engine, `SCOPEDB_TENANT_ID` supplies tenant identity instead of a platform API key. Running cancellation, lost acknowledgements, and stale responses after dropping a future are covered by controlled HTTP tests.
+
 Publish once from that same clean commit:
 
 ```sh
