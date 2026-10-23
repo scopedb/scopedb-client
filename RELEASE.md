@@ -1,6 +1,21 @@
 # How to release the ScopeDB Rust SDK
 
-Rust SDK releases are published from a clean `main` checkout after the release PR has merged. The crate version, changelog entry, Git tag, and crates.io version must all match. Tags with the legacy `rust/vX.Y.Z` form were retained only to preserve release history from the former monorepo; new releases use `vX.Y.Z`.
+Rust SDK releases are published to crates.io by [release.yml](.github/workflows/release.yml) when a `vX.Y.Z` tag is pushed after the release PR has merged into `main`. The crate version, changelog entry, Git tag, and crates.io version must all match. Tags with the legacy `rust/vX.Y.Z` form were retained only to preserve release history from the former monorepo; new releases use `vX.Y.Z`.
+
+## Configure Trusted Publishing
+
+Before pushing the first release tag, an owner of `scopedb-client` must add a GitHub trusted publisher under the crate's [Settings → Trusted Publishing](https://crates.io/crates/scopedb-client/settings):
+
+| Field             | Value            |
+| ----------------- | ---------------- |
+| Repository owner  | `scopedb`        |
+| Repository name   | `scopedb-client` |
+| Workflow filename | `release.yml`    |
+| Environment       | `release`        |
+
+Use only the workflow filename, not `.github/workflows/release.yml`. The environment must match `environment: release` in the publishing job. No crates.io API token needs to be stored in GitHub secrets: `rust-lang/crates-io-auth-action` exchanges the workflow's OpenID Connect identity for a temporary token immediately before publishing and revokes it when the job ends. See the [crates.io Trusted Publishing documentation](https://crates.io/docs/trusted-publishing).
+
+GitHub creates the `release` environment when the workflow first uses it if it does not already exist. To restrict who can approve releases or which tags may publish, configure the environment's protection rules in the repository's [environment settings](https://github.com/scopedb/scopedb-client/settings/environments) before pushing a release tag. If deployment restrictions are enabled, allow version tags such as `v*`; allowing only the `main` branch does not allow a tag-triggered release.
 
 ## Changelog format
 
@@ -44,7 +59,7 @@ Compare each entry with the latest released version. Explain the impact and migr
    fi
    ```
 
-## Validate and publish
+## Validate before tagging
 
 Run the same checks used by CI, build the documentation with warnings denied, and verify the exact package that Cargo will upload:
 
@@ -59,21 +74,9 @@ cargo +1.91.0 publish --package scopedb-client --dry-run --locked
 cargo +1.91.0 package --package scopedb-client --list --locked
 ```
 
-Publish once from that same clean commit:
+## Tag, publish, and verify
 
-```sh
-cargo +1.91.0 publish --package scopedb-client --locked
-```
-
-Wait until the published version is visible before tagging:
-
-```sh
-cargo info --registry crates-io "scopedb-client@$scopedb_rust_version"
-```
-
-## Tag and verify
-
-Create an annotated tag on the published commit and push it:
+Create an annotated tag on the validated commit and push it. Pushing this tag starts publication, so complete the Trusted Publishing setup first:
 
 ```sh
 git tag -a "v$scopedb_rust_version" \
@@ -81,4 +84,14 @@ git tag -a "v$scopedb_rust_version" \
 git push origin "v$scopedb_rust_version"
 ```
 
+The release workflow reuses the full CI checks and tests, verifies that the tagged commit is part of `main`, checks that the tag matches the crate version and a dated changelog entry, runs the version compatibility check and package dry run, then publishes with a temporary crates.io token. Only the publishing job can request that token. Releases run serially, and an in-progress publication is not cancelled by another release tag.
+
+Wait for the [Release (Rust SDK) workflow](https://github.com/scopedb/scopedb-client/actions/workflows/release.yml) to succeed, then verify the published version:
+
+```sh
+cargo info --registry crates-io "scopedb-client@$scopedb_rust_version"
+```
+
 Create a GitHub release whose notes are the matching `CHANGELOG.md` entry. Then verify the crate page, the docs.rs build, and a fresh consumer project that depends on the published version.
+
+If a run fails before publication, fix the external configuration and rerun the failed jobs on the existing tag. If the tagged source needs a correction, prepare a new version and tag. If publication reports an error after uploading, check crates.io before retrying: published versions cannot be overwritten. Once the version exists, finish the GitHub release and verification steps without rerunning `cargo publish`. Do not move a release tag to a different commit.
