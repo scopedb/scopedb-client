@@ -61,7 +61,9 @@ cargo x check
 cargo x test --no-capture
 ```
 
-Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fixes. Run `cargo x --help` to list all development tasks. The maintainer runbook is in [RELEASE.md](RELEASE.md).
+Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fixes. Run `cargo x --help` to list all development tasks.
+
+To publish, push an annotated `vX.Y.Z` tag on the merged release commit in `main`; [release.yml](.github/workflows/release.yml) runs the checks and publishes to crates.io.
 
 ## License
 

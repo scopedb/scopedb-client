@@ -306,7 +306,7 @@ Review these behavior changes when migrating:
 
 The [example guide][example-guide] includes setup instructions and commands to run each example from the repository root.
 
-The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][rust-http-api]. Release history and the maintainer runbook are in [`CHANGELOG.md`][changelog] and [`RELEASE.md`][release].
+The wire-level endpoint and payload reference is in [`docs/rust-http-api.md`][rust-http-api]. Release history is in [`CHANGELOG.md`][changelog].
 
 ## License
 
@@ -319,7 +319,6 @@ Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses
 [changelog]: https://github.com/scopedb/scopedb-client/blob/main/CHANGELOG.md
 [example-guide]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/README.md
 [import-ndjson-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/import_ndjson.rs
-[release]: https://github.com/scopedb/scopedb-client/blob/main/RELEASE.md
 [rust-http-api]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/docs/rust-http-api.md
 [telemetry-example]: https://github.com/scopedb/scopedb-client/blob/main/scopedb-client/examples/telemetry.rs
 
