@@ -4,36 +4,36 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+## v0.4.0 (2026-10-23)
+
 ### Breaking Changes
 
-* Require ScopeDB 0.6.0 and use native Statement, declarative Catalog, and table ingest APIs. Replace paginated Catalog APIs and the legacy execution timeout option; cancellation retains complete terminal responses.
-* Removed `Client::insert`, `Client::ingest_stream`, and the transform Ingest types. Use table append APIs and transform rows in the producer; see the [migration guide](scopedb-client/README.md#migrate-from-ingest).
-
-* `AppendStream` retries only temporary rejections by default. Replaying transient unknown outcomes requires `.retry_unknown(true)` and may insert duplicates; client timeouts are never replayed. Direct append calls still make one attempt.
-* Upgraded the re-exported reqwest API from 0.12 to 0.13. Custom HTTP clients must now use reqwest 0.13, and the default HTTPS client uses reqwest's platform certificate verification.
-* Removed the statement `with_max_parallelism` option. Elapsed and estimated duration limits replace the old execution timeout option.
-
-* Consolidate table definitions and ETags under `Table::catalog()`, replacing `describe`, `table_schema`, and `apply` shortcuts. Typed Catalog definitions reject unsupported fields and direct callers to `raw()`.
-* Rename statement cached reads to `snapshot()` and network refreshes to `refresh()`; remove deprecated fetch aliases and redundant handle progress/result accessors. Distinguish `ErrorKind::StatementCancelled` from execution failure.
-* Rename Append outcome fields to `status`; retain the complete error in `AppendLastFailure::error`. Remove deprecated result and stream builder aliases. See the [0.6 migration guide](scopedb-client/README.md#migrate-to-scopedb-06) for replacements.
+* Require ScopeDB 0.6.0 or later. Replace paginated Catalog APIs with complete declarative definitions and ETags; replace `with_exec_timeout` and `with_max_parallelism` with `with_max_elapsed` and `with_max_estimated` duration limits.
+* Remove `Client::insert`, `Client::ingest_stream`, and the transform Ingest types. Use table append APIs and shape rows in the producer; see the [migration guide](scopedb-client/README.md#migrate-from-ingest).
+* Consolidate table definitions and conditional changes under `Table::catalog()`, replacing `describe`, `table_schema`, and `apply` shortcuts. Typed definitions reject unsupported fields; use `raw()` to retain them.
+* Rename statement cached reads to `snapshot()` and network refreshes to `refresh()`. Remove fetch aliases and redundant handle progress/result accessors; inspect the snapshot or call `wait()`. Distinguish `ErrorKind::StatementCancelled` from execution failure.
+* Retry only temporary Append rejections by default. Replaying transient unknown outcomes requires `.retry_unknown(true)` and may insert duplicates; direct appends and client timeouts are never replayed automatically.
+* Rename Append outcome fields to `status`, retain the complete error in `AppendLastFailure::error`, and remove deprecated result and stream builder aliases. Remove the unused `WriteErrorReason::Cancelled` variant: dropping a future does not produce a returned cancellation error. See the [0.6 migration guide](scopedb-client/README.md#migrate-to-scopedb-06) for replacements.
+* Upgrade the re-exported reqwest API from 0.12 to 0.13. Custom HTTP clients must use reqwest 0.13 and disable redirects and transport retries to avoid replaying writes. The default HTTPS client uses platform certificate verification.
 
 ### New Features
 
 * Add complete Catalog replacements and deletion with dry-run, ETags, conditional updates, views, computed columns, and explicit destructive-change authorization. Preserve structured error codes/details and statement compute seconds.
+* Bound Append and Catalog mutation HTTP requests with a configurable `write_timeout`, defaulting to 30 seconds through response-body reads. Streams can override it with `attempt_timeout`. Append timeout errors expose `WriteErrorReason::Timeout` and an unknown outcome; Catalog interruptions use `catalog_commit_outcome_unknown`.
+* Add `PartialEq` for typed result values so applications can compare cells and rows directly. Encoded composite and binary values compare as strings; floats use Rust's usual equality rules.
 
-* Table append requests now have a configurable client `write_timeout`, defaulting to 30 seconds including response-body reads. Streams inherit it unless an append stream explicitly sets `attempt_timeout`. Timeout outcomes remain unknown and are never automatically retried. The write timeout starts after local encoding, compression, and request preparation. `Error::write_details()` exposes a client timeout's `timeout` reason and `unknown` outcome while preserving existing kinds, sources, HTTP diagnostics, and subsequent stream errors.
+### Bug Fixes
+
+* Settle every admitted row before publishing stream shutdown completion, including after the waiting future is dropped. Keep partial delivery reports on Stop-mode failures and preserve original diagnostics through subsequent stream errors.
+* Preserve a batch's unknown outcome when later retries are rejected or exhausted, and honor explicit server retry refusal. Retain rejection details from nested error envelopes instead of misclassifying them as unknown.
+* Fully qualify table identifiers so database-only selectors target the same table through SQL, Catalog, and Append.
+* Preserve large integers and decimal JSON in raw Catalog definitions and error details. Reject overflowing result numbers with row/column diagnostics, retain special float values, and avoid double-encoding binary results.
 
 ### Improvements
 
-* Keep Stop-mode partial delivery reports, and publish shutdown completion only after all admitted rows settle. Cancellation of local waiting futures does not cancel remote work.
-* Disable redirects and transport retries on the SDK-owned HTTP client, validate endpoint and stream configuration, and enforce the direct Append row limit before sending.
-* Preserve large integers and decimal JSON in raw Catalog definitions and error details. Reject overflowing result numbers with row/column diagnostics while retaining ScopeDB's special floating-point values.
-* Replace the transform-named example with a bounded NDJSON file import that settles accepted rows on input failure.
-* Fully qualify table identifiers so database-only selectors target the same table through SQL, Catalog, and Append.
-* Preserve a batch's unknown outcome when subsequent retries are rejected or exhausted, including the last attempt's structured details, HTTP metadata, and typed cause through delivery barriers. Report committed rows as logical input rows acknowledged at least once.
-* `AppendStream` now targets 4 MiB per batch by default; the maximum configurable target and uncompressed request limit remain 8 MiB.
-* Direct caller-encoded table appends now use the same zstd compression and 8 MiB uncompressed request limit as streaming append batches.
-* Preserve structured failed-statement details on terminal errors and correct binary result formatting so wire-format hex strings are not encoded a second time.
+* Use 4 MiB as the default stream batch target. Compress all table appends with zstd and enforce the 8 MiB uncompressed body and 200,000-row limits before sending.
+* Validate endpoint and stream configuration before starting work, and disable redirects and transport retries on the SDK-owned HTTP client.
+* Replace the transform-named example with a bounded NDJSON file importer that settles accepted rows after an input failure. Document ScopeDB 0.6's signed 64-bit NDJSON integer limit separately from full-range unsigned query results.
 
 ## v0.3.3 (2026-08-24)
 
