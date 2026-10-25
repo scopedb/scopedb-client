@@ -85,7 +85,7 @@ async fn native_06_lifecycle() -> Result<()> {
             },
         )
         .await?;
-    ensure!(preview.before.is_none() && preview.after.is_some() && !preview.etag.is_empty());
+    ensure!(preview.before.is_none() && preview.after.is_some() && !preview.version.is_empty());
     let missing = resource
         .get()
         .await
@@ -97,34 +97,34 @@ async fn native_06_lifecycle() -> Result<()> {
             .apply(
                 &definition,
                 CatalogOptions {
-                    if_match: Some(preview.etag.clone()),
+                    expected_version: Some(preview.version.clone()),
                     ..Default::default()
                 },
             )
             .await?;
-        ensure!(resource.get().await?.etag == applied.etag);
+        ensure!(resource.get().await?.version == applied.version);
         let stale = resource
             .apply(
                 &definition,
                 CatalogOptions {
-                    if_match: Some(preview.etag),
+                    expected_version: Some(preview.version),
                     ..Default::default()
                 },
             )
             .await
             .err()
-            .ok_or_else(|| anyhow!("accepted stale ETag"))?;
+            .ok_or_else(|| anyhow!("accepted stale version"))?;
         ensure!(stale.http_status().map(|s| s.as_u16()) == Some(412));
         ensure!(stale.code() == Some("catalog_version_mismatch"));
-        println!("STALE_ETAG code={}", stale.code().unwrap());
+        println!("STALE_VERSION code={}", stale.code().unwrap());
         let snapshot = resource.get().await?;
         let mut replacement = snapshot.definition;
         replacement.comment = Some("conditional round trip".into());
         resource.apply(&replacement, CatalogOptions {
-            if_match: Some(snapshot.etag.clone()), ..Default::default()
+            expected_version: Some(snapshot.version.clone()), ..Default::default()
         }).await?;
         let conflict = resource.delete(CatalogOptions {
-            if_match: Some(snapshot.etag), allow_destructive: true, ..Default::default()
+            expected_version: Some(snapshot.version), allow_destructive: true, ..Default::default()
         }).await.unwrap_err();
         ensure!(conflict.code() == Some("catalog_version_mismatch"));
         ensure!(resource.get().await?.definition == replacement);
@@ -321,7 +321,7 @@ async fn exercise_data_paths(client: &Client, schema: &str) -> Result<()> {
         .apply(
             &changed,
             CatalogOptions {
-                if_match: Some(snapshot.etag),
+                expected_version: Some(snapshot.version),
                 ..Default::default()
             },
         )

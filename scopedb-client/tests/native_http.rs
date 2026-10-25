@@ -242,7 +242,7 @@ async fn catalog_round_trip_preserves_unknown_fields_and_preconditions() {
             &snapshot.definition,
             CatalogOptions {
                 dry_run: true,
-                if_match: Some(snapshot.etag),
+                expected_version: Some(snapshot.version),
                 ..Default::default()
             },
         )
@@ -256,7 +256,7 @@ async fn catalog_round_trip_preserves_unknown_fields_and_preconditions() {
         .apply(
             &snapshot.definition,
             CatalogOptions {
-                if_match: Some(preview.etag),
+                expected_version: Some(preview.version),
                 ..Default::default()
             },
         )
@@ -437,7 +437,7 @@ async fn catalog_requires_etag_and_preserves_ambiguous_mutations() {
         let error = resource
             .delete(CatalogOptions {
                 dry_run,
-                if_match: Some("\"version-1\"".into()),
+                expected_version: Some("\"version-1\"".into()),
                 allow_destructive: true,
             })
             .await

@@ -112,7 +112,7 @@ impl Table {
         )
     }
 
-    /// Selects this table's complete definition and ETag for conditional changes.
+    /// Selects this table's complete definition and opaque version for conditional changes.
     pub fn catalog(&self) -> crate::CatalogResource<CatalogTable> {
         self.client.catalog().table(
             self.database.as_deref().unwrap_or("scopedb"),

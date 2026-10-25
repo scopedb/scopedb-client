@@ -126,14 +126,15 @@ pub struct CatalogView {
 pub struct CatalogOptions {
     pub dry_run: bool,
     pub allow_destructive: bool,
-    /// Opaque ETag returned by Get or a dry-run result, including its quotes.
-    pub if_match: Option<String>,
+    /// Requires the opaque version returned by a prior read or dry run. Pass it unchanged.
+    pub expected_version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CatalogSnapshot<T> {
     pub definition: T,
-    pub etag: String,
+    /// Opaque catalog version. Pass it unchanged as `expected_version` for conditional changes.
+    pub version: String,
 }
 
 /// Normalized states compared in one transaction; None means absent.
@@ -144,13 +145,13 @@ pub struct CatalogResult<T> {
     pub destructive: bool,
     /// The base version for dry-run, or the resulting version after a mutation.
     #[serde(skip)]
-    pub etag: String,
+    pub version: String,
 }
 
 /// Reads database, schema, table, and view definitions.
 ///
 /// Select the smallest resource you need, then call [`CatalogResource::get`].
-/// Each read returns the complete definition and an ETag for conditional changes.
+/// Each read returns the complete definition and an opaque version for conditional changes.
 ///
 /// ```no_run
 /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
@@ -164,7 +165,7 @@ pub struct CatalogResult<T> {
 ///
 /// Use [`CatalogResource::apply`] to change a definition and
 /// [`CatalogResource::delete`] to remove a resource. Both support previews and
-/// ETag preconditions through [`CatalogOptions`].
+/// version preconditions through [`CatalogOptions`].
 #[derive(Debug, Clone)]
 pub struct Catalog {
     resource: CatalogResource<CatalogDocument>,
@@ -294,11 +295,12 @@ impl<T> CatalogResource<T> {
         if options.allow_destructive {
             request = request.query(&[("allow_destructive", true)]);
         }
-        if let Some(etag) = options.if_match {
-            let etag = reqwest::header::HeaderValue::from_str(&etag).map_err(|e| {
-                Error::new(ErrorKind::ConfigInvalid, "invalid If-Match header").set_source(e)
+        if let Some(version) = options.expected_version {
+            let version = reqwest::header::HeaderValue::from_str(&version).map_err(|e| {
+                Error::new(ErrorKind::ConfigInvalid, "invalid expected catalog version")
+                    .set_source(e)
             })?;
-            request = request.header(reqwest::header::IF_MATCH, etag);
+            request = request.header(reqwest::header::IF_MATCH, version);
         }
         if let Some(body) = body {
             request = request
@@ -352,13 +354,13 @@ impl<T> CatalogResource<T> {
                 error
             });
         }
-        let etag = headers
+        let version = headers
             .get(reqwest::header::ETAG)
             .and_then(|h| h.to_str().ok())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 apply_response_metadata(
-                    catalog_response_error(writing, "catalog response is missing ETag"),
+                    catalog_response_error(writing, "catalog response is missing a version"),
                     status,
                     &headers,
                 )
@@ -397,23 +399,26 @@ impl<T> CatalogResource<T> {
                 &headers,
             )
         })?;
-        Ok((result, etag))
+        Ok((result, version))
     }
 }
 
 impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
-    /// Reads the complete definition and its ETag.
+    /// Reads the complete definition and its version.
     pub async fn get(&self) -> Result<CatalogSnapshot<T>, Error> {
-        let (definition, etag) = self
+        let (definition, version) = self
             .request(Method::GET, None, CatalogOptions::default())
             .await?;
-        Ok(CatalogSnapshot { definition, etag })
+        Ok(CatalogSnapshot {
+            definition,
+            version,
+        })
     }
 
     /// Replaces the selected definition, including its children. Omitted fields
     /// are cleared. Start from a snapshot to retain fields you are not changing.
     ///
-    /// Preview with `dry_run` and use `if_match` to reject concurrent changes.
+    /// Preview with `dry_run` and use `expected_version` to reject concurrent changes.
     /// Set `allow_destructive` only after reviewing the potential data loss.
     ///
     /// ```no_run
@@ -430,7 +435,7 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
     ///         &definition,
     ///         CatalogOptions {
     ///             dry_run: true,
-    ///             if_match: Some(snapshot.etag),
+    ///             expected_version: Some(snapshot.version),
     ///             ..Default::default()
     ///         },
     ///     )
@@ -440,7 +445,7 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
     ///     .apply(
     ///         &definition,
     ///         CatalogOptions {
-    ///             if_match: Some(preview.etag),
+    ///             expected_version: Some(preview.version),
     ///             ..Default::default()
     ///         },
     ///     )
@@ -460,14 +465,14 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
             )
             .set_source(e)
         })?;
-        let (mut result, etag): (CatalogResult<T>, _) =
+        let (mut result, version): (CatalogResult<T>, _) =
             self.request(Method::PUT, Some(body), options).await?;
-        result.etag = etag;
+        result.version = version;
         Ok(result)
     }
 
     /// Deletes the selected resource. Use `dry_run` to preview the change and
-    /// `if_match` to require the ETag from a prior read or preview.
+    /// `expected_version` to require the version from a prior read or preview.
     pub async fn delete(&self, options: CatalogOptions) -> Result<CatalogResult<T>, Error> {
         if self.path.len() == 1 {
             return Err(Error::new(
@@ -475,9 +480,9 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
                 "the root catalog does not support DELETE; apply an empty document instead",
             ));
         }
-        let (mut result, etag): (CatalogResult<T>, _) =
+        let (mut result, version): (CatalogResult<T>, _) =
             self.request(Method::DELETE, None, options).await?;
-        result.etag = etag;
+        result.version = version;
         Ok(result)
     }
 }

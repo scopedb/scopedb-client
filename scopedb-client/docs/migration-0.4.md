@@ -47,7 +47,7 @@ Streams retry temporary rejections by default. They do not replay an unknown wri
 
 ## Update Catalog reads
 
-Replace paginated `list_*`, `fetch_*`, and `iterate_*` calls with a resource selector followed by `get()`. Each read returns a complete `definition` and an `etag` for conditional updates. In the table below, `catalog` is `client.catalog()`.
+Replace paginated `list_*`, `fetch_*`, and `iterate_*` calls with a resource selector followed by `get()`. Each read returns a complete `definition` and an opaque version token for conditional updates. In the table below, `catalog` is `client.catalog()`.
 
 | In 0.3                          | In 0.4                                      |
 | ------------------------------- | ------------------------------------------- |
@@ -72,7 +72,7 @@ for table in snapshot.definition.tables {
 # }
 ```
 
-Typed definitions reject unsupported fields. Use `raw().get()` to keep them as JSON. `Table::drop()` remains available; use [`CatalogResource::delete`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.CatalogResource.html#method.delete) when you need a preview or ETag precondition.
+Typed definitions reject unsupported fields. Use `raw().get()` to keep them as JSON. `Table::drop()` remains available; use [`CatalogResource::delete`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.CatalogResource.html#method.delete) when you need a preview or version precondition.
 
 ## Update statements and timeouts
 

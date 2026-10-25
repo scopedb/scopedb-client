@@ -4,6 +4,10 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+* Rename Catalog snapshot/result `etag` to `version` and `CatalogOptions::if_match` to `expected_version`. Pass the opaque version from a read or dry run unchanged to reject concurrent catalog changes.
+
 ## v0.4.1 (2026-10-23)
 
 ### Improvements
