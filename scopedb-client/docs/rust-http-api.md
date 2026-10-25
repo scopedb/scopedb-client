@@ -16,7 +16,7 @@ Names occupy individual percent-encoded path segments. Empty names and dot segme
 
 PUT replaces the selected subtree, including all its children. Omitted collections are empty and omitted optional fields are cleared. The definition's `name` must match the path. DELETE removes the selected resource. A mutation returns `before`, `after`, and `destructive`, with absent resources represented by JSON null, plus an `ETag` header.
 
-`CatalogOptions` maps `dry_run` and `allow_destructive` to query parameters and `if_match` to the `If-Match` header. A dry run validates and rolls back the changes; its ETag identifies the base version. A stale precondition returns HTTP 412 with code `catalog_version_mismatch`. Potentially destructive changes require explicit authorization. Keep the ETag exactly as returned, including its quotes.
+`CatalogOptions` maps `dry_run` and `allow_destructive` to query parameters and `expected_version` to the `If-Match` header. A dry run validates and rolls back the changes; its ETag identifies the base version. A stale precondition returns HTTP 412 with code `catalog_version_mismatch`. Potentially destructive changes require explicit authorization. The SDK exposes this token as `version`; pass it unchanged as `expected_version` to require the catalog version observed by a prior read or preview.
 
 Definitions include databases, schemas, tables, views, comments, computed-column `expression`, explicit column `indexes`, partitioning, clustering, `distinct`, and `retention_days`. Storage is accepted on creation and omitted from exports. Typed definitions reject unknown fields at every modeled level. `raw()` reads and applies `serde_json::Value` to retain unknown fields and arbitrary-precision JSON numbers.
 
