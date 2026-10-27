@@ -24,7 +24,7 @@ const PACKAGE_NAME: &str = "scopedb-client";
 
 #[derive(Parser)]
 struct Command {
-    #[clap(subcommand)]
+    #[command(subcommand)]
     sub: SubCommand,
 }
 
@@ -42,15 +42,15 @@ impl Command {
 
 #[derive(Subcommand)]
 enum SubCommand {
-    #[clap(about = "Compile workspace packages.")]
+    #[command(about = "Compile workspace packages.")]
     Build(CommandBuild),
-    #[clap(about = "Check scopedb-client.")]
+    #[command(about = "Check scopedb-client.")]
     Check(CommandCheck),
-    #[clap(about = "Run workspace quality checks.")]
+    #[command(about = "Run workspace quality checks.")]
     Lint(CommandLint),
-    #[clap(about = "Verify API compatibility for a planned release.")]
+    #[command(about = "Verify API compatibility for a planned release.")]
     Semver(CommandSemver),
-    #[clap(about = "Run unit tests.")]
+    #[command(about = "Run unit tests.")]
     Test(CommandTest),
 }
 
@@ -113,7 +113,7 @@ impl CommandSemver {
 }
 
 #[derive(Parser)]
-#[clap(name = "lint")]
+#[command(name = "lint")]
 struct CommandLint {
     #[arg(long, help = "Automatically apply lint suggestions.")]
     fix: bool,

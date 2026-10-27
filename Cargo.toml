@@ -25,12 +25,12 @@ rust-version = "1.91.0"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.104" }
-clap = { version = "4.6.6" }
+clap = { version = "4.6.7" }
 fastrace = { version = "0.7.19" }
 fastrace-reqwest = { version = "0.3.0" }
 httpdate = { version = "1.0.3" }
-jiff = { version = "0.2.35", features = ["serde"] }
-reqwest = { version = "0.13.4", default-features = false, features = [
+jiff = { version = "0.2.38", features = ["serde"] }
+reqwest = { version = "0.13.5", default-features = false, features = [
   "json",
   "query",
   "rustls",
@@ -42,14 +42,14 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 ] }
 semver = { version = "1.0.28" }
 serde = { version = "1.0.229" }
-serde_json = { version = "1.0.151", features = [
+serde_json = { version = "1.0.154", features = [
   "unbounded_depth",
   "arbitrary_precision",
 ] }
-tokio = { version = "1.53.3", features = ["macros", "rt", "sync", "time"] }
-ureq = { version = "3.4.0", default-features = false }
-uuid = { version = "1.25.0", features = ["v7", "serde"] }
-which = { version = "8.0.5" }
+tokio = { version = "1.54.1", features = ["macros", "rt", "sync", "time"] }
+ureq = { version = "3.5.0", default-features = false }
+uuid = { version = "1.29.0", features = ["v7", "serde"] }
+which = { version = "8.0.6" }
 zstd = { version = "0.14.3" }
 
 [workspace.lints.rust]
