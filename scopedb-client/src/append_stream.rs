@@ -1975,7 +1975,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct MockResponse {
         status: u16,
-        body: String,
+        body: Vec<u8>,
         delay: Duration,
         headers: Vec<(&'static str, String)>,
         body_delay: Duration,
@@ -1992,7 +1992,7 @@ mod tests {
         fn json(status: u16, body: impl Into<String>) -> Self {
             Self {
                 status,
-                body: body.into(),
+                body: body.into().into_bytes(),
                 delay: Duration::ZERO,
                 headers: Vec::new(),
                 body_delay: Duration::ZERO,
@@ -2189,7 +2189,7 @@ mod tests {
         if !response.body_delay.is_zero() {
             thread::sleep(response.body_delay);
         }
-        let body = response.body.as_bytes();
+        let body = response.body.as_slice();
         let body = if matches!(response.disconnect, Some(MockDisconnect::DuringBody)) {
             &body[..body.len().min(1)]
         } else {
@@ -3224,10 +3224,14 @@ mod tests {
 
     #[tokio::test]
     async fn write_timeout_preserves_a_shorter_custom_http_timeout() {
-        for body_delay in [false, true] {
+        for (body_delay, compressed) in [(false, false), (true, false), (true, true)] {
             let server = MockServer::start(move |_, _| {
-                let response =
+                let mut response =
                     MockResponse::json(200, r#"{"status":"committed","num_rows_inserted":1}"#);
+                if compressed {
+                    response.body = zstd::stream::encode_all(response.body.as_slice(), 1).unwrap();
+                    response = response.with_header("Content-Encoding", "zstd");
+                }
                 if body_delay {
                     response.with_body_delay(Duration::from_millis(150))
                 } else {
@@ -3249,18 +3253,10 @@ mod tests {
                 .append("{\"id\":1}".to_string())
                 .await
                 .unwrap_err();
-            let mut source = std::error::Error::source(&error);
-            let mut transport_timeout = false;
-            while let Some(error) = source {
-                transport_timeout |= error
-                    .downcast_ref::<reqwest::Error>()
-                    .is_some_and(reqwest::Error::is_timeout);
-                source = error.source();
-            }
-            assert!(
-                transport_timeout,
-                "the native transport cause must remain available"
-            );
+            let transport_error = std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                .expect("the native transport cause must remain available");
+            assert!(transport_error.is_timeout());
             assert_write_timeout_contract(&error);
             if body_delay {
                 assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));

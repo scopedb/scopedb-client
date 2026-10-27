@@ -8,6 +8,10 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 * Upgrade zstd and Tokio to patched versions that address RustSec security advisories. Applications with existing lockfiles should also update `compression-codecs` to 0.4.46 or later to refresh the HTTP response decompression dependencies.
 
+### Improvements
+
+* Refresh HTTP, TLS, async runtime, JSON, timestamp, and UUID dependencies to current stable releases while retaining Rust 1.91.0 support.
+
 ## v0.4.1 (2026-10-23)
 
 ### Improvements
