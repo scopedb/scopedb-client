@@ -46,11 +46,11 @@ serde_json = { version = "1.0.151", features = [
   "unbounded_depth",
   "arbitrary_precision",
 ] }
-tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["macros", "rt", "sync", "time"] }
 ureq = { version = "3.4.0", default-features = false }
 uuid = { version = "1.25.0", features = ["v7", "serde"] }
 which = { version = "8.0.5" }
-zstd = { version = "0.13.3" }
+zstd = { version = "0.14.3" }
 
 [workspace.lints.rust]
 unknown_lints = "deny"
