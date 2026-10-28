@@ -4,6 +4,10 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+### New Features
+
+* Add reusable finite batch writers with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix.
+
 ## v0.4.2 (2026-10-27)
 
 ### Bug Fixes
