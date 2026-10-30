@@ -74,7 +74,7 @@ pub struct AppendErrorDetails {
     pub row_errors_truncated: bool,
 }
 
-pub(crate) async fn decode_statement_response(
+pub async fn decode_statement_response(
     r: reqwest::Response,
     retryable_transport: bool,
 ) -> Result<StatementStatus, Error> {
@@ -109,7 +109,7 @@ pub(crate) async fn decode_statement_response(
     ))
 }
 
-pub(crate) fn decode_http_error(
+pub fn decode_http_error(
     status: StatusCode,
     headers: &HeaderMap,
     payload: &[u8],
@@ -189,11 +189,7 @@ fn parse_error_payload(payload: &[u8]) -> Option<ParsedErrorPayload> {
     })
 }
 
-pub(crate) fn apply_response_metadata(
-    mut error: Error,
-    status: StatusCode,
-    headers: &HeaderMap,
-) -> Error {
+pub fn apply_response_metadata(mut error: Error, status: StatusCode, headers: &HeaderMap) -> Error {
     error = error.set_http_status(status);
     if let Some(request_id) = header_string(headers, "x-request-id") {
         error = error.set_request_id(request_id);
@@ -221,7 +217,7 @@ fn parse_retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct StatementRequest {
+pub struct StatementRequest {
     pub statement: String,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -43,8 +43,8 @@ use crate::statement::StatementHandle;
 const JSON_CONTENT_ENCODING: &str = "zstd";
 const UNCOMPRESSED_CONTENT_LENGTH: &str = "X-ScopeDB-Uncompressed-Content-Length";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
-pub(crate) const MAX_APPEND_BODY_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_APPEND_ROWS: usize = 200_000;
+pub const MAX_APPEND_BODY_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_APPEND_ROWS: usize = 200_000;
 const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An async client for queries, table writes, and catalog operations.

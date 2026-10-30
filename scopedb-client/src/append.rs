@@ -28,20 +28,20 @@ use crate::client::MAX_APPEND_BODY_BYTES;
 use crate::client::MAX_APPEND_ROWS;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RetryConfig {
-    pub(crate) max_retries: usize,
-    pub(crate) retry_unknown: bool,
-    pub(crate) initial_backoff: Duration,
-    pub(crate) max_backoff: Duration,
+pub struct RetryConfig {
+    pub max_retries: usize,
+    pub retry_unknown: bool,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AppendOptions {
-    pub(crate) batch_bytes: usize,
-    pub(crate) max_batch_rows: usize,
-    pub(crate) max_in_flight_requests: usize,
-    pub(crate) retry: RetryConfig,
-    pub(crate) attempt_timeout: Option<Duration>,
+pub struct AppendOptions {
+    pub batch_bytes: usize,
+    pub max_batch_rows: usize,
+    pub max_in_flight_requests: usize,
+    pub retry: RetryConfig,
+    pub attempt_timeout: Option<Duration>,
 }
 
 impl Default for AppendOptions {
@@ -62,7 +62,7 @@ impl Default for AppendOptions {
 }
 
 impl AppendOptions {
-    pub(crate) fn validate(&self) -> Result<(), Error> {
+    pub fn validate(&self) -> Result<(), Error> {
         validate_positive("target_batch_bytes", self.batch_bytes)?;
         if self.batch_bytes > MAX_APPEND_BODY_BYTES {
             return Err(config_error(format!(
@@ -87,32 +87,27 @@ impl AppendOptions {
         Ok(())
     }
 
-    pub(crate) fn would_overflow(
-        &self,
-        current_bytes: usize,
-        rows: usize,
-        next_bytes: usize,
-    ) -> bool {
+    pub fn would_overflow(&self, current_bytes: usize, rows: usize, next_bytes: usize) -> bool {
         rows > 0
             && (rows >= self.max_batch_rows
                 || current_bytes.saturating_add(1).saturating_add(next_bytes) > self.batch_bytes)
     }
 
-    pub(crate) fn is_full(&self, bytes: usize, rows: usize) -> bool {
+    pub fn is_full(&self, bytes: usize, rows: usize) -> bool {
         bytes >= self.batch_bytes || rows >= self.max_batch_rows
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AppendBatchRequest {
-    pub(crate) client: Client,
-    pub(crate) database: String,
-    pub(crate) schema: String,
-    pub(crate) table: String,
-    pub(crate) options: AppendOptions,
+pub struct AppendBatchRequest {
+    pub client: Client,
+    pub database: String,
+    pub schema: String,
+    pub table: String,
+    pub options: AppendOptions,
 }
 
-pub(crate) fn validate_deadline(name: &str, duration: Duration) -> Result<(), Error> {
+pub fn validate_deadline(name: &str, duration: Duration) -> Result<(), Error> {
     if Instant::now().checked_add(duration).is_none() {
         Err(config_error(format!("{name} is too large")))
     } else {
@@ -120,7 +115,7 @@ pub(crate) fn validate_deadline(name: &str, duration: Duration) -> Result<(), Er
     }
 }
 
-pub(crate) fn validate_positive(name: &str, value: usize) -> Result<(), Error> {
+pub fn validate_positive(name: &str, value: usize) -> Result<(), Error> {
     if value == 0 {
         Err(config_error(format!("{name} must be greater than zero")))
     } else {
@@ -128,11 +123,11 @@ pub(crate) fn validate_positive(name: &str, value: usize) -> Result<(), Error> {
     }
 }
 
-pub(crate) fn config_error(message: impl Into<String>) -> Error {
+pub fn config_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::ConfigInvalid, message)
 }
 
-pub(crate) fn prepare_record<T>(row: &T) -> Result<String, Error>
+pub fn prepare_record<T>(row: &T) -> Result<String, Error>
 where
     T: Serialize + ?Sized,
 {
@@ -152,7 +147,7 @@ where
     Ok(payload)
 }
 
-pub(crate) fn prepare_record_for_try_send<T>(row: &T) -> Result<String, AppendTrySendError>
+pub fn prepare_record_for_try_send<T>(row: &T) -> Result<String, AppendTrySendError>
 where
     T: Serialize + ?Sized,
 {
@@ -161,7 +156,7 @@ where
     Ok(payload)
 }
 
-pub(crate) fn validate_record_payload(payload: &str) -> Result<(), AppendTrySendError> {
+fn validate_record_payload(payload: &str) -> Result<(), AppendTrySendError> {
     let bytes = payload.len();
     if bytes > MAX_APPEND_BODY_BYTES {
         return Err(AppendTrySendError::RecordTooLarge {
@@ -175,7 +170,7 @@ pub(crate) fn validate_record_payload(payload: &str) -> Result<(), AppendTrySend
     Ok(())
 }
 
-pub(crate) async fn append_batch(
+pub async fn append_batch(
     request: AppendBatchRequest,
     payload: String,
 ) -> (Result<AppendRowsResult, Error>, usize) {
@@ -223,7 +218,7 @@ pub(crate) async fn append_batch(
     }
 }
 
-pub(crate) fn append_retryable(error: &Error, retry_unknown: bool) -> bool {
+fn append_retryable(error: &Error, retry_unknown: bool) -> bool {
     if error.write_details().is_some() || error.server_retryable() == Some(false) {
         return false;
     }
@@ -239,7 +234,7 @@ pub(crate) fn append_retryable(error: &Error, retry_unknown: bool) -> bool {
     }
 }
 
-pub(crate) fn preserve_unknown_outcome(error: Error, saw_unknown: bool) -> Error {
+fn preserve_unknown_outcome(error: Error, saw_unknown: bool) -> Error {
     if !saw_unknown
         || error
             .append_details()
@@ -263,7 +258,7 @@ pub(crate) fn preserve_unknown_outcome(error: Error, saw_unknown: bool) -> Error
         .set_persistent()
 }
 
-pub(crate) fn next_backoff(current: Duration, max_backoff: Duration) -> Duration {
+fn next_backoff(current: Duration, max_backoff: Duration) -> Duration {
     if current.is_zero() {
         return Duration::ZERO;
     }
@@ -273,8 +268,46 @@ pub(crate) fn next_backoff(current: Duration, max_backoff: Duration) -> Duration
         .min(max_backoff)
 }
 
-pub(crate) fn retry_delay(backoff: Duration, error: &Error, max_backoff: Duration) -> Duration {
+fn retry_delay(backoff: Duration, error: &Error, max_backoff: Duration) -> Duration {
     backoff
         .max(error.retry_after().unwrap_or(Duration::ZERO))
         .min(max_backoff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_object_rows() {
+        assert!(matches!(
+            prepare_record_for_try_send(&vec![1, 2, 3]),
+            Err(AppendTrySendError::InvalidRecord)
+        ));
+    }
+
+    #[test]
+    fn backoff_is_capped() {
+        assert_eq!(
+            next_backoff(Duration::from_secs(4), Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn retry_after_is_honored_and_capped() {
+        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
+            .set_retry_after(Duration::from_secs(30));
+        assert_eq!(
+            retry_delay(Duration::from_millis(100), &error, Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
+
+        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
+            .set_retry_after(Duration::from_millis(200));
+        assert_eq!(
+            retry_delay(Duration::from_secs(1), &error, Duration::from_secs(5)),
+            Duration::from_secs(1)
+        );
+    }
 }

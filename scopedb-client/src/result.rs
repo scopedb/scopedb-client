@@ -25,7 +25,7 @@ use crate::protocol::StatementResultSet;
 
 #[derive(Debug, Clone)]
 pub struct Schema {
-    pub(crate) fields: Vec<FieldSchema>,
+    fields: Vec<FieldSchema>,
 }
 
 impl Schema {
@@ -36,8 +36,8 @@ impl Schema {
 
 #[derive(Debug, Clone)]
 pub struct FieldSchema {
-    pub(crate) name: String,
-    pub(crate) data_type: DataType,
+    name: String,
+    data_type: DataType,
 }
 
 impl FieldSchema {

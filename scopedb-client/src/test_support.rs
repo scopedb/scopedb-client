@@ -32,14 +32,14 @@ use tokio::sync::Notify;
 use crate::Client;
 
 #[derive(Debug, Default)]
-pub(crate) struct ResponseGate {
+pub struct ResponseGate {
     released: Mutex<bool>,
     wake: Condvar,
     blocked: Notify,
 }
 
 impl ResponseGate {
-    pub(crate) fn block(&self) {
+    pub fn block(&self) {
         self.blocked.notify_one();
         let (released, _) = self
             .wake
@@ -50,27 +50,27 @@ impl ResponseGate {
         assert!(*released, "test did not release the response gate");
     }
 
-    pub(crate) async fn wait_until_blocked(&self) {
+    pub async fn wait_until_blocked(&self) {
         self.blocked.notified().await;
     }
 
-    pub(crate) fn release(&self) {
+    pub fn release(&self) {
         *lock(&self.released) = true;
         self.wake.notify_all();
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RecordedRequest {
-    pub(crate) target: String,
-    pub(crate) headers: HashMap<String, String>,
-    pub(crate) body: String,
+pub struct RecordedRequest {
+    pub target: String,
+    pub headers: HashMap<String, String>,
+    pub body: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MockResponse {
+pub struct MockResponse {
     status: u16,
-    pub(crate) body: Vec<u8>,
+    pub body: Vec<u8>,
     delay: Duration,
     headers: Vec<(&'static str, String)>,
     body_delay: Duration,
@@ -80,13 +80,13 @@ pub(crate) struct MockResponse {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum MockDisconnect {
+pub enum MockDisconnect {
     BeforeHeaders,
     DuringBody,
 }
 
 impl MockResponse {
-    pub(crate) fn json(status: u16, body: impl Into<String>) -> Self {
+    pub fn json(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
             body: body.into().into_bytes(),
@@ -99,7 +99,7 @@ impl MockResponse {
         }
     }
 
-    pub(crate) fn committed(request: &RecordedRequest) -> Self {
+    pub fn committed(request: &RecordedRequest) -> Self {
         let rows = request
             .body
             .lines()
@@ -111,37 +111,37 @@ impl MockResponse {
         )
     }
 
-    pub(crate) fn with_delay(mut self, delay: Duration) -> Self {
+    pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
         self
     }
 
-    pub(crate) fn with_header(mut self, name: &'static str, value: &str) -> Self {
+    pub fn with_header(mut self, name: &'static str, value: &str) -> Self {
         self.headers.push((name, value.to_string()));
         self
     }
 
-    pub(crate) fn without_ack(mut self) -> Self {
+    pub fn without_ack(mut self) -> Self {
         self.disconnect = Some(MockDisconnect::BeforeHeaders);
         self
     }
 
-    pub(crate) fn with_body_delay(mut self, delay: Duration) -> Self {
+    pub fn with_body_delay(mut self, delay: Duration) -> Self {
         self.body_delay = delay;
         self
     }
 
-    pub(crate) fn with_disconnect(mut self, disconnect: MockDisconnect) -> Self {
+    pub fn with_disconnect(mut self, disconnect: MockDisconnect) -> Self {
         self.disconnect = Some(disconnect);
         self
     }
 
-    pub(crate) fn with_body_gate(mut self, gate: Arc<ResponseGate>) -> Self {
+    pub fn with_body_gate(mut self, gate: Arc<ResponseGate>) -> Self {
         self.body_gate = Some(gate);
         self
     }
 
-    pub(crate) fn notify_when_sent(mut self, sent: Arc<Notify>) -> Self {
+    pub fn notify_when_sent(mut self, sent: Arc<Notify>) -> Self {
         self.sent = Some(sent);
         self
     }
@@ -149,8 +149,8 @@ impl MockResponse {
 
 type Responder = dyn Fn(usize, &RecordedRequest) -> MockResponse + Send + Sync;
 
-pub(crate) struct MockServer {
-    pub(crate) endpoint: String,
+pub struct MockServer {
+    pub endpoint: String,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     max_active: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
@@ -158,7 +158,7 @@ pub(crate) struct MockServer {
 }
 
 impl MockServer {
-    pub(crate) fn start<F>(responder: F) -> Self
+    pub fn start<F>(responder: F) -> Self
     where
         F: Fn(usize, &RecordedRequest) -> MockResponse + Send + Sync + 'static,
     {
@@ -210,12 +210,12 @@ impl MockServer {
         }
     }
 
-    pub(crate) fn client(&self) -> Client {
+    pub fn client(&self) -> Client {
         let http_client = reqwest::Client::builder().no_proxy().build().unwrap();
         Client::new(&self.endpoint, http_client).unwrap()
     }
 
-    pub(crate) fn client_with_write_timeout(&self, timeout: Duration) -> Client {
+    pub fn client_with_write_timeout(&self, timeout: Duration) -> Client {
         Client::builder(&self.endpoint)
             .http_client(reqwest::Client::builder().no_proxy().build().unwrap())
             .write_timeout(timeout)
@@ -223,11 +223,11 @@ impl MockServer {
             .unwrap()
     }
 
-    pub(crate) fn requests(&self) -> Vec<RecordedRequest> {
+    pub fn requests(&self) -> Vec<RecordedRequest> {
         lock(&self.requests).clone()
     }
 
-    pub(crate) fn max_active(&self) -> usize {
+    pub fn max_active(&self) -> usize {
         self.max_active.load(Ordering::Acquire)
     }
 }
@@ -363,4 +363,31 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_server_waits_for_delayed_request_bytes() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request));
+        let mut stream = TcpStream::connect(server.endpoint.trim_start_matches("http://")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+
+        thread::sleep(Duration::from_millis(20));
+        let body = "{\"id\":1}\n";
+        let request = format!(
+            "POST /rows HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert_eq!(server.requests().len(), 1);
+    }
 }

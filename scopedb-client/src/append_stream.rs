@@ -1727,52 +1727,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
-    use std::io::Write;
-    use std::net::TcpStream;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::thread;
 
     use super::*;
     use crate::append::RetryConfig;
-    use crate::append::next_backoff;
-    use crate::append::retry_delay;
     use crate::client::MAX_APPEND_BODY_BYTES;
     use crate::client::MAX_APPEND_ROWS;
     use crate::test_support::MockDisconnect;
     use crate::test_support::MockResponse;
     use crate::test_support::MockServer;
-
-    #[test]
-    fn mock_server_waits_for_delayed_request_bytes() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let mut stream = TcpStream::connect(server.endpoint.trim_start_matches("http://")).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
-
-        thread::sleep(Duration::from_millis(20));
-        let body = "{\"id\":1}\n";
-        let request = format!(
-            "POST /rows HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(request.as_bytes()).unwrap();
-
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-        assert_eq!(server.requests().len(), 1);
-    }
-
-    #[test]
-    fn rejects_non_object_rows() {
-        assert!(matches!(
-            prepare_record_for_try_send(&vec![1, 2, 3]),
-            Err(AppendTrySendError::InvalidRecord)
-        ));
-    }
 
     #[test]
     fn report_outcomes_include_drops_and_unknown_rows() {
@@ -1823,31 +1788,6 @@ mod tests {
         let report = worker.take_report(1, Instant::now());
         assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
         assert_eq!(report.dropped_rows, 1);
-    }
-
-    #[test]
-    fn backoff_is_capped() {
-        assert_eq!(
-            next_backoff(Duration::from_secs(4), Duration::from_secs(5)),
-            Duration::from_secs(5)
-        );
-    }
-
-    #[test]
-    fn retry_after_is_honored_and_capped() {
-        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
-            .set_retry_after(Duration::from_secs(30));
-        assert_eq!(
-            retry_delay(Duration::from_millis(100), &error, Duration::from_secs(5)),
-            Duration::from_secs(5)
-        );
-
-        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
-            .set_retry_after(Duration::from_millis(200));
-        assert_eq!(
-            retry_delay(Duration::from_secs(1), &error, Duration::from_secs(5)),
-            Duration::from_secs(1)
-        );
     }
 
     #[tokio::test]
