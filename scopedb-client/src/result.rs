@@ -128,7 +128,7 @@ impl ResultSet {
     /// Borrows the result set and converts rows into maps keyed by column name.
     ///
     /// Returns [`ErrorKind::InvalidInput`] if the schema contains duplicate
-    /// column names; use [`Self::to_values`] for queries with duplicate output names.
+    /// column names; use [`to_values`](Self::to_values) for queries with duplicate output names.
     pub fn to_objects(&self) -> Result<Vec<ResultObject>, Error> {
         self.validate_unique_fields()?;
         self.to_values().map(|rows| {
@@ -148,7 +148,8 @@ impl ResultSet {
     /// Consumes the result set and converts rows into maps keyed by column name.
     ///
     /// Returns [`ErrorKind::InvalidInput`] if the schema contains duplicate
-    /// column names; use [`Self::into_values`] for queries with duplicate output names.
+    /// column names; use [`into_values`](Self::into_values) for queries with duplicate output
+    /// names.
     pub fn into_objects(self) -> Result<Vec<ResultObject>, Error> {
         self.validate_unique_fields()?;
         let names = self

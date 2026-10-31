@@ -282,10 +282,10 @@ impl Catalog {
 
 /// Selector for reading, replacing, or deleting a catalog subtree.
 ///
-/// [`Self::apply`] replaces the entire selected subtree (`PUT`), including
-/// child resources; start from [`Self::get`] when modifying an existing
+/// [`apply`](Self::apply) replaces the entire selected subtree (`PUT`), including
+/// child resources; start from [`get`](Self::get) when modifying an existing
 /// resource. Typed definitions reject unknown fields;
-/// call [`Self::raw`] to read and apply [`serde_json::Value`] definitions with
+/// call [`raw`](Self::raw) to read and apply [`serde_json::Value`] definitions with
 /// forward-compatible fields and arbitrary-precision numbers.
 ///
 /// Catalog mutations use [`ClientBuilder::write_timeout`](crate::ClientBuilder::write_timeout)

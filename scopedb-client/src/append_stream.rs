@@ -245,13 +245,13 @@ type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 ///
 /// Defaults to 4 MiB target batches, 4 concurrent requests, and
 /// [`AppendFailurePolicy::Stop`]. Transient rejections are retried; retrying
-/// unknown outcomes requires opting into [`Self::retry_unknown`].
+/// unknown outcomes requires opting into [`retry_unknown`](Self::retry_unknown).
 ///
 /// # Telemetry
 ///
 /// For log or telemetry sinks that should keep running after a batch fails, use
 /// [`AppendFailurePolicy::Continue`] with [`AppendStream::try_send`] and monitor
-/// [`AppendStream::stats`] or [`Self::on_batch_failure`]:
+/// [`AppendStream::stats`] or [`on_batch_failure`](Self::on_batch_failure):
 ///
 /// ```no_run
 /// use scopedb_client::AppendFailurePolicy;
@@ -356,8 +356,8 @@ impl AppendStreamBuilder {
         self
     }
 
-    /// Overrides the client's [`crate::ClientBuilder::write_timeout`] with a positive per-attempt
-    /// timeout.
+    /// Overrides the client's [`ClientBuilder::write_timeout`](crate::ClientBuilder::write_timeout)
+    /// with a positive per-attempt timeout.
     pub fn attempt_timeout(mut self, attempt_timeout: Duration) -> Self {
         self.options.attempt_timeout = Some(attempt_timeout);
         self
@@ -660,7 +660,7 @@ struct AppendStreamInner {
 /// Cloneable handle to a bounded background append stream.
 ///
 /// Admitted rows belong to the stream rather than an individual producer call.
-/// Call [`Self::flush`] to await an intermediate barrier or [`Self::shutdown`]
+/// Call [`flush`](Self::flush) to await an intermediate barrier or [`shutdown`](Self::shutdown)
 /// to close admission and await final settlement. If all handles are dropped
 /// without calling `shutdown`, the background worker drains already admitted
 /// rows while the Tokio runtime remains active.
@@ -672,8 +672,8 @@ pub struct AppendStream {
 impl AppendStream {
     /// Serializes `row` and waits for local buffer capacity to admit it into the stream.
     ///
-    /// Returning `Ok(())` confirms local admission; call [`Self::flush`] or
-    /// [`Self::shutdown`] to observe remote delivery outcomes.
+    /// Returning `Ok(())` confirms local admission; call [`flush`](Self::flush) or
+    /// [`shutdown`](Self::shutdown) to observe remote delivery outcomes.
     pub async fn send<T>(&self, row: &T) -> Result<(), Error>
     where
         T: Serialize + ?Sized,
@@ -810,8 +810,8 @@ impl AppendStream {
     ///
     /// If an item fails encoding or the stream closes mid-iteration,
     /// [`Error::append_admission`] reports how many rows from this call were
-    /// admitted. Those rows remain owned by the stream; call [`Self::flush`] or
-    /// [`Self::shutdown`] to observe their delivery.
+    /// admitted. Those rows remain owned by the stream; call [`flush`](Self::flush) or
+    /// [`shutdown`](Self::shutdown) to observe their delivery.
     /// Dropping this future stops admitting further rows while leaving already
     /// admitted rows in the stream.
     pub async fn send_all<I>(&self, rows: I) -> Result<AppendAdmissionResult, Error>
@@ -836,7 +836,7 @@ impl AppendStream {
     /// [`AppendFailurePolicy::Stop`], a batch failure transitions the stream to
     /// [`AppendStreamState::Failed`], settles all in-flight batches, and
     /// returns [`Error`] with the terminal [`Error::append_delivery_report`]
-    /// (shared with any concurrent `flush` or [`Self::shutdown`] callers).
+    /// (shared with any concurrent `flush` or [`shutdown`](Self::shutdown) callers).
     /// Under [`AppendFailurePolicy::Continue`], `flush` returns `Ok(report)`
     /// and records any batch losses in `report.outcome`.
     ///

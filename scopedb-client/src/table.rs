@@ -28,7 +28,7 @@ const DEFAULT_SCHEMA: &str = "public";
 /// Reference to a table for appending rows or managing its catalog definition.
 ///
 /// The database and schema default to `scopedb` and `public`; override them with
-/// [`Self::with_database`] and [`Self::with_schema`].
+/// [`with_database`](Self::with_database) and [`with_schema`](Self::with_schema).
 #[derive(Debug, Clone)]
 pub struct Table {
     client: Client,
@@ -78,8 +78,8 @@ impl Table {
     /// input must fit in `i64` (including `uint` columns and nested JSON); query
     /// results support the full `u64` range.
     ///
-    /// On failure, inspect [`Error::append_details`] for [`crate::AppendState`].
-    /// When the status is [`crate::AppendState::Unknown`], reconcile before
+    /// On failure, inspect [`Error::append_details`] for [`AppendState`](crate::AppendState).
+    /// When the status is [`AppendState::Unknown`](crate::AppendState::Unknown), reconcile before
     /// replaying the payload.
     ///
     /// ```no_run

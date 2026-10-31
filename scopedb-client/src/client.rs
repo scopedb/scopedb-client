@@ -53,7 +53,7 @@ const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An async client for queries, table writes, and catalog operations.
 ///
-/// Start with [`Self::builder`] to configure your endpoint and API key.
+/// Start with [`builder`](Self::builder) to configure your endpoint and API key.
 /// Clones share the underlying HTTP connection pool.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -93,7 +93,7 @@ impl ClientBuilder {
 
     /// Sets a custom HTTP client for TLS, proxy, and connection-pool settings.
     ///
-    /// Construct the client with [`crate::reqwest`] and disable redirects and
+    /// Construct the client with [`reqwest`](crate::reqwest) and disable redirects and
     /// transport retries so writes are not replayed at the HTTP layer:
     ///
     /// ```
@@ -114,14 +114,14 @@ impl ClientBuilder {
     /// including reading the response body.
     ///
     /// Defaults to 30 seconds and must be finite and positive.
-    /// [`crate::AppendWriterBuilder::attempt_timeout`] and
-    /// [`crate::AppendStreamBuilder::attempt_timeout`] override this default.
-    /// Timeouts configured on a custom HTTP client also apply.
+    /// [`AppendWriterBuilder::attempt_timeout`](crate::AppendWriterBuilder::attempt_timeout) and
+    /// [`AppendStreamBuilder::attempt_timeout`](crate::AppendStreamBuilder::attempt_timeout)
+    /// override this default. Timeouts configured on a custom HTTP client also apply.
     ///
     /// A timed-out write has an unknown commit outcome and is not replayed
     /// automatically. Append timeouts populate [`Error::write_details`], and
     /// catalog mutation timeouts set [`Error::catalog_outcome`] to
-    /// [`crate::CatalogMutationOutcome::Unknown`].
+    /// [`CatalogMutationOutcome::Unknown`](crate::CatalogMutationOutcome::Unknown).
     pub fn write_timeout(mut self, timeout: Duration) -> Self {
         self.write_timeout = timeout;
         self
@@ -198,10 +198,11 @@ impl Client {
         }
     }
 
-    /// Creates a client from an HTTP(S) endpoint URL and a [`crate::reqwest::Client`].
+    /// Creates a client from an HTTP(S) endpoint URL and a
+    /// [`reqwest::Client`](crate::reqwest::Client).
     ///
     /// Configure `client` as shown in [`ClientBuilder::http_client`]. The write
-    /// timeout defaults to 30 seconds; use [`Self::builder`] to customize it or
+    /// timeout defaults to 30 seconds; use [`builder`](Self::builder) to customize it or
     /// attach an API key.
     pub fn new<E: IntoUrl>(endpoint: E, client: reqwest::Client) -> Result<Self, Error> {
         match endpoint.into_url() {
@@ -257,7 +258,7 @@ impl Client {
     /// Submits `statement` and waits for its [`ResultSet`].
     ///
     /// If waiting fails after submission, pass [`Error::statement_id`] to
-    /// [`Self::statement_handle`] to inspect or resume waiting on the running
+    /// [`statement_handle`](Self::statement_handle) to inspect or resume waiting on the running
     /// execution rather than resubmitting the query.
     pub async fn query(&self, statement: impl Into<String>) -> Result<ResultSet, Error> {
         self.statement(statement).execute().await

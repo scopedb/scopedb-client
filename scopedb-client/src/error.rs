@@ -68,31 +68,31 @@ pub enum ErrorKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorOperation {
-    /// Building a [`crate::Client`].
+    /// Building a [`Client`](crate::Client).
     BuildClient,
-    /// Building an [`crate::AppendWriter`].
+    /// Building an [`AppendWriter`](crate::AppendWriter).
     BuildAppendWriter,
-    /// Building an [`crate::AppendStream`].
+    /// Building an [`AppendStream`](crate::AppendStream).
     BuildAppendStream,
     /// Single-batch table append request, including retries.
     Append,
-    /// Finite-slice write through [`crate::AppendWriter::write`].
+    /// Finite-slice write through [`AppendWriter::write`](crate::AppendWriter::write).
     WriteRows,
-    /// Local row admission into an [`crate::AppendStream`].
+    /// Local row admission into an [`AppendStream`](crate::AppendStream).
     AdmitRows,
-    /// Flushing an [`crate::AppendStream`].
+    /// Flushing an [`AppendStream`](crate::AppendStream).
     Flush,
-    /// Shutting down an [`crate::AppendStream`].
+    /// Shutting down an [`AppendStream`](crate::AppendStream).
     Shutdown,
-    /// Submitting a [`crate::Statement`].
+    /// Submitting a [`Statement`](crate::Statement).
     SubmitStatement,
     /// Executing a statement to completion (`query`, `execute`, or `Table::drop`).
     ExecuteStatement,
-    /// Refreshing a [`crate::StatementHandle`].
+    /// Refreshing a [`StatementHandle`](crate::StatementHandle).
     RefreshStatement,
-    /// Waiting on a [`crate::StatementHandle`].
+    /// Waiting on a [`StatementHandle`](crate::StatementHandle).
     WaitStatement,
-    /// Cancelling a [`crate::StatementHandle`].
+    /// Cancelling a [`StatementHandle`](crate::StatementHandle).
     CancelStatement,
     /// Reading a catalog snapshot.
     ReadCatalog,
@@ -100,9 +100,9 @@ pub enum ErrorOperation {
     ApplyCatalog,
     /// Deleting or previewing deletion of a catalog resource.
     DeleteCatalog,
-    /// Decoding a [`crate::ResultSet`] into typed rows or objects.
+    /// Decoding a [`ResultSet`](crate::ResultSet) into typed rows or objects.
     DecodeResult,
-    /// Parsing a [`crate::DataType`] name.
+    /// Parsing a [`DataType`](crate::DataType) name.
     ParseDataType,
 }
 
@@ -357,8 +357,8 @@ impl Error {
 
     /// Returns the statement ID associated with a failed statement operation.
     ///
-    /// Pass this ID to [`crate::Client::statement_handle`] to inspect or wait
-    /// on the execution after a lost submission response or post-submission
+    /// Pass this ID to [`Client::statement_handle`](crate::Client::statement_handle) to inspect or
+    /// wait on the execution after a lost submission response or post-submission
     /// read failure.
     pub fn statement_id(&self) -> Option<Uuid> {
         match self.failure.as_deref() {
@@ -368,7 +368,7 @@ impl Error {
     }
 
     /// Returns structured error details for a statement that terminated in
-    /// [`crate::StatementStatus::Failed`].
+    /// [`StatementStatus::Failed`](crate::StatementStatus::Failed).
     pub fn statement_details(&self) -> Option<&StatementErrorDetails> {
         match self.failure.as_deref() {
             Some(FailureDetails::Statement { details, .. }) => details.as_ref(),
@@ -384,7 +384,8 @@ impl Error {
         }
     }
 
-    /// Returns admission progress for a failed [`crate::AppendStream::send_all`] call.
+    /// Returns admission progress for a failed
+    /// [`AppendStream::send_all`](crate::AppendStream::send_all) call.
     ///
     /// Admitted rows remain owned by the stream. Use `flush()` or `shutdown()`
     /// to observe their delivery.
@@ -395,7 +396,8 @@ impl Error {
         }
     }
 
-    /// Returns the per-batch report for a failed [`crate::AppendWriter::write`] call.
+    /// Returns the per-batch report for a failed
+    /// [`AppendWriter::write`](crate::AppendWriter::write) call.
     pub fn append_write_report(&self) -> Option<&AppendWriteReport> {
         match self.progress.as_deref() {
             Some(AppendProgress::Write { report, .. }) => Some(report),
@@ -404,10 +406,11 @@ impl Error {
     }
 
     /// Returns the input slice index of the row that failed local encoding in
-    /// [`crate::AppendWriter::write`].
+    /// [`AppendWriter::write`](crate::AppendWriter::write).
     ///
-    /// For server-side row validation errors, map [`crate::AppendRowError::row_index`]
-    /// with [`crate::AppendRequestResult::input_index`].
+    /// For server-side row validation errors, map
+    /// [`AppendRowError::row_index`](crate::AppendRowError::row_index)
+    /// with [`AppendRequestResult::input_index`](crate::AppendRequestResult::input_index).
     pub fn append_input_index(&self) -> Option<usize> {
         match self.progress.as_deref() {
             Some(AppendProgress::Write { input_index, .. }) => *input_index,
@@ -415,8 +418,9 @@ impl Error {
         }
     }
 
-    /// Returns the terminal delivery report for a failed [`crate::AppendStream::flush`] or
-    /// [`crate::AppendStream::shutdown`].
+    /// Returns the terminal delivery report for a failed
+    /// [`AppendStream::flush`](crate::AppendStream::flush) or
+    /// [`AppendStream::shutdown`](crate::AppendStream::shutdown).
     pub fn append_delivery_report(&self) -> Option<&AppendDeliveryReport> {
         match self.progress.as_deref() {
             Some(AppendProgress::Delivery(report)) => Some(report),

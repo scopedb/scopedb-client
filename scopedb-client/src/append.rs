@@ -27,7 +27,8 @@ use crate::Table;
 use crate::client::MAX_APPEND_BODY_BYTES;
 use crate::client::MAX_APPEND_ROWS;
 
-/// Policy for handling a failed batch in [`crate::AppendWriter`] and [`crate::AppendStream`].
+/// Policy for handling a failed batch in [`AppendWriter`](crate::AppendWriter) and
+/// [`AppendStream`](crate::AppendStream).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendFailurePolicy {
@@ -38,7 +39,8 @@ pub enum AppendFailurePolicy {
     Continue,
 }
 
-/// Summary outcome of an [`crate::AppendWriteReport`] or [`crate::AppendDeliveryReport`].
+/// Summary outcome of an [`AppendWriteReport`](crate::AppendWriteReport) or
+/// [`AppendDeliveryReport`](crate::AppendDeliveryReport).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendDeliveryOutcome {

@@ -34,7 +34,7 @@ use crate::append::encode_record;
 
 /// Builder for an [`AppendWriter`].
 ///
-/// Defaults match [`crate::AppendStreamBuilder`]: 4 MiB target batches, up to
+/// Defaults match [`AppendStreamBuilder`](crate::AppendStreamBuilder): 4 MiB target batches, up to
 /// 200,000 rows per batch, 4 concurrent batches, [`AppendFailurePolicy::Stop`],
 /// and up to 8 retries of temporary [`AppendState::Rejected`] responses.
 #[derive(Debug, Clone)]
@@ -95,8 +95,8 @@ impl AppendWriterBuilder {
         self
     }
 
-    /// Overrides the client's [`crate::ClientBuilder::write_timeout`] with a positive per-attempt
-    /// timeout.
+    /// Overrides the client's [`ClientBuilder::write_timeout`](crate::ClientBuilder::write_timeout)
+    /// with a positive per-attempt timeout.
     pub fn attempt_timeout(mut self, timeout: Duration) -> Self {
         self.options.attempt_timeout = Some(timeout);
         self
@@ -135,7 +135,7 @@ impl AppendWriterBuilder {
 
 /// Reusable batch writer for finite slices of rows.
 ///
-/// Each [`Self::write`] call batches and settles its input slice independently.
+/// Each [`write`](Self::write) call batches and settles its input slice independently.
 /// Clones share the underlying HTTP connection pool.
 #[derive(Debug, Clone)]
 pub struct AppendWriter {
@@ -146,8 +146,8 @@ pub struct AppendWriter {
 
 /// Settlement report for one [`AppendWriter::write`] call.
 ///
-/// [`Self::batches`] are ordered by their [`AppendRequestResult::input_range`]
-/// and cover a contiguous prefix of the input slice; [`Self::unsubmitted`]
+/// [`batches`](Self::batches) are ordered by their [`AppendRequestResult::input_range`]
+/// and cover a contiguous prefix of the input slice; [`unsubmitted`](Self::unsubmitted)
 /// covers the remaining suffix.
 #[derive(Debug, Clone)]
 #[must_use]
@@ -185,7 +185,7 @@ impl AppendWriteReport {
     /// Returns the aggregate [`AppendDeliveryOutcome`] for this write call.
     ///
     /// [`AppendDeliveryOutcome::Partial`] may include batches with
-    /// [`AppendState::Unknown`]; inspect [`Self::batches`] before replaying
+    /// [`AppendState::Unknown`]; inspect [`batches`](Self::batches) before replaying
     /// failed ranges.
     pub fn outcome(&self) -> AppendDeliveryOutcome {
         if self.unsubmitted.is_empty() && self.batches.iter().all(|batch| batch.result.is_ok()) {
@@ -230,8 +230,9 @@ impl AppendRequestResult {
         self.retries
     }
 
-    /// Maps a zero-based [`crate::AppendRowError::row_index`] from this batch
-    /// to its index in the original input slice. Returns `None` for indexes outside this batch.
+    /// Maps a zero-based [`AppendRowError::row_index`](crate::AppendRowError::row_index) from this
+    /// batch to its index in the original input slice. Returns `None` for indexes outside this
+    /// batch.
     pub fn input_index(&self, row_index: u64) -> Option<usize> {
         let index = self
             .input_range
