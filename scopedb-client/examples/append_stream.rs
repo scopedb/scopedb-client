@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = match stream.shutdown().await {
         Ok(report) => report,
         Err(failure) => {
-            eprintln!("delivery: {:?}", failure.report());
+            eprintln!("delivery: {:?}", failure.append_delivery_report().unwrap());
             return Err(failure.into());
         }
     };

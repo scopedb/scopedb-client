@@ -33,7 +33,9 @@ fn ergonomic_client_builder_is_public() {
 
 #[test]
 fn structured_write_error_contract_is_public() {
-    let error = scopedb_client::Error::new(scopedb_client::ErrorKind::Unexpected, "example");
+    let error = scopedb_client::Client::builder("invalid endpoint")
+        .build()
+        .unwrap_err();
     let _details: Option<&scopedb_client::WriteErrorDetails> = error.write_details();
     assert_eq!(
         scopedb_client::WriteErrorReason::Timeout.to_string(),
@@ -73,4 +75,60 @@ fn application_api_surface_compiles(client: &scopedb_client::Client) {
         .max_batch_rows(100)
         .max_buffered_bytes(4096)
         .max_concurrent_batches(2);
+}
+
+#[tokio::test]
+async fn sdk_operations_compose_without_erasing_partial_progress() {
+    async fn write(client: &scopedb_client::Client) -> Result<(), scopedb_client::Error> {
+        let table = client.table("events");
+        let writer = table.append_writer().build()?;
+        let _report = writer.write(&[serde_json::json!([1])]).await?;
+        let stream = table.append_stream().build()?;
+        stream.send(&serde_json::json!({"id": 1})).await?;
+        stream.try_send(&serde_json::json!({"id": 3}))?;
+        stream.send_all([serde_json::json!({"id": 2})]).await?;
+        stream.flush().await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    let client = scopedb_client::Client::builder("http://127.0.0.1:0")
+        .build()
+        .unwrap();
+    let error = write(&client).await.unwrap_err();
+    let report = error.append_write_report().unwrap();
+    assert_eq!(report.unsubmitted(), 0..1);
+    assert!(report.batches().is_empty());
+    assert_eq!(error.append_input_index(), Some(0));
+}
+
+#[test]
+fn local_admission_conversion_preserves_details_and_native_sources() {
+    let error: scopedb_client::Error = scopedb_client::AppendTrySendError::RecordTooLarge {
+        bytes: 1025,
+        limit: 1024,
+    }
+    .into();
+    let cloned = error.clone();
+    assert!(matches!(
+        cloned.try_send_error(),
+        Some(scopedb_client::AppendTrySendError::RecordTooLarge {
+            bytes: 1025,
+            limit: 1024,
+        })
+    ));
+    assert_eq!(cloned.kind(), scopedb_client::ErrorKind::InvalidInput);
+    assert!(!cloned.is_retryable());
+    let source = serde_json::from_str::<serde_json::Value>("invalid JSON").unwrap_err();
+    let error: scopedb_client::Error =
+        scopedb_client::AppendTrySendError::Serialization(source).into();
+    assert!(matches!(
+        error.try_send_error(),
+        Some(scopedb_client::AppendTrySendError::Serialization(_))
+    ));
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .is::<serde_json::Error>()
+    );
 }

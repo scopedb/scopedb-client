@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 With an existing `events` table containing `id int` and `name string` columns:
 
 ```rust,no_run
-# async fn example(client: scopedb_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
 let stream = client.table("events")
     .append_stream()
     .build()?;

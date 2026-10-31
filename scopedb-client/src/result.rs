@@ -20,6 +20,7 @@ use std::str::FromStr;
 use crate::DataType;
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::protocol::ResultSetData;
 use crate::protocol::StatementResultSet;
 
@@ -209,7 +210,8 @@ impl ResultSet {
         let rows = self.raw_rows();
         if rows.len() != self.num_rows {
             return Err(Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::InvalidResponse,
+                ErrorOperation::DecodeResult,
                 format!(
                     "result row count mismatch: expected {}, got {}",
                     self.num_rows,
@@ -240,7 +242,8 @@ impl ResultSet {
             return Ok(());
         }
         Err(Error::new(
-            ErrorKind::Unexpected,
+            ErrorKind::InvalidResponse,
+            ErrorOperation::DecodeResult,
             format!(
                 "result row {index} field count mismatch: expected {expected}, got {}",
                 row.len()
@@ -257,7 +260,8 @@ impl ResultSet {
             .find(|field| !names.insert(field.name.as_str()))
         {
             return Err(Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::InvalidInput,
+                ErrorOperation::DecodeResult,
                 format!(
                     "cannot convert result to objects because column name {:?} is duplicated; use to_values instead",
                     field.name
@@ -275,18 +279,34 @@ fn parse_cell(value: Option<&str>, data_type: DataType) -> Result<Value, Error> 
 
     match data_type {
         DataType::Int => i64::from_str(value).map(Value::Int).map_err(|err| {
-            Error::new(ErrorKind::Unexpected, "failed to parse int value").set_source(err)
+            Error::new(
+                ErrorKind::InvalidResponse,
+                ErrorOperation::DecodeResult,
+                "failed to parse int value",
+            )
+            .set_source(err)
         }),
         DataType::UInt => u64::from_str(value).map(Value::UInt).map_err(|err| {
-            Error::new(ErrorKind::Unexpected, "failed to parse uint value").set_source(err)
+            Error::new(
+                ErrorKind::InvalidResponse,
+                ErrorOperation::DecodeResult,
+                "failed to parse uint value",
+            )
+            .set_source(err)
         }),
         DataType::Float => {
             let parsed = f64::from_str(value).map_err(|err| {
-                Error::new(ErrorKind::Unexpected, "failed to parse float value").set_source(err)
+                Error::new(
+                    ErrorKind::InvalidResponse,
+                    ErrorOperation::DecodeResult,
+                    "failed to parse float value",
+                )
+                .set_source(err)
             })?;
             if !parsed.is_finite() && !matches!(value, "NaN" | "inf" | "-inf") {
                 return Err(Error::new(
-                    ErrorKind::Unexpected,
+                    ErrorKind::InvalidResponse,
+                    ErrorOperation::DecodeResult,
                     "float value is outside the f64 range",
                 ));
             }
@@ -295,15 +315,30 @@ fn parse_cell(value: Option<&str>, data_type: DataType) -> Result<Value, Error> 
         DataType::Timestamp => jiff::Timestamp::from_str(value)
             .map(Value::Timestamp)
             .map_err(|err| {
-                Error::new(ErrorKind::Unexpected, "failed to parse timestamp value").set_source(err)
+                Error::new(
+                    ErrorKind::InvalidResponse,
+                    ErrorOperation::DecodeResult,
+                    "failed to parse timestamp value",
+                )
+                .set_source(err)
             }),
         DataType::Interval => jiff::SignedDuration::from_str(value)
             .map(Value::Interval)
             .map_err(|err| {
-                Error::new(ErrorKind::Unexpected, "failed to parse interval value").set_source(err)
+                Error::new(
+                    ErrorKind::InvalidResponse,
+                    ErrorOperation::DecodeResult,
+                    "failed to parse interval value",
+                )
+                .set_source(err)
             }),
         DataType::Boolean => bool::from_str(value).map(Value::Boolean).map_err(|err| {
-            Error::new(ErrorKind::Unexpected, "failed to parse boolean value").set_source(err)
+            Error::new(
+                ErrorKind::InvalidResponse,
+                ErrorOperation::DecodeResult,
+                "failed to parse boolean value",
+            )
+            .set_source(err)
         }),
         DataType::String => Ok(Value::String(value.to_string())),
         DataType::Binary => Ok(Value::Binary(value.to_string())),
@@ -311,7 +346,8 @@ fn parse_cell(value: Option<&str>, data_type: DataType) -> Result<Value, Error> 
         DataType::Object => Ok(Value::Object(value.to_string())),
         DataType::Any => Ok(Value::Any(value.to_string())),
         DataType::Null => Err(Error::new(
-            ErrorKind::Unexpected,
+            ErrorKind::InvalidResponse,
+            ErrorOperation::DecodeResult,
             "non-null cell returned for a null column",
         )),
     }
@@ -524,7 +560,7 @@ mod tests {
         );
         malformed.num_rows = 2;
         let error = malformed.to_values().unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Unexpected);
+        assert_eq!(error.kind(), ErrorKind::InvalidResponse);
     }
 
     #[test]

@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::ResultSet;
 use crate::StatementStatus;
 use crate::protocol::StatementRequest;
@@ -72,7 +73,8 @@ impl Statement {
             || self.max_estimated.is_some_and(|d| d.is_zero())
         {
             return Err(Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::SubmitStatement,
                 "statement duration limits must be positive",
             )
             .set_statement_id(self.statement_id));
@@ -108,12 +110,14 @@ impl Statement {
     /// Errors after submission retain [`Error::statement_id`] and never indicate
     /// that resubmitting is safe. Resume with [`Client::statement_handle`] instead.
     pub async fn execute(self) -> Result<ResultSet, Error> {
-        self.submit().await?.wait().await.map_err(|error| {
-            if error.is_retryable() {
-                error.set_persistent()
-            } else {
-                error
-            }
+        let mut handle = self
+            .submit()
+            .await
+            .map_err(|error| error.with_operation(ErrorOperation::ExecuteStatement))?;
+        handle.wait().await.map_err(|error| {
+            error
+                .with_operation(ErrorOperation::ExecuteStatement)
+                .after_submission()
         })
     }
 
@@ -190,14 +194,17 @@ impl StatementHandle {
         let max_delay = Duration::from_secs(1);
 
         loop {
-            self.refresh().await?;
+            self.refresh()
+                .await
+                .map_err(|error| error.with_operation(ErrorOperation::WaitStatement))?;
 
             if let Some(status) = self.snapshot.as_ref() {
                 match status {
                     StatementStatus::Finished(finished) => return Ok(finished.result_set()),
                     StatementStatus::Failed(failed) => {
                         return Err(Error::new(
-                            ErrorKind::StatementFailed,
+                            ErrorKind::from_statement_code(&failed.error.code),
+                            ErrorOperation::WaitStatement,
                             failed.error.message.clone(),
                         )
                         .set_statement_id(self.statement_id)
@@ -205,7 +212,8 @@ impl StatementHandle {
                     }
                     StatementStatus::Cancelled(cancelled) => {
                         return Err(Error::new(
-                            ErrorKind::StatementCancelled,
+                            ErrorKind::Cancelled,
+                            ErrorOperation::WaitStatement,
                             format!("statement {} was cancelled", cancelled.statement_id),
                         )
                         .set_statement_id(self.statement_id));

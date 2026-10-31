@@ -14,7 +14,7 @@ Update your dependency with `cargo add scopedb-client@0.4`, then follow the sect
 Append writes rows whose fields match an existing destination table. It does not take a ScopeQL transform. Move field renaming, conversion, filtering, and routing into your application before sending:
 
 ```rust,no_run
-# async fn example(client: scopedb_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
 let source = serde_json::json!({
     "ts": "2026-03-13T12:00:00Z",
     "name": "page_view",
@@ -100,7 +100,7 @@ println!("{:?}", result.into_objects()?);
 # }
 ```
 
-`cancel()` now returns the complete [`StatementStatus`](https://docs.rs/scopedb-client/latest/scopedb_client/enum.StatementStatus.html). A query can finish before cancellation takes effect. Pending or running statuses still need `wait()`; observed cancellation makes `wait()` return `ErrorKind::StatementCancelled`.
+`cancel()` now returns the complete [`StatementStatus`](https://docs.rs/scopedb-client/latest/scopedb_client/enum.StatementStatus.html). A query can finish before cancellation takes effect. Pending or running statuses still need `wait()`; observed cancellation makes `wait()` return `ErrorKind::Cancelled`.
 
 When matching status variants directly, read `failed.error` instead of `failed.message`. Cancelled statuses no longer carry a message. Read cached progress with `snapshot().map(StatementStatus::progress)` and match `StatementStatus::Finished` for a cached result.
 

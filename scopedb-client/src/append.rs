@@ -22,6 +22,7 @@ use crate::AppendRowsResult;
 use crate::AppendState;
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::Table;
 use crate::client::MAX_APPEND_BODY_BYTES;
 use crate::client::MAX_APPEND_ROWS;
@@ -139,7 +140,11 @@ pub fn validate_positive(name: &str, value: usize) -> Result<(), Error> {
 }
 
 pub fn config_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::ConfigInvalid, message)
+    Error::new(
+        ErrorKind::InvalidInput,
+        ErrorOperation::BuildAppendWriter,
+        message,
+    )
 }
 
 #[derive(Debug)]
@@ -152,16 +157,20 @@ pub enum RecordError {
 impl From<RecordError> for Error {
     fn from(error: RecordError) -> Self {
         match error {
-            RecordError::Serialization(error) => {
-                Error::new(ErrorKind::Unexpected, "failed to serialize append row")
-                    .set_source(error)
-            }
+            RecordError::Serialization(error) => Error::new(
+                ErrorKind::InvalidInput,
+                ErrorOperation::AdmitRows,
+                "failed to serialize append row",
+            )
+            .set_source(error),
             RecordError::InvalidRecord => Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::InvalidInput,
+                ErrorOperation::AdmitRows,
                 "append row must serialize to a JSON object",
             ),
             RecordError::RecordTooLarge { bytes, limit } => Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::InvalidInput,
+                ErrorOperation::AdmitRows,
                 format!("append row is {bytes} bytes, exceeding the {limit}-byte limit"),
             ),
         }
@@ -213,11 +222,7 @@ pub async fn append_batch(
             .is_some_and(|details| details.status == AppendState::Unknown);
         let retryable = append_retryable(&error, options.retry.retry_unknown);
         if !retryable || retries >= options.retry.max_retries {
-            let error = if retryable {
-                error.with_context("retries", retries).set_persistent()
-            } else {
-                error
-            };
+            let error = error.with_retry_history(retries, retryable);
             return (Err(preserve_unknown_outcome(error, saw_unknown)), retries);
         }
         let retry_delay = retry_delay(backoff, &error, options.retry.max_backoff);
@@ -234,7 +239,7 @@ fn append_retryable(error: &Error, retry_unknown: bool) -> bool {
         return false;
     }
     match error.append_details().map(|details| details.status) {
-        Some(AppendState::Rejected) => error.is_temporary(),
+        Some(AppendState::Rejected) => error.is_retryable(),
         Some(AppendState::Unknown) if retry_unknown => error.http_status().is_none_or(|status| {
             status.is_success()
                 || status == reqwest::StatusCode::REQUEST_TIMEOUT
@@ -266,7 +271,6 @@ fn preserve_unknown_outcome(error: Error, saw_unknown: bool) -> Error {
     error
         .with_context("delivery", "an earlier append attempt may have committed")
         .set_append_details(details)
-        .set_persistent()
 }
 
 fn next_backoff(current: Duration, max_backoff: Duration) -> Duration {
@@ -307,14 +311,14 @@ mod tests {
 
     #[test]
     fn retry_after_is_honored_and_capped() {
-        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
+        let error = Error::new(ErrorKind::Unavailable, ErrorOperation::AdmitRows, "busy")
             .set_retry_after(Duration::from_secs(30));
         assert_eq!(
             retry_delay(Duration::from_millis(100), &error, Duration::from_secs(5)),
             Duration::from_secs(5)
         );
 
-        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
+        let error = Error::new(ErrorKind::Unavailable, ErrorOperation::AdmitRows, "busy")
             .set_retry_after(Duration::from_millis(200));
         assert_eq!(
             retry_delay(Duration::from_secs(1), &error, Duration::from_secs(5)),

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
 use std::future::Future;
 use std::future::poll_fn;
 use std::ops::Range;
@@ -27,6 +26,7 @@ use crate::AppendFailurePolicy;
 use crate::AppendRowsResult;
 use crate::AppendState;
 use crate::Error;
+use crate::ErrorOperation;
 use crate::Table;
 use crate::append::AppendOptions;
 use crate::append::append_batch;
@@ -105,8 +105,12 @@ impl AppendWriterBuilder {
 
     /// Validates configuration without starting background tasks or making requests.
     pub fn build(self) -> Result<AppendWriter, Error> {
-        self.options.validate()?;
-        self.table.validate_append()?;
+        self.options
+            .validate()
+            .map_err(|error| error.with_operation(ErrorOperation::BuildAppendWriter))?;
+        self.table
+            .validate_append()
+            .map_err(|error| error.with_operation(ErrorOperation::BuildAppendWriter))?;
         Ok(AppendWriter {
             table: self.table,
             options: self.options,
@@ -225,60 +229,6 @@ impl AppendRequestResult {
     }
 }
 
-/// A finite write that did not confirm every input row.
-///
-/// The report includes every scheduled batch, including successful batches.
-/// Replaying the entire input can duplicate those rows and unknown outcomes.
-#[derive(Debug, Clone)]
-pub struct AppendWriteError {
-    cause: Box<Error>,
-    input_index: Option<usize>,
-    report: AppendWriteReport,
-}
-
-impl AppendWriteError {
-    /// Returns the local encoding error, or a failed batch's final error.
-    /// This is one representative failure, not the outcome of every input row.
-    /// Inspect [`Self::report`] even when this cause is a local input error;
-    /// previously scheduled requests may have committed or have unknown outcomes.
-    pub fn cause(&self) -> &Error {
-        &self.cause
-    }
-
-    /// Identifies a local serialization or row-validation failure, when present.
-    /// That row belongs to the unsubmitted suffix. Remote row errors are mapped
-    /// through [`AppendRequestResult::input_index`] instead.
-    pub fn input_index(&self) -> Option<usize> {
-        self.input_index
-    }
-
-    pub fn report(&self) -> &AppendWriteReport {
-        &self.report
-    }
-
-    pub fn into_report(self) -> AppendWriteReport {
-        self.report
-    }
-}
-
-impl fmt::Display for AppendWriteError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "finite append confirmed {} of {} input rows: {}",
-            self.report.committed_rows(),
-            self.report.input_rows,
-            self.cause
-        )
-    }
-}
-
-impl std::error::Error for AppendWriteError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.cause.as_ref())
-    }
-}
-
 type PendingBatch = Pin<Box<dyn Future<Output = AppendRequestResult> + Send>>;
 
 // Poll requests in the caller's task so cancellation drops the requests and
@@ -314,7 +264,7 @@ impl AppendWriter {
     /// than the total input size; result metadata grows with the number of batches.
     ///
     /// ```no_run
-    /// # async fn example(client: scopedb_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
     /// let writer = client.table("events").append_writer().build()?;
     /// let rows = [serde_json::json!({"id": 1}), serde_json::json!({"id": 2})];
     /// let report = writer.write(&rows).await?;
@@ -322,10 +272,7 @@ impl AppendWriter {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn write<T: Serialize>(
-        &self,
-        rows: &[T],
-    ) -> Result<AppendWriteReport, AppendWriteError> {
+    pub async fn write<T: Serialize>(&self, rows: &[T]) -> Result<AppendWriteReport, Error> {
         let mut report = AppendWriteReport {
             input_rows: rows.len(),
             batches: Vec::new(),
@@ -404,11 +351,7 @@ impl AppendWriter {
         report.batches.sort_by_key(|batch| batch.input_range.start);
         report.unsubmitted = submitted..rows.len();
         if let Some((index, cause)) = local_failure {
-            return Err(AppendWriteError {
-                cause: Box::new(cause),
-                input_index: Some(index),
-                report,
-            });
+            return Err(cause.with_append_write(report, Some(index)));
         }
         // Prefer an ambiguous failure as the headline error; every other failure
         // remains available in the report for selective reconciliation.
@@ -429,11 +372,7 @@ impl AppendWriter {
             })
             .cloned();
         match cause {
-            Some(cause) => Err(AppendWriteError {
-                cause: Box::new(cause),
-                input_index: None,
-                report,
-            }),
+            Some(cause) => Err(cause.with_append_write(report, None)),
             None => Ok(report),
         }
     }
@@ -452,6 +391,7 @@ mod tests {
 
     use super::*;
     use crate::Client;
+    use crate::ErrorKind;
     use crate::test_support::MockResponse;
     use crate::test_support::MockServer;
 
@@ -460,6 +400,44 @@ mod tests {
             422,
             r#"{"message":"bad id","code":"invalid_schema","details":{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"invalid integer"}],"row_errors_truncated":true}}"#,
         )
+    }
+
+    #[tokio::test]
+    async fn aggregate_write_keeps_unknown_delivery_beside_a_local_input_failure() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request).without_ack());
+        let writer = server
+            .client()
+            .table("events")
+            .append_writer()
+            .max_batch_rows(1)
+            .max_concurrent_batches(2)
+            .max_retries(0)
+            .build()
+            .unwrap();
+        async fn write(writer: &AppendWriter) -> Result<(), Error> {
+            let _report = writer.write(&[json!({"id": 0}), json!([1])]).await?;
+            Ok(())
+        }
+        let error = write(&writer).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Incomplete);
+        assert_eq!(error.operation(), ErrorOperation::WriteRows);
+        assert_eq!(error.append_input_index(), Some(1));
+        assert!(!error.is_retryable());
+        let report = error.append_write_report().unwrap();
+        assert_eq!(report.outcome(), AppendDeliveryOutcome::Unknown);
+        assert_eq!(report.unsubmitted(), 1..2);
+        assert_eq!(report.batches().len(), 1);
+        assert_eq!(
+            report.batches()[0]
+                .result()
+                .as_ref()
+                .unwrap_err()
+                .append_details()
+                .unwrap()
+                .status,
+            AppendState::Unknown
+        );
+        assert_eq!(server.requests().len(), 1);
     }
 
     #[tokio::test]
@@ -506,7 +484,7 @@ mod tests {
             .unwrap();
         let rows: Vec<_> = (0..6).map(|id| json!({"id": id})).collect();
         let error = writer.write(&rows).await.unwrap_err();
-        let report = error.report();
+        let report = error.append_write_report().unwrap();
         assert_eq!(report.input_rows(), 6);
         assert_eq!(report.committed_rows(), 4);
         assert_eq!(report.outcome(), AppendDeliveryOutcome::Partial);
@@ -558,9 +536,9 @@ mod tests {
             .unwrap();
         let rows: Vec<_> = (0..7).map(|id| json!({"id": id})).collect();
         let error = writer.write(&rows).await.unwrap_err();
-        assert_eq!(error.input_index(), None);
-        assert_eq!(error.cause().code(), Some("invalid_schema"));
-        let report = error.into_report();
+        assert_eq!(error.append_input_index(), None);
+        assert_eq!(error.code(), Some("invalid_schema"));
+        let report = error.append_write_report().unwrap();
         assert_eq!(report.committed_rows(), 2);
         assert_eq!(report.outcome(), AppendDeliveryOutcome::Partial);
         assert_eq!(report.batches().len(), 2);
@@ -607,9 +585,9 @@ mod tests {
                 })
                 .collect();
             let error = writer.write(&rows).await.unwrap_err();
-            assert_eq!(error.input_index(), Some(3));
-            assert!(error.cause().message().contains("serialize"));
-            let report = error.report();
+            assert_eq!(error.append_input_index(), Some(3));
+            assert!(error.message().contains("serialize"));
+            let report = error.append_write_report().unwrap();
             assert_eq!(report.committed_rows(), 2);
             assert_eq!(report.batches().len(), 1);
             assert_eq!(report.batches()[0].input_range(), 0..2);
@@ -633,10 +611,13 @@ mod tests {
             json!({"data": "x".repeat(crate::client::MAX_APPEND_BODY_BYTES)}),
         ] {
             let error = writer.write(&[row, json!({"id": 2})]).await.unwrap_err();
-            assert_eq!(error.input_index(), Some(0));
-            assert!(error.report().batches().is_empty());
-            assert_eq!(error.report().unsubmitted(), 0..2);
-            assert_eq!(error.report().outcome(), AppendDeliveryOutcome::Failed);
+            assert_eq!(error.append_input_index(), Some(0));
+            assert!(error.append_write_report().unwrap().batches().is_empty());
+            assert_eq!(error.append_write_report().unwrap().unsubmitted(), 0..2);
+            assert_eq!(
+                error.append_write_report().unwrap().outcome(),
+                AppendDeliveryOutcome::Failed
+            );
         }
         assert!(server.requests().is_empty());
     }
@@ -752,14 +733,20 @@ mod tests {
                 .write(&[json!({"id": 0}), json!({"id": 1})])
                 .await
                 .unwrap_err();
-            assert_eq!(error.report().outcome(), AppendDeliveryOutcome::Unknown);
-            assert_eq!(error.report().unsubmitted(), 2..2);
-            assert_eq!(error.report().batches()[0].input_range(), 0..2);
             assert_eq!(
-                error.cause().append_details().unwrap().status,
-                AppendState::Unknown
+                error.append_write_report().unwrap().outcome(),
+                AppendDeliveryOutcome::Unknown
             );
-            assert_eq!(error.report().batches()[0].retries(), usize::from(replay));
+            assert_eq!(error.append_write_report().unwrap().unsubmitted(), 2..2);
+            assert_eq!(
+                error.append_write_report().unwrap().batches()[0].input_range(),
+                0..2
+            );
+            assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
+            assert_eq!(
+                error.append_write_report().unwrap().batches()[0].retries(),
+                usize::from(replay)
+            );
             assert_eq!(server.requests().len(), if replay { 2 } else { 1 });
         }
     }
@@ -810,7 +797,7 @@ mod tests {
         ] {
             assert_eq!(
                 builder.build().unwrap_err().kind(),
-                crate::ErrorKind::ConfigInvalid
+                crate::ErrorKind::InvalidInput
             );
         }
     }
@@ -896,7 +883,7 @@ mod lifecycle_tests {
             );
             gate.release();
             let error = write.await.unwrap_err();
-            let report = error.report();
+            let report = error.append_write_report().unwrap();
             assert_eq!(report.outcome(), AppendDeliveryOutcome::Partial);
             assert_eq!(report.committed_rows(), 1);
             assert_eq!(report.batches().len(), 2);

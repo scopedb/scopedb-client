@@ -6,22 +6,18 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### Breaking Changes
 
-* `AppendStream::flush()` and `shutdown()` return `AppendDeliveryError` on failure. Read `report()` for the settled interval, including partial successes, and `cause()` for SDK diagnostics. Use `into_cause()` when an existing error path needs an owned `Error`. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).
-* `AppendStream::send_all()` returns `AppendAdmissionError` on failure. Read `accepted_rows()` for the prefix admitted by that call and `cause()` for the underlying SDK error; use `into_cause()` when an existing error path needs an owned `Error`. Admission does not confirm remote delivery; settle accepted rows with `flush()` or `shutdown()` before reconciliation.
+* Replace operation-specific `ErrorKind` variants with actionable failure categories and a separate `ErrorOperation`. Use `is_retryable()` for the current operation and inspect typed commit and progress data before replaying writes. Error construction, context mutation, and retry-state setters are internal; application-specific failures belong to application error types. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).
 
 ### New Features
 
 * Expose `Error::catalog_outcome()` with `CatalogMutationOutcome` to distinguish known rejections from possibly committed mutations without parsing error codes. Gateway and timeout responses retain an unknown outcome even when they include a structured error code.
 * Allocate a statement ID before submission and retain it on submission failures, including lost or malformed responses. Use `Client::statement_handle(error.statement_id().unwrap())` to inspect the existing execution; `with_statement_id()` can still supply an application-owned ID.
-* Preserve unreported stream settlement when the background worker terminates unexpectedly. Failed barriers return a stable terminal report to concurrent waiters, with unresolved rows classified as unknown.
+* Expose partial admission, finite-write reports, and failed delivery intervals through typed accessors on `Error`, preserving them when SDK operations compose through `?`. Preserve unreported stream settlement when the background worker terminates unexpectedly. Failed barriers return a stable terminal report to concurrent waiters, with unresolved rows classified as unknown.
 * Add reusable `AppendWriter` instances through `Table::append_writer()` with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix. `AppendWriteReport` describes one write call and `AppendRequestResult` identifies each request within it.
-
-### Bug Fixes
-
-* Reject attempts to replace an existing error source in release builds, matching the documented `Error::set_source()` panic contract.
 
 ### Improvements
 
+* Keep transient failures, retry exhaustion, and unknown delivery outcomes separate when deciding retries and circuit availability. Preserve raw server codes without synthesizing codes for client-side uncertainty; use typed Catalog outcomes to reconcile failed mutations.
 * Preserve native result-cell parse errors through `std::error::Error::source()` while retaining row and column diagnostics.
 
 ## v0.4.2 (2026-10-27)

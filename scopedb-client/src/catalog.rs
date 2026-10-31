@@ -25,6 +25,7 @@ use crate::Client;
 use crate::DataType;
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::protocol::apply_response_metadata;
 use crate::protocol::decode_http_error;
 
@@ -259,8 +260,8 @@ impl Catalog {
 /// A selected subtree. Names are unescaped identifiers. Apply replaces the whole
 /// definition; it is not a patch. Mutations never retry automatically.
 ///
-/// An interrupted or malformed mutation response reports
-/// `catalog_commit_outcome_unknown`. Read the current state before deciding
+/// An interrupted or malformed mutation response retains
+/// [`CatalogMutationOutcome::Unknown`]. Read the current state before deciding
 /// whether to retry. Typed definitions reject unsupported fields; [`Self::raw`]
 /// preserves them, including arbitrary-precision JSON numbers.
 #[derive(Debug, Clone)]
@@ -310,7 +311,12 @@ impl<T> CatalogResource<T> {
         }
         if let Some(etag) = options.if_match {
             let etag = reqwest::header::HeaderValue::from_str(&etag).map_err(|e| {
-                Error::new(ErrorKind::ConfigInvalid, "invalid If-Match header").set_source(e)
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    ErrorOperation::ApplyCatalog,
+                    "invalid If-Match header",
+                )
+                .set_source(e)
             })?;
             request = request.header(reqwest::header::IF_MATCH, etag);
         }
@@ -322,15 +328,32 @@ impl<T> CatalogResource<T> {
         let mut response_metadata = None;
         let read_response = async {
             let response = request.send().await.map_err(|e| {
-                catalog_transport_error(writing, "failed to send catalog request").set_source(e)
+                catalog_error(
+                    writing,
+                    if e.is_timeout() {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Unavailable
+                    },
+                    "failed to send catalog request",
+                )
+                .set_source(e)
             })?;
             let status = response.status();
             let headers = response.headers().clone();
             response_metadata = Some((status, headers.clone()));
             let bytes = response.bytes().await.map_err(|e| {
                 apply_response_metadata(
-                    catalog_transport_error(writing, "failed to read catalog response")
-                        .set_source(e),
+                    catalog_error(
+                        writing,
+                        if e.is_timeout() {
+                            ErrorKind::Timeout
+                        } else {
+                            ErrorKind::Unavailable
+                        },
+                        "failed to read catalog response",
+                    )
+                    .set_source(e),
                     status,
                     &headers,
                 )
@@ -341,8 +364,9 @@ impl<T> CatalogResource<T> {
             match tokio::time::timeout(self.client.write_timeout(), read_response).await {
                 Ok(result) => result?,
                 Err(source) => {
-                    let error = catalog_transport_error(writing, "catalog request timed out")
-                        .set_source(source);
+                    let error =
+                        catalog_error(writing, ErrorKind::Timeout, "catalog request timed out")
+                            .set_source(source);
                     return Err(match response_metadata {
                         Some((status, headers)) => apply_response_metadata(error, status, &headers),
                         None => error,
@@ -353,7 +377,16 @@ impl<T> CatalogResource<T> {
             read_response.await?
         };
         if !status.is_success() {
-            let error = decode_http_error(status, &headers, &bytes, ErrorKind::CatalogFailed);
+            let error = decode_http_error(
+                status,
+                &headers,
+                &bytes,
+                match method {
+                    Method::GET => ErrorOperation::ReadCatalog,
+                    Method::DELETE => ErrorOperation::DeleteCatalog,
+                    _ => ErrorOperation::ApplyCatalog,
+                },
+            );
             return Err(if writing {
                 // A coded client rejection establishes failure. A gateway or
                 // timeout response can follow a commit, even when it has a code.
@@ -365,12 +398,7 @@ impl<T> CatalogResource<T> {
                 } else {
                     CatalogMutationOutcome::Unknown
                 };
-                let error = error.set_catalog_outcome(outcome).set_persistent();
-                if outcome == CatalogMutationOutcome::Unknown && error.code().is_none() {
-                    error.set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
-                } else {
-                    error
-                }
+                error.set_catalog_outcome(outcome)
             } else {
                 error
             });
@@ -381,7 +409,11 @@ impl<T> CatalogResource<T> {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 apply_response_metadata(
-                    catalog_response_error(writing, "catalog response is missing ETag"),
+                    catalog_error(
+                        writing,
+                        ErrorKind::InvalidResponse,
+                        "catalog response is missing ETag",
+                    ),
                     status,
                     &headers,
                 )
@@ -389,7 +421,12 @@ impl<T> CatalogResource<T> {
             .to_string();
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             apply_response_metadata(
-                catalog_response_error(writing, "invalid catalog response").set_source(e),
+                catalog_error(
+                    writing,
+                    ErrorKind::InvalidResponse,
+                    "invalid catalog response",
+                )
+                .set_source(e),
                 status,
                 &headers,
             )
@@ -404,15 +441,20 @@ impl<T> CatalogResource<T> {
                         .is_some_and(serde_json::Value::is_boolean)))
         {
             return Err(apply_response_metadata(
-                catalog_response_error(writing, "invalid catalog response"),
+                catalog_error(
+                    writing,
+                    ErrorKind::InvalidResponse,
+                    "invalid catalog response",
+                ),
                 status,
                 &headers,
             ));
         }
         let result = serde_json::from_value(value).map_err(|e| {
             apply_response_metadata(
-                catalog_response_error(
+                catalog_error(
                     writing,
+                    ErrorKind::InvalidResponse,
                     "cannot decode catalog definition; use raw() to retain unsupported fields",
                 )
                 .set_source(e),
@@ -429,7 +471,8 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
     pub async fn get(&self) -> Result<CatalogSnapshot<T>, Error> {
         let (definition, etag) = self
             .request(Method::GET, None, CatalogOptions::default())
-            .await?;
+            .await
+            .map_err(|error| error.with_operation(ErrorOperation::ReadCatalog))?;
         Ok(CatalogSnapshot { definition, etag })
     }
 
@@ -478,13 +521,16 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
     ) -> Result<CatalogResult<T>, Error> {
         let body = serde_json::to_vec(definition).map_err(|e| {
             Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::ApplyCatalog,
                 "failed to serialize catalog definition",
             )
             .set_source(e)
         })?;
-        let (mut result, etag): (CatalogResult<T>, _) =
-            self.request(Method::PUT, Some(body), options).await?;
+        let (mut result, etag): (CatalogResult<T>, _) = self
+            .request(Method::PUT, Some(body), options)
+            .await
+            .map_err(|error| error.with_operation(ErrorOperation::ApplyCatalog))?;
         result.etag = etag;
         Ok(result)
     }
@@ -494,33 +540,25 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
     pub async fn delete(&self, options: CatalogOptions) -> Result<CatalogResult<T>, Error> {
         if self.path.len() == 1 {
             return Err(Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::DeleteCatalog,
                 "the root catalog does not support DELETE; apply an empty document instead",
             ));
         }
-        let (mut result, etag): (CatalogResult<T>, _) =
-            self.request(Method::DELETE, None, options).await?;
+        let (mut result, etag): (CatalogResult<T>, _) = self
+            .request(Method::DELETE, None, options)
+            .await
+            .map_err(|error| error.with_operation(ErrorOperation::DeleteCatalog))?;
         result.etag = etag;
         Ok(result)
     }
 }
 
-fn catalog_transport_error(writing: bool, message: &str) -> Error {
-    let error = catalog_response_error(writing, message);
+fn catalog_error(writing: bool, kind: ErrorKind, message: &str) -> Error {
+    let error = Error::new(kind, ErrorOperation::ApplyCatalog, message)
+        .with_transient_failure(matches!(kind, ErrorKind::Unavailable | ErrorKind::Timeout));
     if writing {
-        error
-    } else {
-        error.set_temporary()
-    }
-}
-
-fn catalog_response_error(writing: bool, message: &str) -> Error {
-    let error = Error::new(ErrorKind::CatalogFailed, message);
-    if writing {
-        error
-            .set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
-            .set_catalog_outcome(CatalogMutationOutcome::Unknown)
-            .set_persistent()
+        error.set_catalog_outcome(CatalogMutationOutcome::Unknown)
     } else {
         error
     }
