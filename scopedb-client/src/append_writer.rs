@@ -171,6 +171,8 @@ impl AppendWriteReport {
     }
 
     /// Summarizes committed, failed, unknown and unsubmitted input rows.
+    /// Partial can include unknown outcomes. Inspect each batch before deciding
+    /// which input can be replayed; the summary alone cannot establish that.
     pub fn outcome(&self) -> AppendDeliveryOutcome {
         if self.unsubmitted.is_empty() && self.batches.iter().all(|batch| batch.result.is_ok()) {
             AppendDeliveryOutcome::Ok
@@ -236,6 +238,9 @@ pub struct AppendWriteError {
 
 impl AppendWriteError {
     /// Returns the local encoding error, or a failed batch's final error.
+    /// This is one representative failure, not the outcome of every input row.
+    /// Inspect [`Self::report`] even when this cause is a local input error;
+    /// previously scheduled requests may have committed or have unknown outcomes.
     pub fn cause(&self) -> &Error {
         &self.cause
     }

@@ -64,7 +64,9 @@ pub struct AppendRowError {
     pub message: String,
 }
 
-/// Structured failure details returned by the table append API.
+/// Table-append failure details. When exposed through [`Error::append_details`],
+/// status includes uncertainty from earlier retry attempts; row diagnostics
+/// remain relative to the last failed response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
     pub status: AppendState,

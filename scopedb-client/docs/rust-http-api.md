@@ -91,4 +91,6 @@ The JSON result format encodes cells as strings or null, with field metadata pro
 
 HTTP errors use `{ "code": "...", "message": "...", "details": ... }`. `Error::code()` and `details()` preserve unknown codes and structured details. `http_status()`, `request_id()`, and `retry_after()` expose transport diagnostics. Failed statements additionally expose `statement_details()`; append failures expose `append_details()`.
 
+After append retries, raw server details and HTTP diagnostics describe the last failed attempt, while `append_details().status` retains uncertainty across every attempt. An unknown attempt followed by a rejection still has an unknown overall outcome, even though `details()["status"]` can be `"rejected"`. `is_retryable()` expresses the current operation's retry policy; it does not establish whether rows committed. A finite write's headline cause represents one failure: always inspect its report to distinguish successful batches, known rejections, unknown outcomes, and unsubmitted input. A `Partial` aggregate can include unknown outcomes.
+
 The legacy transform Ingest API is removed. Shape events before appending, or append raw events and execute a separate ScopeQL transformation. See [Upgrade from 0.3 to 0.4](migration-0.4.md#replace-ingest-with-append).

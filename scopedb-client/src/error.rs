@@ -160,6 +160,11 @@ impl fmt::Display for ErrorStatus {
 /// timeout. A timed-out write may already have committed; reconcile it before
 /// replaying.
 ///
+/// HTTP diagnostics and raw [`Self::details`] describe the response retained
+/// from the last failed attempt. [`Self::append_details`] describes what is
+/// known about delivery across all attempts: a later rejection cannot rule out
+/// an earlier commit. Retry classification is separate from delivery outcome.
+///
 /// [`Self::is_retryable`] describes the failed operation. For a query that was
 /// already submitted, resume its [`Self::statement_id`] through
 /// [`crate::Client::statement_handle`] instead of submitting another query.
@@ -345,7 +350,10 @@ impl Error {
         self.write_details.as_ref()
     }
 
-    /// Return structured table-append failure details, when available.
+    /// Returns table-append failure details across the operation's attempts.
+    /// An earlier unknown attempt keeps the status Unknown even if the last
+    /// response rejected the request. Row errors still describe that last response;
+    /// use [`Self::details`] for its original, unmodified server payload.
     pub fn append_details(&self) -> Option<&AppendErrorDetails> {
         self.append_details.as_ref()
     }
@@ -391,7 +399,9 @@ impl Error {
         self.kind
     }
 
-    /// Returns the server error code, including codes introduced by newer servers.
+    /// Returns the retained server error code, including codes introduced by newer
+    /// servers. After retries this describes the last failed attempt, not the
+    /// delivery outcome across attempts.
     pub fn code(&self) -> Option<&str> {
         self.api_error
             .as_deref()
@@ -400,6 +410,9 @@ impl Error {
     }
 
     /// Returns the original structured server details, when provided.
+    /// After retries these describe the last failed response. They are not
+    /// rewritten when an earlier unknown attempt makes the overall append
+    /// outcome uncertain; use [`Self::append_details`] for that conclusion.
     pub fn details(&self) -> Option<&serde_json::Value> {
         self.api_error
             .as_deref()
@@ -433,7 +446,9 @@ impl Error {
             .and_then(|metadata| metadata.retry_after)
     }
 
-    /// Return whether retrying this operation is currently appropriate.
+    /// Returns whether retrying this operation is currently appropriate.
+    /// This is a policy decision, not a commit acknowledgement: false can mean
+    /// a permanent rejection, an exhausted retry budget, or an unknown outcome.
     /// For statement handles, retry on the same handle. Errors from `query()` or
     /// `execute()` after submission never indicate that resubmitting is safe.
     pub fn is_retryable(&self) -> bool {
