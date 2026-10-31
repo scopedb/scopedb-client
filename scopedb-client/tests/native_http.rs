@@ -22,6 +22,7 @@ use scopedb_client::CatalogMutationOutcome;
 use scopedb_client::CatalogOptions;
 use scopedb_client::Client;
 use scopedb_client::ErrorKind;
+use scopedb_client::ErrorOperation;
 use scopedb_client::StatementEstimatedProgress;
 use scopedb_client::StatementStatus;
 use serde_json::Value;
@@ -121,7 +122,8 @@ fn serve_responses(
 
 #[tokio::test]
 async fn query_poll_failures_resume_the_existing_statement() {
-    for truncated in [false, true] {
+    for failure_status in [200, 429, 503] {
+        let truncated = failure_status == 200;
         let id = uuid::Uuid::now_v7();
         let running = json!({"status":"running","statement_id":id,"created_at":"2026-10-23T00:00:00Z","progress":StatementEstimatedProgress::default()});
         let mut finished = running.clone();
@@ -130,7 +132,7 @@ async fn query_poll_failures_resume_the_existing_statement() {
         let failure = if truncated {
             (200, finished.to_string())
         } else {
-            (503, json!({"code":"unavailable","message":"status unavailable","request_id":"poll-request","retryable":true,"details":{"reason":"busy"}}).to_string())
+            (failure_status, json!({"code":"unavailable","message":"status unavailable","request_id":"poll-request","retryable":true,"details":{"reason":"busy"}}).to_string())
         };
         let (client, task) = serve_responses(
             vec![
@@ -148,11 +150,9 @@ async fn query_poll_failures_resume_the_existing_statement() {
             .await
             .unwrap_err();
         assert!(!error.is_retryable());
+        assert_eq!(error.operation(), ErrorOperation::ExecuteStatement);
         assert_eq!(error.statement_id(), Some(id));
-        assert_eq!(
-            error.http_status().unwrap().as_u16(),
-            if truncated { 200 } else { 503 }
-        );
+        assert_eq!(error.http_status().unwrap().as_u16(), failure_status);
         if truncated {
             assert!(std::error::Error::source(&error).is_some());
         } else {
@@ -239,7 +239,7 @@ async fn ambiguous_statement_submissions_are_not_retryable() {
                 statement = statement.with_statement_id(id);
             }
             let error = statement.submit().await.unwrap_err();
-            assert!(error.is_persistent(), "{error:?}");
+            assert!(!error.is_retryable(), "{error:?}");
             assert!(!error.is_retryable());
             let submitted_id = error.statement_id().unwrap();
             if let Some(id) = id {
@@ -375,7 +375,7 @@ async fn malformed_mutation_responses_keep_the_commit_outcome_unknown() {
             })
             .await
             .unwrap_err();
-        assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+        assert_eq!(error.code(), None);
         assert_eq!(
             error.catalog_outcome(),
             Some(CatalogMutationOutcome::Unknown)
@@ -421,7 +421,7 @@ async fn cancellation_retains_full_terminal_snapshots() {
             }
             StatementStatus::Cancelled(_) => {
                 let error = handle.wait().await.unwrap_err();
-                assert_eq!(error.kind(), ErrorKind::StatementCancelled);
+                assert_eq!(error.kind(), ErrorKind::Cancelled);
                 assert_eq!(error.statement_id(), Some(handle.statement_id()));
             }
             _ => panic!("expected terminal state"),
@@ -447,7 +447,7 @@ async fn dot_segments_cannot_turn_a_table_delete_into_a_parent_delete() {
             })
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ConfigInvalid);
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 }
 
@@ -476,7 +476,7 @@ async fn typed_catalog_rejects_unknown_fields_at_every_definition_level() {
             .insert("future_option".into(), json!({"enabled":true}));
         let (client, task) = server(vec![(200, future.to_string())]);
         let error = client.catalog().get().await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::CatalogFailed);
+        assert_eq!(error.kind(), ErrorKind::InvalidResponse);
         assert!(error.message().contains("raw()"));
         assert!(format!("{error:?}").contains("future_option"));
         assert_eq!(task.join().unwrap().len(), 1);
@@ -494,7 +494,7 @@ async fn catalog_requires_etag_and_preserves_ambiguous_mutations() {
         .apply(&json!({"name":"events"}), CatalogOptions::default())
         .await
         .unwrap_err();
-    assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(error.code(), None);
     assert_eq!(
         error.catalog_outcome(),
         Some(CatalogMutationOutcome::Unknown)
@@ -516,14 +516,7 @@ async fn catalog_requires_etag_and_preserves_ambiguous_mutations() {
             })
             .await
             .unwrap_err();
-        assert_eq!(
-            error.code(),
-            if dry_run {
-                None
-            } else {
-                Some("catalog_commit_outcome_unknown")
-            }
-        );
+        assert_eq!(error.code(), None);
         if !dry_run {
             assert!(!error.is_retryable());
         }
@@ -569,7 +562,7 @@ async fn cancellation_can_remain_running_then_fail_without_losing_details() {
         StatementStatus::Running(_)
     ));
     let error = handle.wait().await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::StatementFailed);
+    assert_eq!(error.kind(), ErrorKind::Internal);
     assert_eq!(error.code(), Some("future_failure"));
     assert_eq!(error.message(), "original failure");
     assert_eq!(
@@ -647,7 +640,7 @@ async fn catalog_write_budget_preserves_a_shorter_custom_http_timeout() {
     .await
     .unwrap()
     .unwrap_err();
-    assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(error.code(), None);
     assert_eq!(
         error.catalog_outcome(),
         Some(CatalogMutationOutcome::Unknown)
@@ -701,14 +694,14 @@ async fn response_body_interruptions_follow_operation_retry_safety() {
     assert_eq!(refresh.statement_id(), Some(handle.statement_id()));
     assert_eq!(cancel.statement_id(), Some(handle.statement_id()));
     assert!(std::error::Error::source(&submit).is_some());
-    assert!(submit.is_persistent());
+    assert!(!submit.is_retryable());
     for error in [catalog_get, catalog_dry_run, refresh, cancel] {
         assert!(error.is_retryable());
         assert_eq!(error.catalog_outcome(), None);
         assert_eq!(error.http_status().map(|status| status.as_u16()), Some(200));
     }
     assert!(!catalog_write.is_retryable());
-    assert_eq!(catalog_write.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(catalog_write.code(), None);
     assert_eq!(
         catalog_write.catalog_outcome(),
         Some(CatalogMutationOutcome::Unknown)
@@ -745,4 +738,79 @@ async fn catalog_gateway_codes_do_not_establish_a_rejected_mutation() {
         assert_eq!(error.details(), payload.get("details"));
         assert_eq!(task.join().unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn failure_categories_are_independent_of_the_public_operation() {
+    let missing = json!({"code":"future_missing","message":"resource missing",
+        "details":{"status":"rejected"}})
+    .to_string();
+    let (client, task) = server(vec![(404, missing.clone()), (404, missing)]);
+    let catalog = client.table("events").catalog().get().await.unwrap_err();
+    let append = client
+        .table("events")
+        .append(r#"{"id":1}"#)
+        .await
+        .unwrap_err();
+    for error in [&catalog, &append] {
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert_eq!(error.code(), Some("future_missing"));
+        assert!(!error.is_retryable());
+    }
+    assert_eq!(catalog.operation(), ErrorOperation::ReadCatalog);
+    assert_eq!(append.operation(), ErrorOperation::Append);
+    assert_eq!(task.join().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn retry_advice_requires_known_commit_evidence() {
+    let limited = json!({"code":"too_many_requests","message":"busy","retryable":true});
+    let mut rejected = limited.clone();
+    rejected["details"] = json!({"status":"rejected"});
+    let (client, task) = server(vec![
+        (429, limited.to_string()),
+        (429, limited.to_string()),
+        (
+            503,
+            json!({"code":"service_unavailable","message":"response lost","retryable":true})
+                .to_string(),
+        ),
+        (429, limited.to_string()),
+        (429, rejected.to_string()),
+    ]);
+    let resource = client.table("events").catalog();
+    let read = resource.get().await.unwrap_err();
+    let rejected = resource
+        .delete(CatalogOptions::default())
+        .await
+        .unwrap_err();
+    let unknown = resource
+        .delete(CatalogOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(read.kind(), ErrorKind::RateLimited);
+    assert_eq!(rejected.kind(), ErrorKind::RateLimited);
+    assert!(read.is_retryable());
+    assert_eq!(
+        rejected.catalog_outcome(),
+        Some(CatalogMutationOutcome::Rejected)
+    );
+    assert!(rejected.is_retryable());
+    assert_eq!(
+        unknown.catalog_outcome(),
+        Some(CatalogMutationOutcome::Unknown)
+    );
+    assert!(!unknown.is_retryable());
+    let table = client.table("events");
+    let unknown = table.append(r#"{"id":1}"#).await.unwrap_err();
+    let rejected = table.append(r#"{"id":1}"#).await.unwrap_err();
+    assert_eq!(unknown.kind(), ErrorKind::RateLimited);
+    assert_eq!(rejected.kind(), ErrorKind::RateLimited);
+    assert_eq!(
+        unknown.append_details().unwrap().status,
+        scopedb_client::AppendState::Unknown
+    );
+    assert!(!unknown.is_retryable());
+    assert!(rejected.is_retryable());
+    assert_eq!(task.join().unwrap().len(), 5);
 }

@@ -26,6 +26,7 @@ use crate::AppendFailurePolicy;
 use crate::AppendRowsResult;
 use crate::AppendState;
 use crate::Error;
+use crate::ErrorOperation;
 use crate::Table;
 use crate::append::AppendOptions;
 use crate::append::append_batch;
@@ -104,8 +105,12 @@ impl AppendWriterBuilder {
 
     /// Validates configuration without starting background tasks or making requests.
     pub fn build(self) -> Result<AppendWriter, Error> {
-        self.options.validate()?;
-        self.table.validate_append()?;
+        self.options
+            .validate()
+            .map_err(|error| error.with_operation(ErrorOperation::BuildAppendWriter))?;
+        self.table
+            .validate_append()
+            .map_err(|error| error.with_operation(ErrorOperation::BuildAppendWriter))?;
         Ok(AppendWriter {
             table: self.table,
             options: self.options,
@@ -386,6 +391,7 @@ mod tests {
 
     use super::*;
     use crate::Client;
+    use crate::ErrorKind;
     use crate::test_support::MockResponse;
     use crate::test_support::MockServer;
 
@@ -394,6 +400,44 @@ mod tests {
             422,
             r#"{"message":"bad id","code":"invalid_schema","details":{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"invalid integer"}],"row_errors_truncated":true}}"#,
         )
+    }
+
+    #[tokio::test]
+    async fn aggregate_write_keeps_unknown_delivery_beside_a_local_input_failure() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request).without_ack());
+        let writer = server
+            .client()
+            .table("events")
+            .append_writer()
+            .max_batch_rows(1)
+            .max_concurrent_batches(2)
+            .max_retries(0)
+            .build()
+            .unwrap();
+        async fn write(writer: &AppendWriter) -> Result<(), Error> {
+            let _report = writer.write(&[json!({"id": 0}), json!([1])]).await?;
+            Ok(())
+        }
+        let error = write(&writer).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Incomplete);
+        assert_eq!(error.operation(), ErrorOperation::WriteRows);
+        assert_eq!(error.append_input_index(), Some(1));
+        assert!(!error.is_retryable());
+        let report = error.append_write_report().unwrap();
+        assert_eq!(report.outcome(), AppendDeliveryOutcome::Unknown);
+        assert_eq!(report.unsubmitted(), 1..2);
+        assert_eq!(report.batches().len(), 1);
+        assert_eq!(
+            report.batches()[0]
+                .result()
+                .as_ref()
+                .unwrap_err()
+                .append_details()
+                .unwrap()
+                .status,
+            AppendState::Unknown
+        );
+        assert_eq!(server.requests().len(), 1);
     }
 
     #[tokio::test]
@@ -753,7 +797,7 @@ mod tests {
         ] {
             assert_eq!(
                 builder.build().unwrap_err().kind(),
-                crate::ErrorKind::ConfigInvalid
+                crate::ErrorKind::InvalidInput
             );
         }
     }

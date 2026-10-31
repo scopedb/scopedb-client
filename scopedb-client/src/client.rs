@@ -33,6 +33,7 @@ use crate::AppendState;
 use crate::Catalog;
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::ResultSet;
 use crate::Statement;
 use crate::StatementHandle;
@@ -40,6 +41,7 @@ use crate::StatementStatus;
 use crate::Table;
 use crate::protocol::StatementRequest;
 use crate::protocol::apply_response_metadata;
+use crate::protocol::decode_http_error;
 use crate::protocol::decode_statement_response;
 
 const JSON_CONTENT_ENCODING: &str = "zstd";
@@ -136,7 +138,8 @@ impl ClientBuilder {
     pub fn build(self) -> Result<Client, Error> {
         if self.write_timeout.is_zero() {
             return Err(Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::BuildClient,
                 "write_timeout must be greater than zero",
             ));
         }
@@ -145,7 +148,8 @@ impl ClientBuilder {
             .is_none()
         {
             return Err(Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::BuildClient,
                 "write_timeout is too large",
             ));
         }
@@ -156,8 +160,12 @@ impl ClientBuilder {
                 .retry(reqwest::retry::never())
                 .build()
                 .map_err(|err| {
-                    Error::new(ErrorKind::ConfigInvalid, "failed to build HTTP client")
-                        .set_source(err)
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        ErrorOperation::BuildClient,
+                        "failed to build HTTP client",
+                    )
+                    .set_source(err)
                 })?,
         };
         let mut client = Client::new(self.endpoint, http_client)?;
@@ -165,14 +173,16 @@ impl ClientBuilder {
         if let Some(api_key) = self.api_key {
             if api_key.is_empty() {
                 return Err(Error::new(
-                    ErrorKind::ConfigInvalid,
+                    ErrorKind::InvalidInput,
+                    ErrorOperation::BuildClient,
                     "api_key must not be empty",
                 ));
             }
             let mut authorization =
                 HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|err| {
                     Error::new(
-                        ErrorKind::ConfigInvalid,
+                        ErrorKind::InvalidInput,
+                        ErrorOperation::BuildClient,
                         "api_key is not a valid HTTP credential",
                     )
                     .set_source(err)
@@ -212,7 +222,8 @@ impl Client {
                     || endpoint.fragment().is_some()
                 {
                     return Err(Error::new(
-                        ErrorKind::ConfigInvalid,
+                        ErrorKind::InvalidInput,
+                        ErrorOperation::BuildClient,
                         "endpoint must be an HTTP(S) URL without credentials, query, or fragment",
                     ));
                 }
@@ -228,7 +239,8 @@ impl Client {
                 })
             }
             Err(err) => Err(Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::BuildClient,
                 "failed to parse endpoint".to_string(),
             )
             .set_source(err)),
@@ -323,10 +335,10 @@ impl Client {
         tokio::time::timeout(timeout.unwrap_or(self.write_timeout), async {
             let response = request.send().await.map_err(|err| {
                 let error = if err.is_timeout() {
-                    append_unknown_error("table append request timed out; commit outcome is unknown")
+                    append_unknown_error(ErrorKind::Timeout, "table append request timed out; commit outcome is unknown")
                         .set_write_timeout()
                 } else {
-                    append_unknown_error("failed to send table append request")
+                    append_unknown_error(ErrorKind::Unavailable, "failed to send table append request")
                 };
                 error.set_source(err)
             })?;
@@ -335,16 +347,16 @@ impl Client {
             headers = response.headers().clone();
             let payload = response.bytes().await.map_err(|err| {
                 let error = if err.is_timeout() {
-                    append_unknown_error("table append request timed out; commit outcome is unknown")
+                    append_unknown_error(ErrorKind::Timeout, "table append request timed out; commit outcome is unknown")
                         .set_write_timeout()
                 } else {
-                    append_unknown_error("failed to read table append response")
+                    append_unknown_error(ErrorKind::Unavailable, "failed to read table append response")
                 };
                 error.set_source(err)
             })?;
             let result = decode_append_response(response_status, &headers, &payload)?;
             if result.num_rows_inserted != expected_rows as i64 {
-                return Err(append_unknown_error(format!(
+                return Err(append_unknown_error(ErrorKind::InvalidResponse, format!(
                     "table append response reported {} inserted rows for a {expected_rows}-row request",
                     result.num_rows_inserted
                 )));
@@ -354,7 +366,7 @@ impl Client {
         .await
         .unwrap_or_else(|err| {
             Err(
-                append_unknown_error("table append request timed out; commit outcome is unknown")
+                append_unknown_error(ErrorKind::Timeout, "table append request timed out; commit outcome is unknown")
                     .set_write_timeout()
                     .set_source(err),
             )
@@ -381,25 +393,18 @@ impl Client {
             .send()
             .await
             .map_err(|err| {
-                Error::new(ErrorKind::Unexpected, "failed to submit statement")
-                    .set_source(err)
-                    .set_persistent()
+                Error::new(
+                    if err.is_timeout() {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Unavailable
+                    },
+                    ErrorOperation::SubmitStatement,
+                    "failed to submit statement",
+                )
+                .set_source(err)
             })?;
-        decode_statement_response(response, false)
-            .await
-            .map_err(|error| {
-                // A gateway failure or unreadable response can follow successful execution.
-                // HTTP status alone cannot authorize another submission in those cases.
-                if error.http_status().is_none_or(|status| {
-                    status.is_success()
-                        || status.is_server_error()
-                        || status == StatusCode::REQUEST_TIMEOUT
-                }) {
-                    error.set_persistent()
-                } else {
-                    error
-                }
-            })
+        decode_statement_response(response, ErrorOperation::SubmitStatement).await
     }
 
     #[fastrace::trace]
@@ -417,13 +422,18 @@ impl Client {
             .await
             .map_err(|err| {
                 Error::new(
-                    ErrorKind::Unexpected,
+                    if err.is_timeout() {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Unavailable
+                    },
+                    ErrorOperation::RefreshStatement,
                     format!("failed to fetch statement: {statement_id:?}"),
                 )
                 .set_source(err)
-                .set_temporary()
+                .with_transient_failure(true)
             })?;
-        decode_statement_response(response, true).await
+        decode_statement_response(response, ErrorOperation::RefreshStatement).await
     }
 
     #[fastrace::trace]
@@ -441,33 +451,45 @@ impl Client {
             .await
             .map_err(|err| {
                 Error::new(
-                    ErrorKind::Unexpected,
+                    if err.is_timeout() {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Unavailable
+                    },
+                    ErrorOperation::CancelStatement,
                     format!("failed to cancel statement: {statement_id:?}"),
                 )
                 .set_source(err)
-                .set_temporary()
+                .with_transient_failure(true)
             })?;
-        decode_statement_response(response, true).await
+        decode_statement_response(response, ErrorOperation::CancelStatement).await
     }
 
     #[track_caller]
     fn make_url(&self, path: &str) -> Result<Url, Error> {
         self.endpoint.join(path).map_err(|err| {
-            Error::new(ErrorKind::Unexpected, "failed to construct URL".to_string()).set_source(err)
+            Error::new(
+                ErrorKind::Internal,
+                ErrorOperation::Append,
+                "failed to construct URL".to_string(),
+            )
+            .set_source(err)
         })
     }
 
     pub(crate) fn make_resource_url(&self, segments: &[&str]) -> Result<Url, Error> {
         if segments.iter().any(|s| matches!(*s, "" | "." | "..")) {
             return Err(Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::Append,
                 "resource names must not be empty or dot segments",
             ));
         }
         let mut url = self.make_url("v1/")?;
         let mut path = url.path_segments_mut().map_err(|_| {
             Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::Internal,
+                ErrorOperation::Append,
                 "endpoint cannot be used as a base URL",
             )
         })?;
@@ -500,7 +522,8 @@ impl Client {
     ) -> Result<reqwest::RequestBuilder, Error> {
         let uncompressed = serde_json::to_vec(value).map_err(|err| {
             Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::Internal,
+                ErrorOperation::SubmitStatement,
                 "failed to serialize JSON request body",
             )
             .set_source(err)
@@ -509,7 +532,8 @@ impl Client {
         let body = zstd::stream::encode_all(uncompressed.as_slice(), ZSTD_COMPRESSION_LEVEL)
             .map_err(|err| {
                 Error::new(
-                    ErrorKind::Unexpected,
+                    ErrorKind::Internal,
+                    ErrorOperation::SubmitStatement,
                     "failed to compress JSON request body",
                 )
                 .set_source(err)
@@ -537,12 +561,19 @@ fn decode_append_response(
                 Ok(result)
             }
             Ok(_) => Err(apply_response_metadata(
-                append_unknown_error("table append response has an invalid body"),
+                append_unknown_error(
+                    ErrorKind::InvalidResponse,
+                    "table append response has an invalid body",
+                ),
                 status,
                 headers,
             )),
             Err(err) => Err(apply_response_metadata(
-                append_unknown_error("failed to decode table append response").set_source(err),
+                append_unknown_error(
+                    ErrorKind::InvalidResponse,
+                    "failed to decode table append response",
+                )
+                .set_source(err),
                 status,
                 headers,
             )),
@@ -551,57 +582,52 @@ fn decode_append_response(
 
     if status.is_success() {
         return Err(apply_response_metadata(
-            append_unknown_error(format!(
-                "table append returned unexpected success status {}",
-                status.as_u16()
-            )),
+            append_unknown_error(
+                ErrorKind::InvalidResponse,
+                format!(
+                    "table append returned unexpected success status {}",
+                    status.as_u16()
+                ),
+            ),
             status,
             headers,
         ));
     }
 
-    let error =
-        crate::protocol::decode_http_error(status, headers, payload, ErrorKind::AppendRowsFailed);
+    let error = decode_http_error(status, headers, payload, ErrorOperation::Append);
     if let Some(details) = error
         .details()
         .and_then(|value| serde_json::from_value::<AppendErrorDetails>(value.clone()).ok())
         && matches!(details.status, AppendState::Rejected | AppendState::Unknown)
     {
-        let status = details.status;
         let error = error.set_append_details(details);
 
-        return Err(if status == AppendState::Unknown {
-            error.set_persistent()
-        } else {
-            error
-        });
+        return Err(error);
     }
 
-    Err(error
-        .set_append_details(AppendErrorDetails {
-            status: AppendState::Unknown,
-            row_errors: Vec::new(),
-            row_errors_truncated: false,
-        })
-        .set_persistent())
+    Err(error.set_append_details(AppendErrorDetails {
+        status: AppendState::Unknown,
+        row_errors: Vec::new(),
+        row_errors_truncated: false,
+    }))
 }
 
-fn append_unknown_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::AppendRowsFailed, message)
-        .set_append_details(AppendErrorDetails {
-            status: AppendState::Unknown,
-            row_errors: Vec::new(),
-            row_errors_truncated: false,
-        })
-        .set_persistent()
-}
-
-fn append_rejected_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::AppendRowsFailed, message).set_append_details(AppendErrorDetails {
-        status: AppendState::Rejected,
+fn append_unknown_error(kind: ErrorKind, message: impl Into<String>) -> Error {
+    Error::new(kind, ErrorOperation::Append, message).set_append_details(AppendErrorDetails {
+        status: AppendState::Unknown,
         row_errors: Vec::new(),
         row_errors_truncated: false,
     })
+}
+
+fn append_rejected_error(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::InvalidInput, ErrorOperation::Append, message).set_append_details(
+        AppendErrorDetails {
+            status: AppendState::Rejected,
+            row_errors: Vec::new(),
+            row_errors_truncated: false,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -646,7 +672,7 @@ mod tests {
             .api_key("")
             .build()
             .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ConfigInvalid);
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -660,7 +686,7 @@ mod tests {
                 .write_timeout(timeout)
                 .build()
                 .unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::ConfigInvalid);
+            assert_eq!(error.kind(), ErrorKind::InvalidInput);
         }
     }
 
@@ -715,8 +741,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.kind(), ErrorKind::AppendRowsFailed);
-        assert!(error.is_temporary());
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert!(error.is_retryable());
         let details = error.append_details().unwrap();
         assert_eq!(details.status, AppendState::Rejected);
         assert_eq!(details.row_errors[0].row_index, 3);
@@ -750,8 +776,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.is_persistent());
-        assert!(!error.is_temporary());
+        assert!(!error.is_retryable());
+        assert!(!error.is_retryable());
         assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 
@@ -759,7 +785,7 @@ mod tests {
     fn unstructured_append_error_is_treated_as_unknown() {
         let error = decode(StatusCode::BAD_REQUEST, br#"{"message":"bad request"}"#).unwrap_err();
 
-        assert!(error.is_persistent());
+        assert!(!error.is_retryable());
         assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 
@@ -772,7 +798,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.message(), "unsupported path");
-        assert!(error.is_persistent());
+        assert!(!error.is_retryable());
         assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
     }
 

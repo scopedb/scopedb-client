@@ -446,10 +446,10 @@ async fn exercise_data_paths(client: &Client, schema: &str) -> Result<()> {
     match (active.snapshot().unwrap(), settled) {
         (StatementStatus::Finished(_), Ok(_)) => {}
         (StatementStatus::Failed(_), Err(error)) => {
-            ensure!(error.kind() == scopedb_client::ErrorKind::StatementFailed);
+            ensure!(error.kind() == scopedb_client::ErrorKind::Internal);
         }
         (StatementStatus::Cancelled(_), Err(error)) => {
-            ensure!(error.kind() == scopedb_client::ErrorKind::StatementCancelled);
+            ensure!(error.kind() == scopedb_client::ErrorKind::Cancelled);
         }
         (StatementStatus::Pending(_) | StatementStatus::Running(_), _) => {
             return Err(anyhow!(

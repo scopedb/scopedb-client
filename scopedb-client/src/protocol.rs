@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::ResultSet;
 
 /// The commit outcome used by table append responses and client-side write interruptions.
@@ -78,24 +79,33 @@ pub struct AppendErrorDetails {
 
 pub async fn decode_statement_response(
     r: reqwest::Response,
-    retryable_transport: bool,
+    operation: ErrorOperation,
 ) -> Result<StatementStatus, Error> {
     let code = r.status();
     let headers = r.headers().clone();
     let payload = r.bytes().await.map_err(|err| {
-        let error =
-            Error::new(ErrorKind::Unexpected, "failed to read response body").set_source(err);
-        let error = if retryable_transport {
-            error.set_temporary()
-        } else {
-            error
-        };
+        let error = Error::new(
+            if err.is_timeout() {
+                ErrorKind::Timeout
+            } else {
+                ErrorKind::Unavailable
+            },
+            operation,
+            "failed to read response body",
+        )
+        .set_source(err);
+        let error = error.with_transient_failure(operation != ErrorOperation::SubmitStatement);
         apply_response_metadata(error, code, &headers)
     })?;
     if code.is_success() {
         let result = serde_json::from_slice(&payload).map_err(|err| {
             apply_response_metadata(
-                Error::new(ErrorKind::Unexpected, "failed to decode response body").set_source(err),
+                Error::new(
+                    ErrorKind::InvalidResponse,
+                    operation,
+                    "failed to decode response body",
+                )
+                .set_source(err),
                 code,
                 &headers,
             )
@@ -103,19 +113,14 @@ pub async fn decode_statement_response(
         return Ok(result);
     }
 
-    Err(decode_http_error(
-        code,
-        &headers,
-        &payload,
-        ErrorKind::Unexpected,
-    ))
+    Err(decode_http_error(code, &headers, &payload, operation))
 }
 
 pub fn decode_http_error(
     status: StatusCode,
     headers: &HeaderMap,
     payload: &[u8],
-    kind: ErrorKind,
+    operation: ErrorOperation,
 ) -> Error {
     let parsed = parse_error_payload(payload).unwrap_or_else(|| ParsedErrorPayload {
         code: None,
@@ -125,7 +130,7 @@ pub fn decode_http_error(
         retryable: None,
     });
     let mut error = apply_response_metadata(
-        Error::new(kind, parsed.message)
+        Error::new(ErrorKind::from_http(status), operation, parsed.message)
             .set_server_retryable(parsed.retryable)
             .set_api_error(parsed.code, parsed.details),
         status,
@@ -140,11 +145,7 @@ pub fn decode_http_error(
             StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
         ) || status.is_server_error()
     });
-    if retryable {
-        error.set_temporary()
-    } else {
-        error.set_permanent()
-    }
+    error.with_transient_failure(retryable)
 }
 
 #[derive(Debug)]
@@ -480,7 +481,8 @@ impl FromStr for DataType {
             "any" => Ok(Self::Any),
             "null" => Ok(Self::Null),
             _ => Err(Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::InvalidInput,
+                ErrorOperation::ParseDataType,
                 format!("unrecognized data type: {s}"),
             )),
         }
@@ -496,7 +498,7 @@ mod tests {
     use reqwest::header::HeaderValue;
 
     use super::*;
-    use crate::ErrorKind;
+    use crate::ErrorOperation;
 
     #[test]
     fn failed_statement_preserves_structured_error_details() {
@@ -568,7 +570,7 @@ mod tests {
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
             &headers,
             br#"{"message":"busy","request_id":"body-request","retryable":false}"#,
-            ErrorKind::Unexpected,
+            ErrorOperation::RefreshStatement,
         );
 
         assert_eq!(error.message(), "busy");
@@ -584,7 +586,7 @@ mod tests {
             reqwest::StatusCode::BAD_REQUEST,
             &HeaderMap::new(),
             br#"{"error":{"message":"try later","retryable":true}}"#,
-            ErrorKind::Unexpected,
+            ErrorOperation::RefreshStatement,
         );
         assert_eq!(nested.message(), "try later");
         assert!(nested.is_retryable());

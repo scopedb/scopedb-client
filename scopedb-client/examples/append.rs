@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Err(error) => {
-            if error.kind() == ErrorKind::AppendRowsFailed
+            if error.kind() == ErrorKind::Unavailable
                 && matches!(
                     error.append_details().map(|details| details.status),
                     Some(AppendState::Unknown)

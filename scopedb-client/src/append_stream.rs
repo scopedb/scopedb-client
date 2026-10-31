@@ -38,6 +38,7 @@ use crate::AppendRowsResult;
 use crate::AppendState;
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::Table;
 use crate::append::AppendOptions;
 use crate::append::RecordError;
@@ -377,10 +378,12 @@ impl AppendStreamBuilder {
     }
 
     pub fn build(self) -> Result<AppendStream, Error> {
-        validate_builder(&self)?;
+        validate_builder(&self)
+            .map_err(|error| error.with_operation(ErrorOperation::BuildAppendStream))?;
         tokio::runtime::Handle::try_current().map_err(|err| {
             Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::BuildAppendStream,
                 "append stream must be built inside a Tokio runtime",
             )
             .set_source(err)
@@ -839,12 +842,14 @@ impl AppendStream {
                     notified.await;
                     continue;
                 }
-                TerminalResult::Complete(result) => return result,
+                TerminalResult::Complete(result) => {
+                    return result.map_err(|error| error.with_operation(ErrorOperation::Flush));
+                }
             }
 
             let permit = match self.inner.tx.reserve().await {
                 Ok(permit) => permit,
-                Err(_) => return self.wait_for_terminal().await,
+                Err(_) => return self.wait_for_terminal(ErrorOperation::Flush).await,
             };
             let (ack, response) = oneshot::channel();
             {
@@ -862,7 +867,7 @@ impl AppendStream {
             }
             return match response.await {
                 Ok(Ok(report)) => Ok(report),
-                Ok(Err(_)) | Err(_) => self.wait_for_terminal().await,
+                Ok(Err(_)) | Err(_) => self.wait_for_terminal(ErrorOperation::Flush).await,
             };
         }
     }
@@ -883,7 +888,8 @@ impl AppendStream {
                 }
                 AppendStreamState::Closing | AppendStreamState::Failed => false,
                 AppendStreamState::Closed if shared.final_result.is_some() => {
-                    return terminal_result(&shared);
+                    return terminal_result(&shared)
+                        .map_err(|error| error.with_operation(ErrorOperation::Shutdown));
                 }
                 AppendStreamState::Closed => false,
             }
@@ -896,7 +902,7 @@ impl AppendStream {
             });
         }
 
-        self.wait_for_terminal().await
+        self.wait_for_terminal(ErrorOperation::Shutdown).await
     }
 
     /// Returns a synchronous snapshot suitable for metrics and shutdown diagnostics.
@@ -967,18 +973,19 @@ impl AppendStream {
         match error {
             PendingAcquireError::Closed => self.closed_or_fatal_error(),
             PendingAcquireError::Full => Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::RateLimited,
+                ErrorOperation::AdmitRows,
                 "append stream local byte budget is full",
             )
-            .set_temporary(),
+            .with_transient_failure(true),
             PendingAcquireError::ExceedsCapacity => Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::InvalidInput,
+                ErrorOperation::AdmitRows,
                 format!(
                     "append row requires {requested} buffered bytes, exceeding max_pending_bytes={}",
                     self.inner.pending_bytes.capacity
                 ),
-            )
-            .set_permanent(),
+            ),
         }
     }
 
@@ -998,7 +1005,10 @@ impl AppendStream {
         }
     }
 
-    async fn wait_for_terminal(&self) -> Result<AppendDeliveryReport, Error> {
+    async fn wait_for_terminal(
+        &self,
+        operation: ErrorOperation,
+    ) -> Result<AppendDeliveryReport, Error> {
         loop {
             let notified = self.inner.shutdown_notify.notified();
             {
@@ -1008,7 +1018,8 @@ impl AppendStream {
                     AppendStreamState::Closed | AppendStreamState::Failed
                 ) && shared.final_result.is_some()
                 {
-                    return terminal_result(&shared);
+                    return terminal_result(&shared)
+                        .map_err(|error| error.with_operation(operation));
                 }
             }
             notified.await;
@@ -1056,9 +1067,18 @@ fn terminal_result(shared: &SharedState) -> Result<AppendDeliveryReport, Error> 
 }
 
 fn error_from_shared(shared: &SharedState) -> Error {
-    shared.fatal.as_ref().cloned().unwrap_or_else(|| {
-        Error::new(ErrorKind::Unexpected, "append stream is closed").set_persistent()
-    })
+    shared
+        .fatal
+        .as_ref()
+        .cloned()
+        .map(Error::for_closed_stream)
+        .unwrap_or_else(|| {
+            Error::new(
+                ErrorKind::Closed,
+                ErrorOperation::AdmitRows,
+                "append stream is closed",
+            )
+        })
 }
 
 struct BatchOutcome {
@@ -1166,10 +1186,10 @@ async fn monitor_append_worker(
 
     let error = match worker_result {
         Ok(()) => Error::new(
-            ErrorKind::Unexpected,
+            ErrorKind::Internal,
+            ErrorOperation::AdmitRows,
             "append stream worker stopped before publishing a final result",
-        )
-        .set_persistent(),
+        ),
         Err(error) => {
             unknown_append_error("append stream worker terminated unexpectedly", Some(error))
         }
@@ -1538,10 +1558,13 @@ impl AppendWorker {
             .unwrap_or_else(Instant::now);
         self.drain_in_flight().await;
 
-        let fatal = self
-            .fatal
-            .clone()
-            .unwrap_or_else(|| Error::new(ErrorKind::Unexpected, "append stream failed"));
+        let fatal = self.fatal.clone().unwrap_or_else(|| {
+            Error::new(
+                ErrorKind::Internal,
+                ErrorOperation::AdmitRows,
+                "append stream failed",
+            )
+        });
         {
             let mut shared = lock(&self.shared);
             let resolved = shared
@@ -1597,8 +1620,8 @@ fn unknown_append_error<E>(message: impl Into<String>, source: Option<E>) -> Err
 where
     E: std::error::Error + Send + Sync + 'static,
 {
-    let mut error =
-        Error::new(ErrorKind::AppendRowsFailed, message).set_append_details(AppendErrorDetails {
+    let mut error = Error::new(ErrorKind::Internal, ErrorOperation::Append, message)
+        .set_append_details(AppendErrorDetails {
             status: AppendState::Unknown,
             row_errors: Vec::new(),
             row_errors_truncated: false,
@@ -1606,7 +1629,7 @@ where
     if let Some(source) = source {
         error = error.set_source(source);
     }
-    error.set_persistent()
+    error
 }
 
 fn try_claim_circuit_admission(shared: &mut SharedState) -> bool {
@@ -1660,11 +1683,11 @@ fn record_circuit_failure(
     let Some(options) = options else {
         return false;
     };
-    let availability_failure = error.is_temporary()
-        || error.is_persistent()
-        || error
-            .append_details()
-            .is_some_and(|details| details.status == AppendState::Unknown);
+    let availability_failure = error.is_transient()
+        || matches!(
+            error.kind(),
+            ErrorKind::Unavailable | ErrorKind::Timeout | ErrorKind::InvalidResponse
+        );
     if !availability_failure {
         if probe {
             record_circuit_success(shared, true);
@@ -1918,7 +1941,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(failure.append_admission().unwrap().accepted_rows, 1);
-        assert_eq!(failure.kind(), ErrorKind::Unexpected);
+        assert_eq!(failure.kind(), ErrorKind::Incomplete);
         assert_eq!(stream.stats().accepted_rows, 2);
         stream.send(&serde_json::json!({"id":4})).await.unwrap();
         let report = stream.shutdown().await.unwrap();
@@ -1942,7 +1965,51 @@ mod tests {
                 serde_json::json!({"id":4})
             ]
         );
-        assert_eq!(failure.kind(), ErrorKind::Unexpected);
+        assert_eq!(failure.kind(), ErrorKind::Incomplete);
+    }
+
+    #[tokio::test]
+    async fn circuit_availability_is_independent_of_unknown_delivery() {
+        for (status, opens_circuit) in [(422, false), (503, true)] {
+            let server = MockServer::start(move |index, request| {
+                if index == 0 {
+                    MockResponse::json(
+                        status,
+                        r#"{"code":"failure","message":"unconfirmed","retryable":false,"details":{"status":"unknown"}}"#,
+                    )
+                } else {
+                    MockResponse::committed(request)
+                }
+            });
+            let stream = server
+                .client()
+                .table("events")
+                .append_stream()
+                .failure_policy(AppendFailurePolicy::Continue)
+                .circuit_breaker(Some(AppendCircuitBreakerOptions::new(
+                    1,
+                    Duration::from_secs(60),
+                )))
+                .max_batch_rows(1)
+                .max_retries(0)
+                .build()
+                .unwrap();
+            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
+            let report = stream.flush().await.unwrap();
+            assert_eq!(report.unknown_rows, 1);
+            if opens_circuit {
+                assert_eq!(stream.stats().circuit_state, AppendCircuitState::Open);
+                assert!(matches!(
+                    stream.try_send(&serde_json::json!({"id": 2})),
+                    Err(AppendTrySendError::CircuitOpen)
+                ));
+            } else {
+                assert_eq!(stream.stats().circuit_state, AppendCircuitState::Closed);
+                stream.send(&serde_json::json!({"id": 2})).await.unwrap();
+                assert_eq!(stream.flush().await.unwrap().committed_rows, 1);
+            }
+            stream.shutdown().await.unwrap();
+        }
     }
 
     #[test]
@@ -1985,7 +2052,7 @@ mod tests {
                     .err()
                     .expect("expected invalid configuration")
                     .kind(),
-                ErrorKind::ConfigInvalid
+                ErrorKind::InvalidInput
             );
         }
     }
@@ -2002,7 +2069,7 @@ mod tests {
             Ok(_) => panic!("invalid max_batch_rows was accepted"),
             Err(error) => error,
         };
-        assert_eq!(error.kind(), ErrorKind::ConfigInvalid);
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -2017,7 +2084,7 @@ mod tests {
             Ok(_) => panic!("oversized target_batch_bytes was accepted"),
             Err(error) => error,
         };
-        assert_eq!(error.kind(), ErrorKind::ConfigInvalid);
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
 
         let row = serde_json::json!({"payload": "x".repeat(MAX_APPEND_BODY_BYTES)});
         assert!(matches!(
@@ -2031,16 +2098,16 @@ mod tests {
 
     #[test]
     fn error_snapshot_preserves_http_metadata() {
-        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
+        let error = Error::new(ErrorKind::Unavailable, ErrorOperation::AdmitRows, "busy")
             .set_http_status(reqwest::StatusCode::SERVICE_UNAVAILABLE)
             .set_request_id("request-123".to_string())
             .set_retry_after(Duration::from_secs(2))
-            .with_context("retries", 3)
+            .with_retry_history(3, true)
             .set_source(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,
                 "lost response",
             ))
-            .set_temporary();
+            .with_transient_failure(true);
         let restored = error.clone();
         assert_eq!(
             restored.http_status(),
@@ -2048,13 +2115,15 @@ mod tests {
         );
         assert_eq!(restored.request_id(), Some("request-123"));
         assert_eq!(restored.retry_after(), Some(Duration::from_secs(2)));
-        assert!(restored.is_temporary());
+        assert!(restored.is_transient());
+        assert!(!restored.is_retryable());
         let cause = std::error::Error::source(&restored)
             .unwrap()
             .downcast_ref::<std::io::Error>()
             .unwrap();
         assert_eq!(cause.kind(), std::io::ErrorKind::ConnectionReset);
-        assert!(format!("{restored:?}").contains("retries: 3"));
+        assert_eq!(restored.retries(), 3);
+        assert!(restored.retry_exhausted());
     }
 
     #[tokio::test]
@@ -2196,7 +2265,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.kind(), ErrorKind::AppendRowsFailed);
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
         assert_eq!(
             error.append_details().map(|details| details.status),
             Some(AppendState::Rejected)
@@ -2512,7 +2581,8 @@ mod tests {
             assert_eq!(error.request_id(), Some("last-attempt"));
             assert_eq!(error.retry_after(), Some(Duration::from_secs(2)));
             if final_status == 503 {
-                assert!(format!("{error:?}").contains("retries: 1"));
+                assert_eq!(error.retries(), 1);
+                assert!(error.retry_exhausted());
             }
             let stats = stream.stats();
             assert_eq!(stats.unknown_rows, 1);
@@ -2556,7 +2626,8 @@ mod tests {
 
                 assert_eq!(server.requests().len(), max_retries + 1);
                 assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-                assert!(format!("{error:?}").contains(&format!("retries: {max_retries}")));
+                assert_eq!(error.retries(), max_retries);
+                assert!(error.retry_exhausted());
                 if disconnect {
                     assert!(
                         std::error::Error::source(&error)
@@ -2989,7 +3060,7 @@ mod tests {
             .unwrap();
 
         let error = stream.shutdown().await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::AppendRowsFailed);
+        assert_eq!(error.kind(), ErrorKind::Incomplete);
         assert_eq!(
             error.append_details().map(|details| details.status),
             Some(AppendState::Rejected)

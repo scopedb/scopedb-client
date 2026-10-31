@@ -71,6 +71,7 @@ pub use self::client::Client;
 pub use self::client::ClientBuilder;
 pub use self::error::Error;
 pub use self::error::ErrorKind;
+pub use self::error::ErrorOperation;
 pub use self::error::WriteErrorDetails;
 pub use self::error::WriteErrorReason;
 pub use self::protocol::AppendErrorDetails;

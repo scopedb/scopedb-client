@@ -20,35 +20,176 @@ use reqwest::StatusCode;
 use uuid::Uuid;
 
 use crate::AppendAdmissionResult;
+use crate::AppendDeliveryOutcome;
 use crate::AppendDeliveryReport;
 use crate::AppendErrorDetails;
 use crate::AppendState;
+use crate::AppendTrySendError;
 use crate::AppendWriteReport;
 use crate::CatalogMutationOutcome;
 use crate::StatementErrorDetails;
 
-/// ErrorKind is all kinds of Error of ScopeDB client.
+/// Stable failure categories for application policy. Operation identity and
+/// commit outcomes are available separately; do not parse diagnostic strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// The client don't know what happened here, and no actions other than just
-    /// returning it back.
-    Unexpected,
+    /// Change invalid configuration, input, or query arguments.
+    InvalidInput,
+    /// Supply valid authentication credentials.
+    Unauthenticated,
+    /// Obtain authorization for the operation.
+    PermissionDenied,
+    /// The selected resource or execution does not exist.
+    NotFound,
+    /// Refresh state or resolve a version or ownership conflict.
+    Conflict,
+    /// Reduce pressure and respect the retry delay when retrying is safe.
+    RateLimited,
+    /// The service or a required worker is unavailable.
+    Unavailable,
+    /// A client or server deadline expired; inspect write outcomes before replay.
+    Timeout,
+    /// Execution reached an explicitly cancelled terminal state.
+    Cancelled,
+    /// A response or result cannot be interpreted under the protocol contract.
+    InvalidResponse,
+    /// An aggregate operation left input unconfirmed; inspect its progress report.
+    Incomplete,
+    /// A producer can no longer accept work.
+    Closed,
+    /// An internal invariant or otherwise unclassified server failure occurred.
+    Internal,
+}
 
-    /// The config for ScopeDB client is invalid.
-    ConfigInvalid,
+/// The SDK operation whose failure the caller is handling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ErrorOperation {
+    /// Validate and construct the client and its HTTP configuration.
+    BuildClient,
+    /// Validate a finite writer and its selected table.
+    BuildAppendWriter,
+    /// Validate and start a background append stream.
+    BuildAppendStream,
+    /// Execute one logical append request, including its retry attempts.
+    Append,
+    /// Settle one finite input slice.
+    WriteRows,
+    /// Admit rows locally, including bulk and nonblocking admission.
+    AdmitRows,
+    /// Settle a delivery barrier while keeping the stream open.
+    Flush,
+    /// Close admission and settle the remaining stream rows.
+    Shutdown,
+    /// Submit one SQL execution.
+    SubmitStatement,
+    /// Statement::execute, Client::query, and table SQL operations.
+    ExecuteStatement,
+    /// Read one execution status snapshot.
+    RefreshStatement,
+    /// Wait for an existing execution to terminate.
+    WaitStatement,
+    /// Request cancellation of an existing execution.
+    CancelStatement,
+    /// Read the complete selected catalog definition.
+    ReadCatalog,
+    /// Replace or preview replacement of a selected catalog subtree.
+    ApplyCatalog,
+    /// Delete or preview deletion of a selected catalog resource.
+    DeleteCatalog,
+    /// Convert query result shapes or cells to Rust values.
+    DecodeResult,
+    /// Parse a public data-type identifier.
+    ParseDataType,
+}
 
-    /// A table append was rejected or its commit outcome is unknown.
-    AppendRowsFailed,
+impl ErrorKind {
+    /// Returns the stable snake-case label used in logs and metrics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "invalid_input",
+            Self::Unauthenticated => "unauthenticated",
+            Self::PermissionDenied => "permission_denied",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::RateLimited => "rate_limited",
+            Self::Unavailable => "unavailable",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::InvalidResponse => "invalid_response",
+            Self::Incomplete => "incomplete",
+            Self::Closed => "closed",
+            Self::Internal => "internal",
+        }
+    }
 
-    /// A statement reached a failed terminal state.
-    StatementFailed,
+    pub(crate) fn from_http(status: StatusCode) -> Self {
+        match status.as_u16() {
+            400 | 405 | 413 | 422 => Self::InvalidInput,
+            401 => Self::Unauthenticated,
+            403 => Self::PermissionDenied,
+            404 => Self::NotFound,
+            409 | 412 => Self::Conflict,
+            408 | 504 => Self::Timeout,
+            429 => Self::RateLimited,
+            500 => Self::Internal,
+            502 | 503 => Self::Unavailable,
+            _ if status.is_server_error() => Self::Unavailable,
+            _ => Self::Internal,
+        }
+    }
 
-    /// A statement reached the cancelled terminal state.
-    StatementCancelled,
+    pub(crate) fn from_statement_code(code: &str) -> Self {
+        match code {
+            "bad_request" | "invalid_request" | "payload_too_large" => Self::InvalidInput,
+            "not_found" => Self::NotFound,
+            "unauthorized" => Self::Unauthenticated,
+            "conflict" | "precondition_failed" => Self::Conflict,
+            "too_many_requests" => Self::RateLimited,
+            "service_unavailable" | "unavailable" => Self::Unavailable,
+            "statement_timeout" | "request_timeout" | "timeout" => Self::Timeout,
+            _ => Self::Internal,
+        }
+    }
+}
 
-    /// A declarative catalog operation failed.
-    CatalogFailed,
+impl ErrorOperation {
+    /// Returns the stable snake-case label used in logs and metrics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BuildClient => "build_client",
+            Self::BuildAppendWriter => "build_append_writer",
+            Self::BuildAppendStream => "build_append_stream",
+            Self::Append => "append",
+            Self::WriteRows => "write_rows",
+            Self::AdmitRows => "admit_rows",
+            Self::Flush => "flush",
+            Self::Shutdown => "shutdown",
+            Self::SubmitStatement => "submit_statement",
+            Self::ExecuteStatement => "execute_statement",
+            Self::RefreshStatement => "refresh_statement",
+            Self::WaitStatement => "wait_statement",
+            Self::CancelStatement => "cancel_statement",
+            Self::ReadCatalog => "read_catalog",
+            Self::ApplyCatalog => "apply_catalog",
+            Self::DeleteCatalog => "delete_catalog",
+            Self::DecodeResult => "decode_result",
+            Self::ParseDataType => "parse_data_type",
+        }
+    }
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl fmt::Display for ErrorOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The client-side reason an in-flight write was interrupted.
@@ -77,47 +218,11 @@ pub struct WriteErrorDetails {
     pub outcome: AppendState,
 }
 
-impl ErrorKind {
-    /// Convert self into static str.
-    pub fn into_static(self) -> &'static str {
-        self.into()
-    }
-}
-
-impl fmt::Display for ErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.into_static())
-    }
-}
-
-impl From<ErrorKind> for &'static str {
-    fn from(v: ErrorKind) -> &'static str {
-        match v {
-            ErrorKind::Unexpected => "Unexpected",
-            ErrorKind::ConfigInvalid => "ConfigInvalid",
-            ErrorKind::AppendRowsFailed => "AppendRowsFailed",
-            ErrorKind::StatementFailed => "StatementFailed",
-            ErrorKind::StatementCancelled => "StatementCancelled",
-            ErrorKind::CatalogFailed => "CatalogFailed",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ErrorStatus {
-    Permanent,
-    Temporary,
-    Persistent,
-}
-
-impl fmt::Display for ErrorStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Permanent => "permanent",
-            Self::Temporary => "temporary",
-            Self::Persistent => "persistent",
-        })
-    }
+#[derive(Debug, Default, Clone)]
+struct RetryFacts {
+    transient: bool,
+    exhausted: bool,
+    retries: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -133,6 +238,7 @@ struct ErrorDiagnostics {
 
 #[derive(Debug, Clone)]
 enum FailureDetails {
+    Admission(Arc<AppendTrySendError>),
     Append {
         details: AppendErrorDetails,
         interruption: Option<WriteErrorDetails>,
@@ -140,6 +246,7 @@ enum FailureDetails {
     Statement {
         id: Option<Uuid>,
         details: Option<StatementErrorDetails>,
+        submitted: bool,
     },
     Catalog(CatalogMutationOutcome),
 }
@@ -169,7 +276,8 @@ enum AppendProgress {
 pub struct Error {
     kind: ErrorKind,
     message: String,
-    status: ErrorStatus,
+    operation: ErrorOperation,
+    retry: RetryFacts,
     diagnostics: Option<Box<ErrorDiagnostics>>,
     failure: Option<Box<FailureDetails>>,
     progress: Option<Box<AppendProgress>>,
@@ -262,6 +370,16 @@ impl Error {
         }
     }
 
+    /// Returns the original local try_send failure after conversion to Error.
+    /// Its buffer and record-size details remain typed; serialization failures
+    /// also retain their native source through the standard error chain.
+    pub fn try_send_error(&self) -> Option<&AppendTrySendError> {
+        match self.failure.as_deref() {
+            Some(FailureDetails::Admission(error)) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+
     /// Returns this failed send_all call's admitted prefix. Those rows remain
     /// owned by the stream; settle it before deciding which rows can be replayed.
     pub fn append_admission(&self) -> Option<&AppendAdmissionResult> {
@@ -299,24 +417,69 @@ impl Error {
         }
     }
 
+    /// Returns whether retrying this same public operation is safe and useful.
+    /// Aggregate append failures require inspecting their progress, not replaying
+    /// the whole input. Query execution errors after submission must be resumed
+    /// through their statement ID. Unknown writes are never advertised as safe.
     pub fn is_retryable(&self) -> bool {
-        self.is_temporary()
-    }
-    pub fn is_temporary(&self) -> bool {
-        self.status == ErrorStatus::Temporary
-    }
-    pub fn is_permanent(&self) -> bool {
-        self.status == ErrorStatus::Permanent
-    }
-    pub fn is_persistent(&self) -> bool {
-        self.status == ErrorStatus::Persistent
+        if !self.retry.transient
+            || self.retry.exhausted
+            || self.progress.is_some()
+            || self.kind == ErrorKind::Closed
+            || self.catalog_outcome() == Some(CatalogMutationOutcome::Unknown)
+            || self
+                .append_details()
+                .is_some_and(|details| details.status == AppendState::Unknown)
+        {
+            return false;
+        }
+        if matches!(
+            self.operation,
+            ErrorOperation::SubmitStatement | ErrorOperation::ExecuteStatement
+        ) {
+            let submitted = matches!(
+                self.failure.as_deref(),
+                Some(FailureDetails::Statement {
+                    submitted: true,
+                    ..
+                })
+            );
+            return !submitted
+                && self.http_status().is_some_and(|status| {
+                    status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT
+                });
+        }
+        true
     }
 
-    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+    /// Returns the public operation, independently of its failure category.
+    pub fn operation(&self) -> ErrorOperation {
+        self.operation
+    }
+
+    /// Returns whether the retained failed append request exhausted its budget.
+    /// This is independent of whether an attempt may have committed. Finite-write
+    /// reports retain this fact separately on each failed batch.
+    pub fn retry_exhausted(&self) -> bool {
+        self.retry.exhausted
+    }
+
+    /// Returns additional attempts for the retained failed append request.
+    /// Aggregate reports contain retry counts for the complete write or interval.
+    pub fn retries(&self) -> usize {
+        self.retry.retries
+    }
+
+    pub(crate) fn new(
+        kind: ErrorKind,
+        operation: ErrorOperation,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             kind,
+            operation,
             message: message.into(),
-            status: ErrorStatus::Permanent,
+            retry: RetryFacts::default(),
             diagnostics: None,
             failure: None,
             progress: None,
@@ -324,7 +487,7 @@ impl Error {
         }
     }
 
-    pub fn with_context(mut self, key: &'static str, value: impl ToString) -> Self {
+    pub(crate) fn with_context(mut self, key: &'static str, value: impl ToString) -> Self {
         self.diagnostics_mut()
             .context
             .push((key, value.to_string()));
@@ -335,30 +498,57 @@ impl Error {
     ///
     /// # Panics
     /// Panics if a source is already present.
-    pub fn set_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+    pub(crate) fn set_source(
+        mut self,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
         assert!(self.source.is_none(), "the source error has been set");
         self.source = Some(Arc::new(source));
         self
     }
 
-    pub fn set_permanent(mut self) -> Self {
-        self.status = ErrorStatus::Permanent;
+    pub(crate) fn with_operation(mut self, operation: ErrorOperation) -> Self {
+        self.operation = operation;
         self
     }
-    pub fn set_temporary(mut self) -> Self {
-        self.status = ErrorStatus::Temporary;
+
+    pub(crate) fn is_transient(&self) -> bool {
+        self.retry.transient
+    }
+
+    pub(crate) fn with_transient_failure(mut self, transient: bool) -> Self {
+        self.retry.transient = transient;
         self
     }
-    pub fn set_persistent(mut self) -> Self {
-        self.status = ErrorStatus::Persistent;
+
+    pub(crate) fn with_retry_history(mut self, retries: usize, exhausted: bool) -> Self {
+        self.retry.exhausted = exhausted;
+        self.retry.retries = retries;
+        self
+    }
+
+    pub(crate) fn after_submission(mut self) -> Self {
+        if let Some(FailureDetails::Statement { submitted, .. }) = self.failure.as_deref_mut() {
+            *submitted = true;
+        }
+        self
+    }
+
+    pub(crate) fn for_closed_stream(mut self) -> Self {
+        self.kind = ErrorKind::Closed;
+        self.operation = ErrorOperation::AdmitRows;
         self
     }
 
     pub(crate) fn with_append_admission(mut self, accepted_rows: u64) -> Self {
+        self.operation = ErrorOperation::AdmitRows;
+        if accepted_rows > 0 {
+            self.kind = ErrorKind::Incomplete;
+        }
         self.progress = Some(Box::new(AppendProgress::Admission(AppendAdmissionResult {
             accepted_rows,
         })));
-        self.set_persistent()
+        self
     }
 
     pub(crate) fn with_append_write(
@@ -366,16 +556,23 @@ impl Error {
         report: AppendWriteReport,
         input_index: Option<usize>,
     ) -> Self {
+        self.operation = ErrorOperation::WriteRows;
+        if !report.batches().is_empty() {
+            self.kind = ErrorKind::Incomplete;
+        }
         self.progress = Some(Box::new(AppendProgress::Write {
             report,
             input_index,
         }));
-        self.set_persistent()
+        self
     }
 
     pub(crate) fn with_append_delivery(mut self, report: AppendDeliveryReport) -> Self {
+        if report.outcome != AppendDeliveryOutcome::Ok {
+            self.kind = ErrorKind::Incomplete;
+        }
         self.progress = Some(Box::new(AppendProgress::Delivery(report)));
-        self.set_persistent()
+        self
     }
 
     pub(crate) fn set_append_details(mut self, details: AppendErrorDetails) -> Self {
@@ -395,6 +592,7 @@ impl Error {
     }
 
     pub(crate) fn set_write_timeout(mut self) -> Self {
+        self.kind = ErrorKind::Timeout;
         match self.failure.as_deref_mut() {
             Some(FailureDetails::Append { interruption, .. }) => {
                 *interruption = Some(WriteErrorDetails {
@@ -419,6 +617,7 @@ impl Error {
                 self.failure = Some(Box::new(FailureDetails::Statement {
                     id: Some(id),
                     details: None,
+                    submitted: false,
                 }))
             }
             _ => unreachable!("statement ID belongs to a statement failure"),
@@ -435,6 +634,7 @@ impl Error {
                 self.failure = Some(Box::new(FailureDetails::Statement {
                     id: None,
                     details: Some(details),
+                    submitted: true,
                 }))
             }
             _ => unreachable!("statement details belong to a statement failure"),
@@ -478,9 +678,32 @@ impl Error {
     }
 }
 
+impl From<AppendTrySendError> for Error {
+    fn from(error: AppendTrySendError) -> Self {
+        let (kind, transient) = match &error {
+            AppendTrySendError::BufferFull => (ErrorKind::RateLimited, true),
+            AppendTrySendError::CircuitOpen => (ErrorKind::Unavailable, true),
+            AppendTrySendError::Closed => (ErrorKind::Closed, false),
+            _ => (ErrorKind::InvalidInput, false),
+        };
+        let message = match &error {
+            AppendTrySendError::Serialization(_) => "failed to serialize append row".to_string(),
+            _ => error.to_string(),
+        };
+        let mut failure =
+            Self::new(kind, ErrorOperation::AdmitRows, message).with_transient_failure(transient);
+        failure.failure = Some(Box::new(FailureDetails::Admission(Arc::new(error))));
+        failure
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({}) => {}", self.kind, self.status, self.message)?;
+        write!(
+            f,
+            "{} failed [{}]: {}",
+            self.operation, self.kind, self.message
+        )?;
         if let Some(diagnostics) = &self.diagnostics {
             for (key, value) in &diagnostics.context {
                 write!(f, ", {key}: {value}")?;
@@ -540,7 +763,8 @@ impl fmt::Debug for Error {
                 .debug_struct("Error")
                 .field("kind", &self.kind)
                 .field("message", &self.message)
-                .field("status", &self.status)
+                .field("operation", &self.operation)
+                .field("retry", &self.retry)
                 .field("diagnostics", &self.diagnostics)
                 .field("failure", &self.failure)
                 .field("progress", &self.progress)
@@ -559,7 +783,10 @@ impl fmt::Debug for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|source| source.as_ref() as _)
+        self.source
+            .as_ref()
+            .map(|source| source.as_ref() as _)
+            .or_else(|| self.try_send_error().and_then(std::error::Error::source))
     }
 }
 
@@ -569,8 +796,12 @@ mod tests {
 
     #[test]
     fn diagnostics_keep_the_cause_separate_from_the_operation_message() {
-        let error = Error::new(ErrorKind::Unexpected, "failed to read response")
-            .set_source(std::io::Error::other("connection interrupted"));
+        let error = Error::new(
+            ErrorKind::Internal,
+            ErrorOperation::BuildClient,
+            "failed to read response",
+        )
+        .set_source(std::io::Error::other("connection interrupted"));
         assert!(!error.to_string().contains("connection interrupted"));
         let cause = std::error::Error::source(&error).unwrap();
         assert_eq!(cause.to_string(), "connection interrupted");
@@ -581,8 +812,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "the source error has been set")]
     fn replacing_source_is_rejected() {
-        Error::new(ErrorKind::Unexpected, "operation failed")
-            .set_source(std::io::Error::other("original cause"))
-            .set_source(std::io::Error::other("replacement"));
+        Error::new(
+            ErrorKind::Internal,
+            ErrorOperation::BuildClient,
+            "operation failed",
+        )
+        .set_source(std::io::Error::other("original cause"))
+        .set_source(std::io::Error::other("replacement"));
     }
 }
