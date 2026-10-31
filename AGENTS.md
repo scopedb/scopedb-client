@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the SDK and follow its design, Rust style, API contract, and testing guidance.
+
 ## Markdown
 
 - Keep each semantic prose paragraph and each list item on one source line; do not hard-wrap within a paragraph or list item.
