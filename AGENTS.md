@@ -18,6 +18,8 @@ Declare restricted visibility at module boundaries and use `pub` for their inter
 
 Import referenced symbols from `crate` and preserve their names. Retain meaningful qualification such as `error::Error` or `tokio::time::sleep` when it identifies the operation or distinguishes names. Avoid aliases without a concrete reason. Reserve `use super::*` for test modules. Re-export a module's own children with explicit `pub use self::...` declarations.
 
+In xtask, `use std::process::Command as StdCommand` is allowed to distinguish process commands from command-line parsing types.
+
 ## Public API contracts
 
 Describe what an operation accepts, when it completes, and what a failure establishes. Preserve structured information needed for recovery on both success and failure paths. Diagnostic strings are not a substitute for typed partial-progress information.

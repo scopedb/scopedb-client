@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::process;
+use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use clap::Parser;
@@ -147,10 +147,10 @@ impl SemverReleaseType {
     }
 }
 
-fn find_command(cmd: &str) -> process::Command {
+fn find_command(cmd: &str) -> StdCommand {
     match which::which(cmd) {
         Ok(exe) => {
-            let mut cmd = process::Command::new(exe);
+            let mut cmd = StdCommand::new(exe);
             cmd.current_dir(env!("CARGO_WORKSPACE_DIR"));
             cmd
         }
@@ -168,7 +168,7 @@ fn ensure_installed(bin: &str, crate_name: &str) {
     }
 }
 
-fn run_command(mut cmd: process::Command) {
+fn run_command(mut cmd: StdCommand) {
     println!("{cmd:?}");
     let status = cmd.status().expect("failed to execute process");
     assert!(status.success(), "command failed: {status}");
@@ -238,7 +238,7 @@ fn classify_release_type(baseline: &Version, release: &Version) -> SemverRelease
     }
 }
 
-fn make_build_cmd(locked: bool) -> process::Command {
+fn make_build_cmd(locked: bool) -> StdCommand {
     let mut cmd = find_command("cargo");
     cmd.args([
         "build",
@@ -255,7 +255,7 @@ fn make_build_cmd(locked: bool) -> process::Command {
     cmd
 }
 
-fn make_test_cmd(no_capture: bool) -> process::Command {
+fn make_test_cmd(no_capture: bool) -> StdCommand {
     let mut cmd = find_command("cargo");
     cmd.args(["test", "--workspace"]);
     if no_capture {
@@ -264,7 +264,7 @@ fn make_test_cmd(no_capture: bool) -> process::Command {
     cmd
 }
 
-fn make_check_cmd() -> process::Command {
+fn make_check_cmd() -> StdCommand {
     let mut cmd = find_command("cargo");
     cmd.env("RUSTFLAGS", "-Dwarnings");
     cmd.args([
@@ -277,7 +277,7 @@ fn make_check_cmd() -> process::Command {
     cmd
 }
 
-fn make_format_cmd(fix: bool) -> process::Command {
+fn make_format_cmd(fix: bool) -> StdCommand {
     let mut cmd = find_command("cargo");
     cmd.args(["+nightly", "fmt", "--all"]);
     if !fix {
@@ -286,7 +286,7 @@ fn make_format_cmd(fix: bool) -> process::Command {
     cmd
 }
 
-fn make_clippy_cmd(fix: bool) -> process::Command {
+fn make_clippy_cmd(fix: bool) -> StdCommand {
     let mut cmd = find_command("cargo");
     cmd.args([
         "+nightly",
@@ -304,7 +304,7 @@ fn make_clippy_cmd(fix: bool) -> process::Command {
     cmd
 }
 
-fn make_doc_cmd() -> process::Command {
+fn make_doc_cmd() -> StdCommand {
     let mut cmd = find_command("cargo");
     cmd.env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
     cmd.args([
@@ -320,7 +320,7 @@ fn make_doc_cmd() -> process::Command {
 fn make_semver_check_cmd(
     baseline_version: &Version,
     release_type: SemverReleaseType,
-) -> process::Command {
+) -> StdCommand {
     ensure_installed("cargo-semver-checks", "cargo-semver-checks");
     let mut cmd = find_command("cargo");
     cmd.args([
@@ -337,7 +337,7 @@ fn make_semver_check_cmd(
     cmd
 }
 
-fn make_hawkeye_cmd(fix: bool) -> process::Command {
+fn make_hawkeye_cmd(fix: bool) -> StdCommand {
     ensure_installed("hawkeye", "hawkeye");
     let mut cmd = find_command("hawkeye");
     if fix {
@@ -348,12 +348,12 @@ fn make_hawkeye_cmd(fix: bool) -> process::Command {
     cmd
 }
 
-fn make_typos_cmd() -> process::Command {
+fn make_typos_cmd() -> StdCommand {
     ensure_installed("typos", "typos-cli");
     find_command("typos")
 }
 
-fn make_taplo_cmd(fix: bool) -> process::Command {
+fn make_taplo_cmd(fix: bool) -> StdCommand {
     ensure_installed("taplo", "taplo-cli");
     let mut cmd = find_command("taplo");
     if fix {
