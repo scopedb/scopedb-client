@@ -22,6 +22,9 @@ use crate::CatalogTable;
 use crate::Client;
 use crate::Error;
 
+const DEFAULT_DATABASE: &str = "scopedb";
+const DEFAULT_SCHEMA: &str = "public";
+
 /// A table selected for writes or catalog reads.
 ///
 /// The table must already exist for writes. Database and schema default to
@@ -110,8 +113,8 @@ impl Table {
     pub(crate) fn new(client: Client, table: String) -> Self {
         Self {
             client,
-            database: "scopedb".to_string(),
-            schema: "public".to_string(),
+            database: DEFAULT_DATABASE.to_string(),
+            schema: DEFAULT_SCHEMA.to_string(),
             table,
         }
     }
