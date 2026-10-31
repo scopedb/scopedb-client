@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::error;
 use std::fmt;
 use std::future::Future;
 use std::future::poll_fn;
@@ -269,8 +268,8 @@ impl fmt::Display for AppendWriteError {
     }
 }
 
-impl error::Error for AppendWriteError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+impl std::error::Error for AppendWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.cause.as_ref())
     }
 }

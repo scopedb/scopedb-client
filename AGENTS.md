@@ -16,7 +16,9 @@ Name types by their domain role and scope. Distinguish reusable writers, one wri
 
 Declare restricted visibility at module boundaries and use `pub` for their internal interfaces. Keep items private when only their defining module and descendants need them. For publicly reachable modules and re-exported types, reserve unrestricted `pub` for intentional public API and use narrower visibility for internal callers. Do not widen visibility solely to let another module's tests reach an implementation detail.
 
-Import referenced symbols from `crate` and preserve their names. Retain meaningful qualification such as `error::Error` or `tokio::time::sleep` when it identifies the operation or distinguishes names. Avoid aliases without a concrete reason. Reserve `use super::*` for test modules. Re-export a module's own children with explicit `pub use self::...` declarations.
+Import SDK symbols from `crate` instead of spelling `crate::...` or `super::...` inline. Preserve imported names and retain meaningful qualification such as `tokio::time::sleep` when it identifies the operation or distinguishes names. Avoid aliases without a concrete reason. Reserve `use super::*` for test modules. Re-export a module's own children with explicit `pub use self::...` declarations.
+
+Use inline fully qualified paths for `std::error::Error` and operations such as `std::panic::catch_unwind`, rather than importing the `error` or `panic` modules.
 
 In xtask, `use std::process::Command as StdCommand` is allowed to distinguish process commands from command-line parsing types.
 

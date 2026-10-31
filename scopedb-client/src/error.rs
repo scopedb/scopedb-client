@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::error;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -298,8 +297,8 @@ impl fmt::Debug for Error {
     }
 }
 
-impl error::Error for Error {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|v| v.as_ref().as_ref())
     }
 }

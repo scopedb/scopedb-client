@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::error;
 use std::fmt;
 use std::mem;
-use std::panic;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -117,8 +115,8 @@ impl fmt::Display for AppendAdmissionError {
     }
 }
 
-impl error::Error for AppendAdmissionError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+impl std::error::Error for AppendAdmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.cause.as_ref())
     }
 }
@@ -274,8 +272,8 @@ impl fmt::Display for AppendTrySendError {
     }
 }
 
-impl error::Error for AppendTrySendError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+impl std::error::Error for AppendTrySendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serialization(err) => Some(err),
             _ => None,
@@ -1436,7 +1434,7 @@ impl AppendWorker {
 
         if let Some(event) = &failure_event {
             for listener in &self.config.batch_failure_listeners {
-                let _ = panic::catch_unwind(AssertUnwindSafe(|| listener(event)));
+                let _ = std::panic::catch_unwind(AssertUnwindSafe(|| listener(event)));
             }
         }
     }
@@ -1776,7 +1774,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.accepted_rows(), 1);
         assert_eq!(failure.cause().kind(), ErrorKind::Unexpected);
-        assert!(error::Error::source(&failure).is_some());
+        assert!(std::error::Error::source(&failure).is_some());
         assert_eq!(stream.stats().accepted_rows, 2);
         stream.send(&serde_json::json!({"id":4})).await.unwrap();
         let report = stream.shutdown().await.unwrap();
@@ -1941,7 +1939,7 @@ mod tests {
         assert_eq!(restored.request_id(), Some("request-123"));
         assert_eq!(restored.retry_after(), Some(Duration::from_secs(2)));
         assert!(restored.is_temporary());
-        let cause = error::Error::source(&restored)
+        let cause = std::error::Error::source(&restored)
             .unwrap()
             .downcast_ref::<std::io::Error>()
             .unwrap();
@@ -2334,7 +2332,11 @@ mod tests {
         assert_eq!(server.requests().len(), 1);
         assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
         assert!(!error.is_retryable());
-        assert!(error::Error::source(&error).unwrap().is::<reqwest::Error>());
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .is::<reqwest::Error>()
+        );
     }
 
     #[tokio::test]
@@ -2353,7 +2355,11 @@ mod tests {
 
         assert_eq!(server.requests().len(), 1);
         assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-        assert!(error::Error::source(&error).unwrap().is::<reqwest::Error>());
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .is::<reqwest::Error>()
+        );
         assert_eq!(stream.stats().retries, 0);
     }
 
@@ -2442,7 +2448,11 @@ mod tests {
                 assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
                 assert!(format!("{error:?}").contains(&format!("retries: {max_retries}")));
                 if disconnect {
-                    assert!(error::Error::source(&error).unwrap().is::<reqwest::Error>());
+                    assert!(
+                        std::error::Error::source(&error)
+                            .unwrap()
+                            .is::<reqwest::Error>()
+                    );
                 } else {
                     assert_eq!(
                         error.http_status(),
