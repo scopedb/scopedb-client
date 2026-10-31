@@ -65,7 +65,7 @@ println!("Written: {} rows", report.committed_rows);
 | Read query results           | [`ResultSet`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.ResultSet.html)                                      |
 | Track or cancel a query      | [`StatementHandle`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.StatementHandle.html)                          |
 | Read or change table schemas | [`Catalog`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Catalog.html)                                          |
-| Write a finite slice of rows | [`Table::append_batch`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Table.html#method.append_batch)            |
+| Write a finite slice of rows | [`Table::append_writer`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Table.html#method.append_writer)            |
 | Tune batching and retries    | [`AppendStreamBuilder`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.AppendStreamBuilder.html)                  |
 | Write logs or telemetry      | [Continue after a batch fails](https://docs.rs/scopedb-client/latest/scopedb_client/struct.AppendStreamBuilder.html#telemetry) |
 | Set timeouts or HTTP options | [`ClientBuilder`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.ClientBuilder.html)                              |

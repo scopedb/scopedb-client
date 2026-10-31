@@ -315,7 +315,7 @@ impl AppendWriter {
     ///
     /// ```no_run
     /// # async fn example(client: scopedb_client::Client) -> Result<(), Box<dyn std::error::Error>> {
-    /// let writer = client.table("events").append_batch().build()?;
+    /// let writer = client.table("events").append_writer().build()?;
     /// let rows = [serde_json::json!({"id": 1}), serde_json::json!({"id": 2})];
     /// let report = writer.write(&rows).await?;
     /// assert_eq!(report.committed_rows(), rows.len());
@@ -498,7 +498,7 @@ mod tests {
         let writer = server
             .client()
             .table("events")
-            .append_batch()
+            .append_writer()
             .max_batch_rows(2)
             .max_concurrent_batches(2)
             .failure_policy(AppendFailurePolicy::Continue)
@@ -551,7 +551,7 @@ mod tests {
         let writer = server
             .client()
             .table("events")
-            .append_batch()
+            .append_writer()
             .max_batch_rows(2)
             .max_concurrent_batches(1)
             .build()
@@ -593,7 +593,7 @@ mod tests {
             let writer = server
                 .client()
                 .table("events")
-                .append_batch()
+                .append_writer()
                 .max_batch_rows(2)
                 .max_concurrent_batches(2)
                 .failure_policy(policy)
@@ -625,7 +625,7 @@ mod tests {
         let writer = server
             .client()
             .table("events")
-            .append_batch()
+            .append_writer()
             .build()
             .unwrap();
         for row in [
@@ -657,7 +657,7 @@ mod tests {
             .with_database("analytics 2026");
         // Two eight-byte rows need one more byte for their NDJSON separator.
         let writer = table
-            .append_batch()
+            .append_writer()
             .target_batch_bytes(16)
             .max_concurrent_batches(1)
             .build()
@@ -711,7 +711,7 @@ mod tests {
         let writer = server
             .client()
             .table("events")
-            .append_batch()
+            .append_writer()
             .max_retries(1)
             .initial_backoff(Duration::ZERO)
             .build()
@@ -742,7 +742,7 @@ mod tests {
             let writer = server
                 .client()
                 .table("events")
-                .append_batch()
+                .append_writer()
                 .retry_unknown(replay)
                 .max_retries(1)
                 .initial_backoff(Duration::ZERO)
@@ -770,7 +770,7 @@ mod tests {
         let writer = server
             .client()
             .table("events")
-            .append_batch()
+            .append_writer()
             .build()
             .unwrap();
         let empty = writer.write::<serde_json::Value>(&[]).await.unwrap();
@@ -792,21 +792,21 @@ mod tests {
             .build()
             .unwrap()
             .table("events");
-        assert!(table.append_batch().build().is_ok());
+        assert!(table.append_writer().build().is_ok());
         for builder in [
-            table.append_batch().target_batch_bytes(0),
+            table.append_writer().target_batch_bytes(0),
             table
-                .append_batch()
+                .append_writer()
                 .target_batch_bytes(crate::client::MAX_APPEND_BODY_BYTES + 1),
-            table.append_batch().max_batch_rows(0),
+            table.append_writer().max_batch_rows(0),
             table
-                .append_batch()
+                .append_writer()
                 .max_batch_rows(crate::client::MAX_APPEND_ROWS + 1),
-            table.append_batch().max_concurrent_batches(0),
-            table.append_batch().attempt_timeout(Duration::ZERO),
-            table.append_batch().attempt_timeout(Duration::MAX),
-            table.append_batch().initial_backoff(Duration::MAX),
-            table.append_batch().max_backoff(Duration::MAX),
+            table.append_writer().max_concurrent_batches(0),
+            table.append_writer().attempt_timeout(Duration::ZERO),
+            table.append_writer().attempt_timeout(Duration::MAX),
+            table.append_writer().initial_backoff(Duration::MAX),
+            table.append_writer().max_backoff(Duration::MAX),
         ] {
             assert_eq!(
                 builder.build().unwrap_err().kind(),
@@ -871,7 +871,7 @@ mod lifecycle_tests {
             let writer = server
                 .client()
                 .table("events")
-                .append_batch()
+                .append_writer()
                 .max_batch_rows(1)
                 .max_concurrent_batches(2)
                 .max_retries(1)
@@ -927,7 +927,7 @@ mod lifecycle_tests {
         let writer = server
             .client()
             .table("events")
-            .append_batch()
+            .append_writer()
             .max_batch_rows(1)
             .max_concurrent_batches(1)
             .max_retries(3)
@@ -990,7 +990,7 @@ mod lifecycle_tests {
             let writer = server
                 .client()
                 .table("events")
-                .append_batch()
+                .append_writer()
                 .max_batch_rows(1)
                 .max_concurrent_batches(1)
                 .max_retries(3)

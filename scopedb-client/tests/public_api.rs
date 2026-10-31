@@ -57,7 +57,7 @@ fn application_api_surface_compiles(client: &scopedb_client::Client) {
     let resource = table.catalog();
     let _description = resource.get();
     let writer: scopedb_client::AppendWriter = table
-        .append_batch()
+        .append_writer()
         .target_batch_bytes(1024)
         .max_batch_rows(100)
         .max_concurrent_batches(2)
