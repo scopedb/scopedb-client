@@ -14,11 +14,13 @@
 
 use std::time::Duration;
 
+use crate::AppendRowsResult;
+use crate::AppendStreamBuilder;
+use crate::AppendWriterBuilder;
+use crate::CatalogResource;
 use crate::CatalogTable;
 use crate::Client;
 use crate::Error;
-use crate::append_stream::AppendStreamBuilder;
-use crate::protocol::AppendRowsResult;
 
 /// A table selected for writes or catalog reads.
 ///
@@ -98,8 +100,8 @@ impl Table {
     }
 
     /// Builds a reusable writer for finite input slices with per-batch input ranges.
-    pub fn append_batch(&self) -> crate::AppendWriterBuilder {
-        crate::AppendWriterBuilder::new(self.clone())
+    pub fn append_batch(&self) -> AppendWriterBuilder {
+        AppendWriterBuilder::new(self.clone())
     }
 
     /// Builds an asynchronous, bounded and concurrent append stream for this table.
@@ -108,7 +110,7 @@ impl Table {
     }
 
     /// Selects this table's complete definition and ETag for conditional changes.
-    pub fn catalog(&self) -> crate::CatalogResource<CatalogTable> {
+    pub fn catalog(&self) -> CatalogResource<CatalogTable> {
         self.client
             .catalog()
             .table(&self.database, &self.schema, &self.table)
@@ -163,8 +165,7 @@ fn quote_ident(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::quote_ident;
-    use crate::Client;
+    use super::*;
     use crate::test_support::MockResponse;
     use crate::test_support::MockServer;
 

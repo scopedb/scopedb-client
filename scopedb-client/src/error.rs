@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::error;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
 use uuid::Uuid;
 
-use crate::protocol::AppendErrorDetails;
-use crate::protocol::AppendState;
-use crate::protocol::StatementErrorDetails;
+use crate::AppendErrorDetails;
+use crate::AppendState;
+use crate::StatementErrorDetails;
 
 /// ErrorKind is all kinds of Error of ScopeDB client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -175,7 +177,7 @@ pub struct Error {
     statement_metadata: Option<Box<StatementErrorMetadata>>,
     http_metadata: Option<Box<HttpErrorMetadata>>,
 
-    source: Option<std::sync::Arc<anyhow::Error>>,
+    source: Option<Arc<anyhow::Error>>,
 }
 
 impl fmt::Display for Error {
@@ -296,8 +298,8 @@ impl fmt::Debug for Error {
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         self.source.as_ref().map(|v| v.as_ref().as_ref())
     }
 }
@@ -334,7 +336,7 @@ impl Error {
     pub fn set_source(mut self, src: impl Into<anyhow::Error>) -> Self {
         debug_assert!(self.source.is_none(), "the source error has been set");
 
-        self.source = Some(std::sync::Arc::new(src.into()));
+        self.source = Some(Arc::new(src.into()));
         self
     }
 

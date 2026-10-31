@@ -495,10 +495,7 @@ mod tests {
     use reqwest::header::HeaderMap;
     use reqwest::header::HeaderValue;
 
-    use super::StatementStatus;
-    use super::decode_http_error;
-    use super::parse_error_payload;
-    use super::parse_retry_after;
+    use super::*;
     use crate::ErrorKind;
 
     #[test]
