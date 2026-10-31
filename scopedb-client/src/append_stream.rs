@@ -41,10 +41,10 @@ use crate::append::AppendBatchRequest;
 use crate::append::AppendDeliveryOutcome;
 use crate::append::AppendFailurePolicy;
 use crate::append::AppendOptions;
+use crate::append::RecordError;
 use crate::append::append_batch;
 use crate::append::config_error;
-use crate::append::prepare_record;
-use crate::append::prepare_record_for_try_send;
+use crate::append::encode_record;
 use crate::append::validate_deadline;
 use crate::append::validate_positive;
 
@@ -200,6 +200,16 @@ pub enum AppendTrySendError {
     BufferFull,
     CircuitOpen,
     Closed,
+}
+
+impl From<RecordError> for AppendTrySendError {
+    fn from(error: RecordError) -> Self {
+        match error {
+            RecordError::Serialization(error) => Self::Serialization(error),
+            RecordError::InvalidRecord => Self::InvalidRecord,
+            RecordError::RecordTooLarge { bytes, limit } => Self::RecordTooLarge { bytes, limit },
+        }
+    }
 }
 
 impl fmt::Display for AppendTrySendError {
@@ -661,7 +671,7 @@ impl AppendStream {
         T: Serialize + ?Sized,
     {
         self.check_open()?;
-        let payload = prepare_record(row)?;
+        let payload = encode_record(row)?;
         let reserved_bytes = payload.len().saturating_add(1);
         let reservation = self
             .inner
@@ -715,7 +725,7 @@ impl AppendStream {
             }
         }
 
-        let payload = match prepare_record_for_try_send(row) {
+        let payload = match encode_record(row).map_err(AppendTrySendError::from) {
             Ok(payload) => payload,
             Err(err) => {
                 let reason = match err {
@@ -1827,7 +1837,7 @@ mod tests {
 
         let row = serde_json::json!({"payload": "x".repeat(MAX_APPEND_BODY_BYTES)});
         assert!(matches!(
-            prepare_record_for_try_send(&row),
+            encode_record(&row).map_err(AppendTrySendError::from),
             Err(AppendTrySendError::RecordTooLarge {
                 limit: MAX_APPEND_BODY_BYTES,
                 ..

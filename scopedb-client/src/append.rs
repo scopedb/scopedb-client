@@ -20,7 +20,6 @@ use serde::Serialize;
 use crate::AppendErrorDetails;
 use crate::AppendRowsResult;
 use crate::AppendState;
-use crate::AppendTrySendError;
 use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
@@ -152,45 +151,51 @@ pub fn config_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::ConfigInvalid, message)
 }
 
-pub fn prepare_record<T>(row: &T) -> Result<String, Error>
-where
-    T: Serialize + ?Sized,
-{
-    let payload = serde_json::to_string(row).map_err(|err| {
-        Error::new(ErrorKind::Unexpected, "failed to serialize append row").set_source(err)
-    })?;
-    validate_record_payload(&payload).map_err(|err| match err {
-        AppendTrySendError::RecordTooLarge { bytes, limit } => Error::new(
-            ErrorKind::Unexpected,
-            format!("append row is {bytes} bytes, exceeding the {limit}-byte limit"),
-        ),
-        _ => Error::new(
-            ErrorKind::Unexpected,
-            "append row must serialize to a JSON object",
-        ),
-    })?;
-    Ok(payload)
+#[derive(Debug)]
+pub enum RecordError {
+    Serialization(serde_json::Error),
+    InvalidRecord,
+    RecordTooLarge { bytes: usize, limit: usize },
 }
 
-pub fn prepare_record_for_try_send<T>(row: &T) -> Result<String, AppendTrySendError>
+impl From<RecordError> for Error {
+    fn from(error: RecordError) -> Self {
+        match error {
+            RecordError::Serialization(error) => {
+                Error::new(ErrorKind::Unexpected, "failed to serialize append row")
+                    .set_source(error)
+            }
+            RecordError::InvalidRecord => Error::new(
+                ErrorKind::Unexpected,
+                "append row must serialize to a JSON object",
+            ),
+            RecordError::RecordTooLarge { bytes, limit } => Error::new(
+                ErrorKind::Unexpected,
+                format!("append row is {bytes} bytes, exceeding the {limit}-byte limit"),
+            ),
+        }
+    }
+}
+
+pub fn encode_record<T>(row: &T) -> Result<String, RecordError>
 where
     T: Serialize + ?Sized,
 {
-    let payload = serde_json::to_string(row).map_err(AppendTrySendError::Serialization)?;
+    let payload = serde_json::to_string(row).map_err(RecordError::Serialization)?;
     validate_record_payload(&payload)?;
     Ok(payload)
 }
 
-fn validate_record_payload(payload: &str) -> Result<(), AppendTrySendError> {
+fn validate_record_payload(payload: &str) -> Result<(), RecordError> {
     let bytes = payload.len();
     if bytes > MAX_APPEND_BODY_BYTES {
-        return Err(AppendTrySendError::RecordTooLarge {
+        return Err(RecordError::RecordTooLarge {
             bytes,
             limit: MAX_APPEND_BODY_BYTES,
         });
     }
     if !payload.starts_with('{') {
-        return Err(AppendTrySendError::InvalidRecord);
+        return Err(RecordError::InvalidRecord);
     }
     Ok(())
 }
@@ -306,8 +311,8 @@ mod tests {
     #[test]
     fn rejects_non_object_rows() {
         assert!(matches!(
-            prepare_record_for_try_send(&vec![1, 2, 3]),
-            Err(AppendTrySendError::InvalidRecord)
+            encode_record(&vec![1, 2, 3]),
+            Err(RecordError::InvalidRecord)
         ));
     }
 

@@ -32,7 +32,7 @@ use crate::Error;
 use crate::append::AppendBatchRequest;
 use crate::append::AppendOptions;
 use crate::append::append_batch;
-use crate::append::prepare_record;
+use crate::append::encode_record;
 
 /// Configures a reusable writer for finite slices of rows.
 ///
@@ -367,11 +367,11 @@ impl AppendBatch {
                     let encoded = match lookahead
                         .take()
                         .map(Ok)
-                        .unwrap_or_else(|| prepare_record(&rows[cursor]))
+                        .unwrap_or_else(|| encode_record(&rows[cursor]))
                     {
                         Ok(encoded) => encoded,
                         Err(error) => {
-                            local_failure = Some((cursor, error));
+                            local_failure = Some((cursor, Error::from(error)));
                             stopped = true;
                             break;
                         }
