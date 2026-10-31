@@ -219,9 +219,7 @@ fn parse_retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
 #[derive(Debug, Serialize)]
 pub struct StatementRequest {
     pub statement: String,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub statement_id: Option<Uuid>,
+    pub statement_id: Uuid,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_elapsed_seconds: Option<f64>,

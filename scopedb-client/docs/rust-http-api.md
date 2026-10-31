@@ -79,7 +79,7 @@ A submission request is:
 }
 ```
 
-`statement_id` is optional. Duration limits must be positive and finite; omitted values use server defaults. `with_max_elapsed(Duration)` includes queueing time, while `with_max_estimated(Duration)` limits estimated execution duration.
+The HTTP API accepts an optional `statement_id`; the SDK always supplies one, allocating a UUID unless `with_statement_id()` overrides it. Submission errors retain this identifier through `Error::statement_id()` so callers can inspect the execution with `Client::statement_handle()` after losing a response. An identifier does not confirm acceptance or authorize resubmission. Duration limits must be positive and finite; omitted values use server defaults. `with_max_elapsed(Duration)` includes queueing time, while `with_max_estimated(Duration)` limits estimated execution duration.
 
 All three endpoints return the same complete status family: pending, running, finished, failed, or cancelled. Each includes `statement_id`, `created_at`, and progress with `compute_seconds`. Finished responses contain `result_set`; failed responses contain required `error: { code, message, details? }`. Neither failed nor cancelled responses require a top-level message. HTTP success alone does not mean execution succeeded.
 
