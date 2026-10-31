@@ -4,9 +4,12 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+## v0.5.0 (2026-10-31)
+
 ### Breaking Changes
 
 * Replace operation-specific `ErrorKind` variants with failure categories and a separate `ErrorOperation`. Use `is_retryable()` for the failed operation and inspect typed commit and progress data before replaying writes. Error construction, context mutation, and retry-state setters are internal; application-specific failures belong to application error types. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).
+* `Error`, `AppendLastFailure`, `AppendStreamStats`, and `AppendBatchFailureEvent` no longer implement `UnwindSafe` or `RefUnwindSafe`. Review closures that capture these types across panic boundaries; see [Review panic boundaries](scopedb-client/docs/migration-0.5.md#review-panic-boundaries).
 
 ### New Features
 
@@ -19,6 +22,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 * Keep transient failures, retry exhaustion, and unknown delivery outcomes separate when deciding retries and circuit availability, and preserve raw server codes without synthesizing client-side codes.
 * Preserve native result-cell parse errors through `std::error::Error::source()` while retaining row and column diagnostics.
+* Make migration guides, error-handling guidance, and packaged examples reachable from the generated API documentation.
 
 ## v0.4.2 (2026-10-27)
 

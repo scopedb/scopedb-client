@@ -1,6 +1,6 @@
 # Upgrade from 0.4 to 0.5
 
-Version 0.5 makes partial stream progress available on failure. Applications upgrading from 0.3 should first follow [Upgrade from 0.3 to 0.4](migration-0.4.md).
+Update your dependency with `cargo add scopedb-client@0.5`. Version 0.5 makes partial stream progress available on failure. Applications upgrading from 0.3 should first follow [Upgrade from 0.3 to 0.4][migration-0.4].
 
 ## Match failure categories and operations
 
@@ -18,7 +18,13 @@ Version 0.5 makes partial stream progress available on failure. Applications upg
 | Diagnostic retry counts                        | `retries()` and `retry_exhausted()` on the failed request     |
 | `ErrorKind::into_static()` / string conversion | `ErrorKind::as_str()`                                         |
 
-`Error::new`, `with_context`, `set_source`, and retry-state setters are internal. Applications should represent their own failures with application-owned error types, retaining the SDK error as a cause when needed. SDK-only functions return `Result<T, Error>` without a dynamic error wrapper. See the [error-handling guide](errors.md) for recovery contracts and diagnostics.
+`Error::new`, `with_context`, `set_source`, and retry-state setters are internal. Applications should represent their own failures with application-owned error types, retaining the SDK error as a cause when needed. SDK-only functions return `Result<T, Error>` without a dynamic error wrapper. See [`Error`][error-handling] for recovery contracts and diagnostics.
+
+## Review panic boundaries
+
+`Error`, `AppendLastFailure`, `AppendStreamStats`, and `AppendBatchFailureEvent` no longer implement [`UnwindSafe`](https://doc.rust-lang.org/std/panic/trait.UnwindSafe.html) or [`RefUnwindSafe`](https://doc.rust-lang.org/std/panic/trait.RefUnwindSafe.html). Errors retain underlying causes that do not guarantee unwind safety, so closures capturing these values may no longer compile with [`catch_unwind`](https://doc.rust-lang.org/std/panic/fn.catch_unwind.html).
+
+Keep SDK errors outside the closure when they are not needed inside it, or capture owned diagnostic values such as `error.to_string()` instead. If the closure must capture an SDK error, review the state that could be observed after a panic before using [`AssertUnwindSafe`](https://doc.rust-lang.org/std/panic/struct.AssertUnwindSafe.html); it asserts unwind safety rather than establishing it.
 
 ## Inspect failed delivery reports
 
@@ -52,3 +58,6 @@ Every statement now carries an ID before submission. After losing a submission r
 ## Inspect Catalog mutation outcomes
 
 Use `Error::catalog_outcome()` to distinguish `CatalogMutationOutcome::Rejected` from `Unknown`. `Unknown` requires reading the resource before replaying the mutation, including when a gateway supplies a structured error code. Reads, dry runs, and local validation failures return `None`. Replace checks for the client-generated `catalog_commit_outcome_unknown` code with this typed outcome. `code()`, `details()`, and HTTP metadata retain original server diagnostics without synthesizing client-side server codes.
+
+[migration-0.4]: migration-0.4.md
+[error-handling]: errors.md

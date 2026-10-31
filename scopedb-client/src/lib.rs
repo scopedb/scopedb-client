@@ -12,8 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Rustdoc resolves these references before the repository-relative Markdown defaults.
+#![doc = concat!(
+    "[migration-0.5]: migration/index.html#upgrade-from-04-to-05\n",
+    "[migration-0.4]: migration/index.html#upgrade-from-03-to-04\n",
+    "[examples]: https://docs.rs/crate/scopedb-client/",
+    env!("CARGO_PKG_VERSION"),
+    "/source/examples/README.md\n",
+)]
 #![doc = include_str!("../README.md")]
 
+#[doc = "[migration-0.4]: #upgrade-from-03-to-04\n[error-handling]: crate::Error\n"]
 #[doc = include_str!("../docs/migration-0.5.md")]
 #[doc = include_str!("../docs/migration-0.4.md")]
 pub mod migration {}
