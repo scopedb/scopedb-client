@@ -244,7 +244,7 @@ type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 /// Builder for an [`AppendStream`].
 ///
 /// Defaults to 4 MiB target batches, 4 concurrent requests, and
-/// [`AppendFailurePolicy::Stop`]. Transient rejections are retried; retrying
+/// [`AppendFailurePolicy::Stop`]. Validated HTTP 429 admission refusals are retried; retrying
 /// unknown outcomes requires opting into [`retry_unknown`](Self::retry_unknown).
 ///
 /// # Telemetry

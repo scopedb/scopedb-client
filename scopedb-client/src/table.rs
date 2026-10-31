@@ -78,6 +78,12 @@ impl Table {
     /// input must fit in `i64` (including `uint` columns and nested JSON); query
     /// results support the full `u64` range.
     ///
+    /// A complete, valid HTTP 200 response confirms the batch committed. The SDK retains
+    /// `status: Committed` in the result even when the server omits that field.
+    /// Valid modern 4xx responses establish rejection; 5xx, malformed responses, and
+    /// interrupted requests leave the outcome unknown. Only validated HTTP 429 refusals
+    /// are classified as safe automatic retries.
+    ///
     /// On failure, inspect [`Error::append_details`] for [`AppendState`](crate::AppendState).
     /// When the status is [`AppendState::Unknown`](crate::AppendState::Unknown), reconcile before
     /// replaying the payload.

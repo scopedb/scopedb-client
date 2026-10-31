@@ -74,6 +74,156 @@ async fn selected_table_is_shared_by_all_write_modes() {
 }
 
 #[tokio::test]
+async fn append_accepts_success_before_and_after_the_protocol_upgrade() {
+    for body in [
+        json!({"status": "committed", "num_rows_inserted": 1}),
+        json!({"num_rows_inserted": 1}),
+    ] {
+        let mut server = Server::start(move |_| {
+            let body = body.clone();
+            async move { Some(Reply::json(200, body)) }
+        })
+        .await;
+        let result = server
+            .client()
+            .table("events")
+            .append(r#"{"id":1}"#)
+            .await
+            .unwrap();
+        assert_eq!(result.status, AppendState::Committed);
+        assert_eq!(result.num_rows_inserted, 1);
+        assert_eq!(server.received().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn append_retries_only_valid_admission_refusals() {
+    for (status, body, retry, outcome) in [
+        (
+            429,
+            json!({"error": {"code": "too_many_requests", "message": "busy"}}),
+            true,
+            AppendState::Rejected,
+        ),
+        (
+            429,
+            json!({"error": {"code": "future_refusal", "message": "busy"}}),
+            true,
+            AppendState::Rejected,
+        ),
+        (
+            429,
+            json!({"code": "unavailable", "message": "busy", "details": {"status": "rejected"}}),
+            true,
+            AppendState::Rejected,
+        ),
+        (
+            503,
+            json!({"code": "unavailable", "message": "busy", "retryable": true, "details": {"status": "rejected"}}),
+            false,
+            AppendState::Unknown,
+        ),
+        (
+            500,
+            json!({"error": {"code": "internal_server_error", "message": "commit response lost", "details": {"status": "rejected"}}}),
+            false,
+            AppendState::Unknown,
+        ),
+        (
+            429,
+            json!({"error": {"message": "missing code"}}),
+            false,
+            AppendState::Unknown,
+        ),
+        (
+            429,
+            json!({"error": {"code": "internal_server_error", "message": "inconsistent refusal"}}),
+            false,
+            AppendState::Unknown,
+        ),
+        (
+            400,
+            json!({"error": {"code": "bad_request", "message": "invalid row", "retryable": true}}),
+            false,
+            AppendState::Rejected,
+        ),
+        (
+            408,
+            json!({"error": {"code": "request_timeout", "message": "body read timed out"}}),
+            false,
+            AppendState::Rejected,
+        ),
+    ] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut server = Server::start(move |request| {
+            let first = attempts.fetch_add(1, Ordering::SeqCst) == 0;
+            let body = body.clone();
+            async move {
+                Some(if first {
+                    Reply::json(status, body).header("X-Request-Id", "ingest-attempt")
+                } else {
+                    Reply::committed(&request)
+                })
+            }
+        })
+        .await;
+        let result = server
+            .client()
+            .table("events")
+            .append_writer()
+            .max_retries(1)
+            .initial_backoff(Duration::ZERO)
+            .build()
+            .unwrap()
+            .write(&[json!({"id": 1})])
+            .await;
+        if retry {
+            let report = result.unwrap();
+            assert_eq!(report.committed_rows(), 1);
+            assert_eq!(report.batches()[0].retries(), 1);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.append_details().unwrap().status, outcome);
+            assert_eq!(error.request_id(), Some("ingest-attempt"));
+            assert!(!error.is_retryable());
+            assert_eq!(
+                error.append_write_report().unwrap().batches()[0].retries(),
+                0
+            );
+        }
+        assert_eq!(server.received().len(), 1 + usize::from(retry));
+    }
+}
+
+#[tokio::test]
+async fn invalid_append_successes_remain_unknown() {
+    for body in [
+        json!({"num_rows_inserted": 0}),
+        json!({"num_rows_inserted": -1}),
+        json!({"status": "unknown", "num_rows_inserted": 1}),
+        json!({"status": "future_state", "num_rows_inserted": 1}),
+        json!({"status": null, "num_rows_inserted": 1}),
+        json!({"error": {"code": "bad_request", "message": "not a success"}}),
+    ] {
+        let mut server = Server::start(move |_| {
+            let body = body.clone();
+            async move { Some(Reply::json(200, body)) }
+        })
+        .await;
+        let error = server
+            .client()
+            .table("events")
+            .append(r#"{"id":1}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidResponse);
+        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
+        assert!(!error.is_retryable());
+        assert_eq!(server.received().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn submitted_query_returns_typed_rows() {
     let mut server = Server::start(|request| async move {
         let body = if request.method == "POST" {
@@ -382,11 +532,17 @@ async fn replay_policy_preserves_earlier_unknown_outcomes() {
         let mut server = Server::start(move |_| {
             let attempt = attempts.fetch_add(1, Ordering::SeqCst);
             async move {
-                if attempt == 0 { None } else {
-                    Some(Reply::json(422, json!({"code": "invalid_schema", "message": "last rejection", "details": {"status": "rejected"}})))
+                if attempt == 0 {
+                    None
+                } else {
+                    Some(Reply::json(
+                        400,
+                        json!({"error": {"code": "bad_request", "message": "last rejection"}}),
+                    ))
                 }
             }
-        }).await;
+        })
+        .await;
         let writer = server
             .client()
             .table("events")
@@ -402,7 +558,7 @@ async fn replay_policy_preserves_earlier_unknown_outcomes() {
         assert_eq!(report.batches()[0].retries(), usize::from(replay));
         assert!(!error.is_retryable());
         if replay {
-            assert_eq!(error.details().unwrap()["status"], "rejected");
+            assert_eq!(error.code(), Some("bad_request"));
         }
         assert_eq!(server.received().len(), 1 + usize::from(replay));
     }
@@ -433,12 +589,21 @@ async fn continue_stream_retries_transient_rejections_and_reports_losses() {
         let first = first.clone();
         async move {
             if request.json()["id"] == 1 {
-                Some(Reply::json(422, json!({"message": "bad row", "details": {"status": "rejected"}})))
+                Some(Reply::json(
+                    400,
+                    json!({"error": {"code": "bad_request", "message": "bad row"}}),
+                ))
             } else if first.swap(false, Ordering::SeqCst) {
-                Some(Reply::json(503, json!({"message": "busy", "retryable": true, "details": {"status": "rejected"}})))
-            } else { Some(Reply::committed(&request)) }
+                Some(Reply::json(
+                    429,
+                    json!({"error": {"code": "too_many_requests", "message": "busy"}}),
+                ))
+            } else {
+                Some(Reply::committed(&request))
+            }
         }
-    }).await;
+    })
+    .await;
     let stream = server
         .client()
         .table("events")
@@ -474,8 +639,8 @@ async fn stopped_stream_settles_concurrent_requests_for_all_waiters() {
             if request.json()["id"] == 0 {
                 rejected.wait_for(|ready| *ready).await.unwrap();
                 Some(Reply::json(
-                    422,
-                    json!({"message": "bad row", "details": {"status": "rejected"}}),
+                    400,
+                    json!({"error": {"code": "bad_request", "message": "bad row"}}),
                 ))
             } else {
                 committed.wait_for(|ready| *ready).await.unwrap();
@@ -528,10 +693,16 @@ async fn cancellation_while_waiting_for_http_response_stops_finite_delivery() {
         async move {
             if request.json()["id"] == 0 {
                 blocked.wait_for(|ready| *ready).await.unwrap();
-                Some(Reply::json(503, json!({"message": "busy", "retryable": true, "details": {"status": "rejected"}})))
-            } else { Some(Reply::committed(&request)) }
+                Some(Reply::json(
+                    429,
+                    json!({"error": {"code": "too_many_requests", "message": "busy"}}),
+                ))
+            } else {
+                Some(Reply::committed(&request))
+            }
         }
-    }).await;
+    })
+    .await;
     let writer = server
         .client()
         .table("events")

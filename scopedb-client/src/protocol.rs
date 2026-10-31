@@ -53,8 +53,14 @@ impl fmt::Display for AppendState {
 /// Result of a committed table append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResult {
+    /// SDK commit outcome, inferred from a valid HTTP 200 response when omitted by the server.
+    #[serde(default = "committed_append_state")]
     pub status: AppendState,
     pub num_rows_inserted: i64,
+}
+
+fn committed_append_state() -> AppendState {
+    AppendState::Committed
 }
 
 /// Row-level validation error within a rejected append request.
@@ -65,11 +71,12 @@ pub struct AppendRowError {
     pub message: String,
 }
 
-/// Failure details for a table append request.
+/// SDK commit knowledge and available row diagnostics for a table append request.
 ///
 /// On [`Error::append_details`], `status` is [`AppendState::Unknown`] if any
 /// attempt had an unknown commit outcome, while `row_errors` reflect the last
-/// failed response.
+/// failed response when supplied by an older server. Modern responses derive commit
+/// knowledge from HTTP status and do not supply structured row errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
     pub status: AppendState,
@@ -77,6 +84,109 @@ pub struct AppendErrorDetails {
     pub row_errors: Vec<AppendRowError>,
     #[serde(default)]
     pub row_errors_truncated: bool,
+}
+
+/// Decodes commit knowledge separately from the diagnostic error category.
+pub fn decode_append_error(status: StatusCode, headers: &HeaderMap, payload: &[u8]) -> Error {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        code: String,
+        message: String,
+        details: Option<serde_json::Value>,
+        retryable: Option<bool>,
+    }
+
+    let decoded = serde_json::from_slice::<serde_json::Value>(payload).and_then(|envelope| {
+        let modern = envelope.get("error").is_some();
+        let body = envelope.get("error").unwrap_or(&envelope).clone();
+        let request_id = envelope
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        serde_json::from_value::<ErrorBody>(body).map(|body| (body, modern, request_id))
+    });
+    let unknown = AppendErrorDetails {
+        status: AppendState::Unknown,
+        row_errors: Vec::new(),
+        row_errors_truncated: false,
+    };
+    let (body, modern, request_id) = match decoded {
+        Ok(decoded) => decoded,
+        Err(source) => {
+            return apply_response_metadata(
+                Error::new(
+                    ErrorKind::InvalidResponse,
+                    ErrorOperation::Append,
+                    "failed to decode table append error response",
+                )
+                .set_source(source)
+                .set_append_details(unknown),
+                status,
+                headers,
+            );
+        }
+    };
+    let valid = (status.is_client_error() || status.is_server_error())
+        && (!modern || valid_http_error_code(&body.code, status));
+    let mut details = if modern {
+        unknown
+    } else {
+        body.details
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<AppendErrorDetails>(value.clone()).ok())
+            .unwrap_or(unknown)
+    };
+    // Older responses can prove a rejection explicitly, but no 5xx is a safe replay signal.
+    details.status =
+        if valid && status.is_client_error() && (modern || details.status == AppendState::Rejected)
+        {
+            AppendState::Rejected
+        } else {
+            AppendState::Unknown
+        };
+    let kind = if valid {
+        ErrorKind::from_http(status)
+    } else {
+        ErrorKind::InvalidResponse
+    };
+    let mut error = apply_response_metadata(
+        Error::new(kind, ErrorOperation::Append, body.message)
+            .set_api_error(Some(body.code), body.details)
+            .set_server_retryable(body.retryable)
+            .with_transient_failure(
+                valid
+                    && body.retryable != Some(false)
+                    && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()),
+            )
+            .set_append_details(details),
+        status,
+        headers,
+    );
+    if !valid {
+        error = error.with_context("response", "inconsistent HTTP status and error code");
+    }
+    if let Some(request_id) = request_id {
+        error = error.set_request_id(request_id);
+    }
+    error
+}
+
+fn valid_http_error_code(code: &str, status: StatusCode) -> bool {
+    let expected = match code {
+        "bad_request" => 400,
+        "not_found" => 404,
+        "method_not_allowed" => 405,
+        "request_timeout" => 408,
+        "conflict" => 409,
+        "precondition_failed" => 412,
+        "too_many_requests" => 429,
+        "internal_server_error" => 500,
+        "service_unavailable" => 503,
+        "statement_timeout" | "invalid_request" | "unauthorized" | "payload_too_large"
+        | "timeout" | "unavailable" | "internal_error" => return false,
+        _ => return true,
+    };
+    status.as_u16() == expected
 }
 
 pub async fn decode_statement_response(

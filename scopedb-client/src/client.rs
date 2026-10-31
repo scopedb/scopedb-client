@@ -41,7 +41,7 @@ use crate::StatementStatus;
 use crate::Table;
 use crate::protocol::StatementRequest;
 use crate::protocol::apply_response_metadata;
-use crate::protocol::decode_http_error;
+use crate::protocol::decode_append_error;
 use crate::protocol::decode_statement_response;
 
 const JSON_CONTENT_ENCODING: &str = "zstd";
@@ -591,22 +591,7 @@ fn decode_append_response(
         ));
     }
 
-    let error = decode_http_error(status, headers, payload, ErrorOperation::Append);
-    if let Some(details) = error
-        .details()
-        .and_then(|value| serde_json::from_value::<AppendErrorDetails>(value.clone()).ok())
-        && matches!(details.status, AppendState::Rejected | AppendState::Unknown)
-    {
-        let error = error.set_append_details(details);
-
-        return Err(error);
-    }
-
-    Err(error.set_append_details(AppendErrorDetails {
-        status: AppendState::Unknown,
-        row_errors: Vec::new(),
-        row_errors_truncated: false,
-    }))
+    Err(decode_append_error(status, headers, payload))
 }
 
 fn append_unknown_error(kind: ErrorKind, message: impl Into<String>) -> Error {

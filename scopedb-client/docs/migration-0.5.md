@@ -45,6 +45,14 @@ The terminal failure report covers activity since the previous completed barrier
 
 Finite writers also return `Error`. `append_write_report()` retains successful and failed batches, input-index mappings, and the unsubmitted suffix. `append_input_index()` identifies local encoding failures. SDK operations compose through `?` without converting errors or discarding these recovery facts.
 
+## Handle table append confirmations and retries
+
+`AppendRowsResult::status` remains available and is `AppendState::Committed` after a valid success response, including responses that omit the wire `status` field. Existing successful-write handling does not need to change. The SDK accepts both success formats during service upgrades.
+
+Use `Error::append_details()` for commit knowledge instead of inspecting `details.status` in the raw server error. A valid modern 4xx error establishes rejection; 5xx and interrupted or invalid responses are unknown. Only validated HTTP 429 admission refusals are retried by default. In particular, older HTTP 503 responses no longer qualify as safe retries even when they contain `status: rejected` or `retryable: true`. Keep unknown batches available for application reconciliation; `.retry_unknown(true)` explicitly accepts duplicate-write risk.
+
+Row-error lists may be empty because modern responses provide a diagnostic message instead of structured row errors. Handle the entire rejected batch; do not parse diagnostic text to select individual rows for replay. A later rejection cannot resolve an earlier unknown attempt.
+
 ## Recover submitted statements
 
 Every statement now carries an ID before submission. After losing a submission response or failing while waiting, use `error.statement_id()` with `client.statement_handle(id)` to inspect or resume waiting on the existing execution rather than resubmitting the SQL. `with_statement_id()` still accepts an application-owned ID.

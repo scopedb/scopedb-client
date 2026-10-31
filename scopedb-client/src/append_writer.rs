@@ -36,7 +36,7 @@ use crate::append::encode_record;
 ///
 /// Defaults match [`AppendStreamBuilder`](crate::AppendStreamBuilder): 4 MiB target batches, up to
 /// 200,000 rows per batch, 4 concurrent batches, [`AppendFailurePolicy::Stop`],
-/// and up to 8 retries of temporary [`AppendState::Rejected`] responses.
+/// and up to 8 retries of validated HTTP 429 admission refusals.
 #[derive(Debug, Clone)]
 pub struct AppendWriterBuilder {
     table: Table,

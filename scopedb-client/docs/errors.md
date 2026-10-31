@@ -49,6 +49,10 @@ Always inspect the attached report before replaying failed input, as earlier bat
 
 `is_retryable()` indicates whether repeating the same SDK call as-is is safe and useful. It returns `false` when a write or catalog mutation has an unknown commit outcome, when an error carries an aggregate progress report, or when a SQL submission or execution call failed after submission.
 
+For table appends, a complete, valid HTTP 200 response confirms commit. A valid modern 4xx error establishes rejection, while every 5xx, malformed response, or interrupted request leaves the outcome unknown. Default append retries are limited to validated HTTP 429 admission refusals, including unknown future error codes with a valid envelope. Known error codes must match their HTTP status. Other 4xx responses require caller handling; a server `408 request_timeout` is a known rejection, while a client-side timeout is unknown.
+
+The SDK also reads older success responses containing `status: committed` and older flat error responses with explicit rejection details. Older 5xx responses remain unknown even when their details say `rejected`; a `retryable: true` diagnostic never overrides commit safety. Missing or unrecognized commit details do not panic or establish rejection. The modern API does not provide structured row errors, so applications must not depend on their presence.
+
 After losing a submission response or a later status-read response, use the ID from `error.statement_id()` with `Client::statement_handle()` to inspect the existing execution. Transient polling errors from `StatementHandle::refresh()` or `StatementHandle::wait()` can be retried on the same handle.
 
 `retries()` reports how many retry attempts a failed append request made, and `retry_exhausted()` indicates whether a retryable failure reached the configured retry limit. `AppendRequestResult::retries()` and `AppendDeliveryReport::retries` record retry counts for finite writes and stream intervals. Opting into `.retry_unknown(true)` retries transient unknown append outcomes and can insert duplicate rows.
