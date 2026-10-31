@@ -4,16 +4,11 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
-### Breaking Changes
-
-* `AppendStream::flush()` and `shutdown()` return `AppendDeliveryError` on failure. Read `report()` for the settled interval, including partial successes, and `cause()` for SDK diagnostics. Use `into_cause()` when an existing error path needs an owned `Error`. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).
-* `AppendStream::send_all()` returns `AppendAdmissionError` on failure. Read `accepted_rows()` for the prefix admitted by that call and `cause()` for the underlying SDK error; use `into_cause()` when an existing error path needs an owned `Error`. Admission does not confirm remote delivery; settle accepted rows with `flush()` or `shutdown()` before reconciliation.
-
 ### New Features
 
 * Expose `Error::catalog_outcome()` with `CatalogMutationOutcome` to distinguish known rejections from possibly committed mutations without parsing error codes. Gateway and timeout responses retain an unknown outcome even when they include a structured error code.
 * Allocate a statement ID before submission and retain it on submission failures, including lost or malformed responses. Use `Client::statement_handle(error.statement_id().unwrap())` to inspect the existing execution; `with_statement_id()` can still supply an application-owned ID.
-* Preserve unreported stream settlement when the background worker terminates unexpectedly. Failed barriers return a stable terminal report to concurrent waiters, with unresolved rows classified as unknown.
+* Keep SDK operations composable through `Result<_, Error>` while retaining partial admission, finite-write reports, and failed delivery intervals through typed accessors. Preserve unreported stream settlement when the background worker terminates unexpectedly. Failed barriers return a stable terminal report to concurrent waiters, with unresolved rows classified as unknown.
 * Add reusable `AppendWriter` instances through `Table::append_writer()` with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix. `AppendWriteReport` describes one write call and `AppendRequestResult` identifies each request within it.
 
 ### Bug Fixes

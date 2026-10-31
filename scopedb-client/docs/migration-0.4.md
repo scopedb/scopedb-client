@@ -14,7 +14,7 @@ Update your dependency with `cargo add scopedb-client@0.4`, then follow the sect
 Append writes rows whose fields match an existing destination table. It does not take a ScopeQL transform. Move field renaming, conversion, filtering, and routing into your application before sending:
 
 ```rust,no_run
-# async fn example(client: scopedb_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
 let source = serde_json::json!({
     "ts": "2026-03-13T12:00:00Z",
     "name": "page_view",

@@ -74,3 +74,27 @@ fn application_api_surface_compiles(client: &scopedb_client::Client) {
         .max_buffered_bytes(4096)
         .max_concurrent_batches(2);
 }
+
+#[tokio::test]
+async fn sdk_operations_compose_without_erasing_partial_progress() {
+    async fn write(client: &scopedb_client::Client) -> Result<(), scopedb_client::Error> {
+        let table = client.table("events");
+        let writer = table.append_writer().build()?;
+        let _report = writer.write(&[serde_json::json!([1])]).await?;
+        let stream = table.append_stream().build()?;
+        stream.send(&serde_json::json!({"id": 1})).await?;
+        stream.send_all([serde_json::json!({"id": 2})]).await?;
+        stream.flush().await?;
+        stream.shutdown().await?;
+        Ok(())
+    }
+
+    let client = scopedb_client::Client::builder("http://127.0.0.1:0")
+        .build()
+        .unwrap();
+    let error = write(&client).await.unwrap_err();
+    let report = error.append_write_report().unwrap();
+    assert_eq!(report.unsubmitted(), 0..1);
+    assert!(report.batches().is_empty());
+    assert_eq!(error.append_input_index(), Some(0));
+}

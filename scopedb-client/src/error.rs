@@ -19,8 +19,11 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use uuid::Uuid;
 
+use crate::AppendAdmissionResult;
+use crate::AppendDeliveryReport;
 use crate::AppendErrorDetails;
 use crate::AppendState;
+use crate::AppendWriteReport;
 use crate::CatalogMutationOutcome;
 use crate::StatementErrorDetails;
 
@@ -102,112 +105,387 @@ impl From<ErrorKind> for &'static str {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ErrorStatus {
-    /// Permanent means without external changes, the error never changes.
-    ///
-    /// For example, underlying services returns a not found error.
-    ///
-    /// Users SHOULD never retry this operation.
     Permanent,
-    /// Temporary means this error is returned for temporary.
-    ///
-    /// For example, underlying services is rate limited or unavailable for temporary.
-    ///
-    /// Users CAN retry the operation to resolve it.
     Temporary,
-    /// Persistent means the error is not classified as retryable.
-    ///
-    /// For example, a retry budget was exhausted or a write has an unknown outcome.
-    ///
-    /// Append streams may explicitly replay transient unknown outcomes under
-    /// their delivery policy. Client timeouts are never automatically replayed.
     Persistent,
-}
-
-#[derive(Debug, Default, Clone)]
-struct HttpErrorMetadata {
-    status: Option<StatusCode>,
-    request_id: Option<String>,
-    retry_after: Option<Duration>,
-    retryable: Option<bool>,
-}
-
-#[derive(Debug, Clone)]
-struct ApiErrorDetails {
-    code: Option<String>,
-    details: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct StatementErrorMetadata {
-    id: Option<Uuid>,
-    details: Option<StatementErrorDetails>,
 }
 
 impl fmt::Display for ErrorStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ErrorStatus::Permanent => write!(f, "permanent"),
-            ErrorStatus::Temporary => write!(f, "temporary"),
-            ErrorStatus::Persistent => write!(f, "persistent"),
-        }
+        f.write_str(match self {
+            Self::Permanent => "permanent",
+            Self::Temporary => "temporary",
+            Self::Persistent => "persistent",
+        })
     }
 }
 
-/// A failure with a message, optional HTTP diagnostics, and operation details.
+#[derive(Debug, Default, Clone)]
+struct ErrorDiagnostics {
+    code: Option<String>,
+    details: Option<serde_json::Value>,
+    http_status: Option<StatusCode>,
+    request_id: Option<String>,
+    retry_after: Option<Duration>,
+    server_retryable: Option<bool>,
+    context: Vec<(&'static str, String)>,
+}
+
+#[derive(Debug, Clone)]
+enum FailureDetails {
+    Append {
+        details: AppendErrorDetails,
+        interruption: Option<WriteErrorDetails>,
+    },
+    Statement {
+        id: Option<Uuid>,
+        details: Option<StatementErrorDetails>,
+    },
+    Catalog(CatalogMutationOutcome),
+}
+
+#[derive(Debug, Clone)]
+enum AppendProgress {
+    Admission(AppendAdmissionResult),
+    Write {
+        input_index: Option<usize>,
+        report: AppendWriteReport,
+    },
+    Delivery(AppendDeliveryReport),
+}
+
+/// A failed SDK operation with structured recovery data and native diagnostics.
 ///
-/// Start with [`Self::message`], [`Self::http_status`], and [`Self::request_id`].
-/// Use [`Self::statement_details`] for a failed query, [`Self::append_details`]
-/// for a rejected or uncertain append, and [`Self::write_details`] for a write
-/// timeout. A timed-out write may already have committed; reconcile it before
-/// replaying.
+/// Partial progress stays on this error when it is returned through `?`.
+/// Inspect [`Self::append_admission`], [`Self::append_write_report`], or
+/// [`Self::append_delivery_report`] before replaying admitted or submitted rows.
+/// Reports can include successful and unknown requests; a representative
+/// failure does not describe every row.
 ///
-/// HTTP diagnostics and raw [`Self::details`] describe the response retained
-/// from the last failed attempt. [`Self::append_details`] describes what is
-/// known about delivery across all attempts: a later rejection cannot rule out
-/// an earlier commit. Retry classification is separate from delivery outcome.
-///
-/// [`Self::is_retryable`] describes the failed operation. For a query that was
-/// already submitted, resume its [`Self::statement_id`] through
-/// [`crate::Client::statement_handle`] instead of submitting another query.
+/// Raw [`Self::details`] and HTTP metadata describe the last failed response.
+/// [`Self::append_details`] retains uncertainty across retry attempts. Retry
+/// classification is separate from whether a write may have committed.
 #[derive(Clone)]
 pub struct Error {
     kind: ErrorKind,
     message: String,
-
     status: ErrorStatus,
-    context: Vec<(&'static str, String)>,
-    api_error: Option<Box<ApiErrorDetails>>,
-    append_details: Option<AppendErrorDetails>,
-    write_details: Option<WriteErrorDetails>,
-    catalog_outcome: Option<CatalogMutationOutcome>,
-    statement_metadata: Option<Box<StatementErrorMetadata>>,
-    http_metadata: Option<Box<HttpErrorMetadata>>,
-
+    diagnostics: Option<Box<ErrorDiagnostics>>,
+    failure: Option<Box<FailureDetails>>,
+    progress: Option<Box<AppendProgress>>,
     source: Option<Arc<dyn std::error::Error + Send + Sync>>,
+}
+
+impl Error {
+    /// Returns the failure classification.
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    /// Returns the operation-level message, without repeating the source chain.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the original server code, including codes from newer servers.
+    pub fn code(&self) -> Option<&str> {
+        self.diagnostics
+            .as_deref()
+            .and_then(|d| d.code.as_deref())
+            .or_else(|| self.statement_details().map(|d| d.code.as_str()))
+    }
+
+    /// Returns the original structured server details. After retries these
+    /// describe the last failed response, not the outcome across attempts.
+    pub fn details(&self) -> Option<&serde_json::Value> {
+        self.diagnostics
+            .as_deref()
+            .and_then(|d| d.details.as_ref())
+            .or_else(|| self.statement_details().and_then(|d| d.details.as_ref()))
+    }
+
+    pub fn http_status(&self) -> Option<StatusCode> {
+        self.diagnostics.as_deref().and_then(|d| d.http_status)
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.diagnostics
+            .as_deref()
+            .and_then(|d| d.request_id.as_deref())
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.diagnostics.as_deref().and_then(|d| d.retry_after)
+    }
+
+    /// Returns table-append details across the failed request's attempts.
+    /// Earlier unknown attempts keep status Unknown even if the last response
+    /// rejected the request. Row diagnostics remain relative to that response.
+    pub fn append_details(&self) -> Option<&AppendErrorDetails> {
+        match self.failure.as_deref() {
+            Some(FailureDetails::Append { details, .. }) => Some(details),
+            _ => None,
+        }
+    }
+
+    /// Returns client timeout details for an append after sending began.
+    pub fn write_details(&self) -> Option<&WriteErrorDetails> {
+        match self.failure.as_deref() {
+            Some(FailureDetails::Append { interruption, .. }) => interruption.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Returns the outcome of a failed Catalog mutation. Unknown requires
+    /// reconciliation even when an intermediary supplies a server error code.
+    /// Reads, dry runs, and local validation failures return None.
+    pub fn catalog_outcome(&self) -> Option<CatalogMutationOutcome> {
+        match self.failure.as_deref() {
+            Some(FailureDetails::Catalog(outcome)) => Some(*outcome),
+            _ => None,
+        }
+    }
+
+    /// Returns the execution ID, when known. Inspect that execution rather than
+    /// submitting another statement; the ID does not confirm server acceptance.
+    pub fn statement_id(&self) -> Option<Uuid> {
+        match self.failure.as_deref() {
+            Some(FailureDetails::Statement { id, .. }) => *id,
+            _ => None,
+        }
+    }
+
+    pub fn statement_details(&self) -> Option<&StatementErrorDetails> {
+        match self.failure.as_deref() {
+            Some(FailureDetails::Statement { details, .. }) => details.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Returns this failed send_all call's admitted prefix. Those rows remain
+    /// owned by the stream; settle it before deciding which rows can be replayed.
+    pub fn append_admission(&self) -> Option<&AppendAdmissionResult> {
+        match self.progress.as_deref() {
+            Some(AppendProgress::Admission(result)) => Some(result),
+            _ => None,
+        }
+    }
+
+    /// Returns the complete report of a failed finite write, including successful
+    /// batches, request-relative index mappings, and the unsubmitted suffix.
+    pub fn append_write_report(&self) -> Option<&AppendWriteReport> {
+        match self.progress.as_deref() {
+            Some(AppendProgress::Write { report, .. }) => Some(report),
+            _ => None,
+        }
+    }
+
+    /// Returns a local finite-write encoding failure's original input index.
+    /// Remote row indexes are mapped through AppendRequestResult::input_index.
+    pub fn append_input_index(&self) -> Option<usize> {
+        match self.progress.as_deref() {
+            Some(AppendProgress::Write { input_index, .. }) => *input_index,
+            _ => None,
+        }
+    }
+
+    /// Returns the terminal interval of a failed flush or shutdown. Concurrent
+    /// terminal waiters share this settlement, including rows admitted after
+    /// the failed barrier was enqueued. Unknown rows require reconciliation.
+    pub fn append_delivery_report(&self) -> Option<&AppendDeliveryReport> {
+        match self.progress.as_deref() {
+            Some(AppendProgress::Delivery(report)) => Some(report),
+            _ => None,
+        }
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        self.is_temporary()
+    }
+    pub fn is_temporary(&self) -> bool {
+        self.status == ErrorStatus::Temporary
+    }
+    pub fn is_permanent(&self) -> bool {
+        self.status == ErrorStatus::Permanent
+    }
+    pub fn is_persistent(&self) -> bool {
+        self.status == ErrorStatus::Persistent
+    }
+
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            status: ErrorStatus::Permanent,
+            diagnostics: None,
+            failure: None,
+            progress: None,
+            source: None,
+        }
+    }
+
+    pub fn with_context(mut self, key: &'static str, value: impl ToString) -> Self {
+        self.diagnostics_mut()
+            .context
+            .push((key, value.to_string()));
+        self
+    }
+
+    /// Sets the underlying cause.
+    ///
+    /// # Panics
+    /// Panics if a source is already present.
+    pub fn set_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        assert!(self.source.is_none(), "the source error has been set");
+        self.source = Some(Arc::new(source));
+        self
+    }
+
+    pub fn set_permanent(mut self) -> Self {
+        self.status = ErrorStatus::Permanent;
+        self
+    }
+    pub fn set_temporary(mut self) -> Self {
+        self.status = ErrorStatus::Temporary;
+        self
+    }
+    pub fn set_persistent(mut self) -> Self {
+        self.status = ErrorStatus::Persistent;
+        self
+    }
+
+    pub(crate) fn with_append_admission(mut self, accepted_rows: u64) -> Self {
+        self.progress = Some(Box::new(AppendProgress::Admission(AppendAdmissionResult {
+            accepted_rows,
+        })));
+        self.set_persistent()
+    }
+
+    pub(crate) fn with_append_write(
+        mut self,
+        report: AppendWriteReport,
+        input_index: Option<usize>,
+    ) -> Self {
+        self.progress = Some(Box::new(AppendProgress::Write {
+            report,
+            input_index,
+        }));
+        self.set_persistent()
+    }
+
+    pub(crate) fn with_append_delivery(mut self, report: AppendDeliveryReport) -> Self {
+        self.progress = Some(Box::new(AppendProgress::Delivery(report)));
+        self.set_persistent()
+    }
+
+    pub(crate) fn set_append_details(mut self, details: AppendErrorDetails) -> Self {
+        match self.failure.as_deref_mut() {
+            Some(FailureDetails::Append {
+                details: current, ..
+            }) => *current = details,
+            None => {
+                self.failure = Some(Box::new(FailureDetails::Append {
+                    details,
+                    interruption: None,
+                }))
+            }
+            _ => unreachable!("append details belong to an append failure"),
+        }
+        self
+    }
+
+    pub(crate) fn set_write_timeout(mut self) -> Self {
+        match self.failure.as_deref_mut() {
+            Some(FailureDetails::Append { interruption, .. }) => {
+                *interruption = Some(WriteErrorDetails {
+                    reason: WriteErrorReason::Timeout,
+                    outcome: AppendState::Unknown,
+                })
+            }
+            _ => unreachable!("write interruption belongs to an append failure"),
+        }
+        self
+    }
+
+    pub(crate) fn set_catalog_outcome(mut self, outcome: CatalogMutationOutcome) -> Self {
+        self.failure = Some(Box::new(FailureDetails::Catalog(outcome)));
+        self
+    }
+
+    pub(crate) fn set_statement_id(mut self, id: Uuid) -> Self {
+        match self.failure.as_deref_mut() {
+            Some(FailureDetails::Statement { id: current, .. }) => *current = Some(id),
+            None => {
+                self.failure = Some(Box::new(FailureDetails::Statement {
+                    id: Some(id),
+                    details: None,
+                }))
+            }
+            _ => unreachable!("statement ID belongs to a statement failure"),
+        }
+        self
+    }
+
+    pub(crate) fn set_statement_details(mut self, details: StatementErrorDetails) -> Self {
+        match self.failure.as_deref_mut() {
+            Some(FailureDetails::Statement {
+                details: current, ..
+            }) => *current = Some(details),
+            None => {
+                self.failure = Some(Box::new(FailureDetails::Statement {
+                    id: None,
+                    details: Some(details),
+                }))
+            }
+            _ => unreachable!("statement details belong to a statement failure"),
+        }
+        self
+    }
+
+    pub(crate) fn set_http_status(mut self, status: StatusCode) -> Self {
+        self.diagnostics_mut().http_status = Some(status);
+        self
+    }
+    pub(crate) fn set_request_id(mut self, id: String) -> Self {
+        self.diagnostics_mut().request_id = Some(id);
+        self
+    }
+    pub(crate) fn set_retry_after(mut self, delay: Duration) -> Self {
+        self.diagnostics_mut().retry_after = Some(delay);
+        self
+    }
+    pub(crate) fn set_server_retryable(mut self, retryable: Option<bool>) -> Self {
+        self.diagnostics_mut().server_retryable = retryable;
+        self
+    }
+    pub(crate) fn server_retryable(&self) -> Option<bool> {
+        self.diagnostics.as_deref().and_then(|d| d.server_retryable)
+    }
+    pub(crate) fn set_api_error(
+        mut self,
+        code: Option<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        if code.is_some() || details.is_some() {
+            let diagnostics = self.diagnostics_mut();
+            diagnostics.code = code;
+            diagnostics.details = details;
+        }
+        self
+    }
+    fn diagnostics_mut(&mut self) -> &mut ErrorDiagnostics {
+        self.diagnostics.get_or_insert_with(Default::default)
+    }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.kind, self.status)?;
-
-        if !self.context.is_empty() {
-            write!(f, ", context: {{ ")?;
-            write!(
-                f,
-                "{}",
-                self.context
-                    .iter()
-                    .map(|(k, v)| format!("{k}: {v}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )?;
-            write!(f, " }}")?;
+        write!(f, "{} ({}) => {}", self.kind, self.status, self.message)?;
+        if let Some(diagnostics) = &self.diagnostics {
+            for (key, value) in &diagnostics.context {
+                write!(f, ", {key}: {value}")?;
+            }
         }
-
-        if !self.message.is_empty() {
-            write!(f, " => {}", self.message)?;
-        }
-
         if let Some(code) = self.code() {
             write!(f, ", code: {code}")?;
         }
@@ -217,13 +495,12 @@ impl fmt::Display for Error {
         if let Some(status) = self.http_status() {
             write!(f, ", http_status: {}", status.as_u16())?;
         }
-        if let Some(request_id) = self.request_id() {
-            write!(f, ", request_id: {request_id}")?;
+        if let Some(id) = self.request_id() {
+            write!(f, ", request_id: {id}")?;
         }
-        if let Some(retry_after) = self.retry_after() {
-            write!(f, ", retry_after: {retry_after:?}")?;
+        if let Some(delay) = self.retry_after() {
+            write!(f, ", retry_after: {delay:?}")?;
         }
-
         if let Some(details) = self.write_details() {
             write!(
                 f,
@@ -231,83 +508,51 @@ impl fmt::Display for Error {
                 details.reason, details.outcome
             )?;
         }
-
         if let Some(outcome) = self.catalog_outcome() {
             write!(f, ", catalog_outcome: {outcome:?}")?;
         }
-
+        if let Some(admission) = self.append_admission() {
+            write!(f, ", accepted_rows: {}", admission.accepted_rows)?;
+        }
+        if let Some(report) = self.append_write_report() {
+            write!(
+                f,
+                ", committed_rows: {}, input_rows: {}",
+                report.committed_rows(),
+                report.input_rows()
+            )?;
+        }
+        if let Some(report) = self.append_delivery_report() {
+            write!(
+                f,
+                ", committed_rows: {}, accepted_rows: {}",
+                report.committed_rows, report.accepted_rows
+            )?;
+        }
         Ok(())
     }
 }
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // If alternate has been specified, we will print like Debug.
         if f.alternate() {
-            let mut de = f.debug_struct("Error");
-            de.field("kind", &self.kind);
-            de.field("message", &self.message);
-            de.field("api_error", &self.api_error);
-            de.field("status", &self.status);
-            de.field("context", &self.context);
-            de.field("append_details", &self.append_details);
-            de.field("write_details", &self.write_details);
-            de.field("catalog_outcome", &self.catalog_outcome);
-            de.field("statement_id", &self.statement_id());
-            de.field("statement_details", &self.statement_details());
-            de.field("http_metadata", &self.http_metadata);
-            de.field("source", &self.source);
-            return de.finish();
+            return f
+                .debug_struct("Error")
+                .field("kind", &self.kind)
+                .field("message", &self.message)
+                .field("status", &self.status)
+                .field("diagnostics", &self.diagnostics)
+                .field("failure", &self.failure)
+                .field("progress", &self.progress)
+                .field("source", &self.source)
+                .finish();
         }
-
-        write!(f, "{} ({})", self.kind, self.status)?;
-        if !self.message.is_empty() {
-            write!(f, " => {}", self.message)?;
+        write!(f, "{self}")?;
+        let mut cause = std::error::Error::source(self);
+        while let Some(error) = cause {
+            write!(f, "\n  caused by: {error}")?;
+            cause = error.source();
         }
-        if let Some(code) = self.code() {
-            write!(f, ", code: {code}")?;
-        }
-        if let Some(id) = self.statement_id() {
-            write!(f, ", statement_id: {id}")?;
-        }
-        if let Some(status) = self.http_status() {
-            write!(f, ", http_status: {}", status.as_u16())?;
-        }
-        if let Some(request_id) = self.request_id() {
-            write!(f, ", request_id: {request_id}")?;
-        }
-        if let Some(retry_after) = self.retry_after() {
-            write!(f, ", retry_after: {retry_after:?}")?;
-        }
-        if let Some(details) = self.write_details() {
-            write!(
-                f,
-                ", write_reason: {}, write_outcome: {}",
-                details.reason, details.outcome
-            )?;
-        }
-        if let Some(outcome) = self.catalog_outcome() {
-            write!(f, ", catalog_outcome: {outcome:?}")?;
-        }
-        writeln!(f)?;
-
-        if !self.context.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "Context:")?;
-            for (k, v) in self.context.iter() {
-                writeln!(f, "   {k}: {v}")?;
-            }
-        }
-        if let Some(source) = &self.source {
-            writeln!(f)?;
-            writeln!(f, "Source:")?;
-            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
-            while let Some(error) = cause {
-                writeln!(f, "   {error}")?;
-                cause = error.source();
-            }
-        }
-
         Ok(())
     }
 }
@@ -315,252 +560,6 @@ impl fmt::Debug for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|source| source.as_ref() as _)
-    }
-}
-
-impl Error {
-    /// Create a new Error with error kind and message.
-    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-
-            status: ErrorStatus::Permanent,
-            context: Vec::default(),
-            api_error: None,
-            append_details: None,
-            write_details: None,
-            catalog_outcome: None,
-            statement_metadata: None,
-            http_metadata: None,
-            source: None,
-        }
-    }
-
-    /// Add more context in error.
-    pub fn with_context(mut self, key: &'static str, value: impl ToString) -> Self {
-        self.context.push((key, value.to_string()));
-        self
-    }
-
-    /// Sets the underlying cause without replacing an existing source.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the source has already been set.
-    pub fn set_source(mut self, src: impl std::error::Error + Send + Sync + 'static) -> Self {
-        assert!(self.source.is_none(), "the source error has been set");
-
-        self.source = Some(Arc::new(src));
-        self
-    }
-
-    /// Returns client timeout details for a table append after sending began.
-    /// Existing error kinds, sources, and HTTP diagnostics remain available.
-    pub fn write_details(&self) -> Option<&WriteErrorDetails> {
-        self.write_details.as_ref()
-    }
-
-    /// Returns table-append failure details across the operation's attempts.
-    /// An earlier unknown attempt keeps the status Unknown even if the last
-    /// response rejected the request. Row errors still describe that last response;
-    /// use [`Self::details`] for its original, unmodified server payload.
-    pub fn append_details(&self) -> Option<&AppendErrorDetails> {
-        self.append_details.as_ref()
-    }
-
-    /// Returns the commit outcome of a failed Catalog mutation after sending
-    /// began. Unknown requires reconciliation even if [`Self::code`] contains
-    /// a server or intermediary error code. Reads, dry runs, and local validation
-    /// failures return None.
-    pub fn catalog_outcome(&self) -> Option<CatalogMutationOutcome> {
-        self.catalog_outcome
-    }
-
-    /// Return structured statement failure details, when available.
-    pub fn statement_details(&self) -> Option<&StatementErrorDetails> {
-        self.statement_metadata
-            .as_ref()
-            .and_then(|m| m.details.as_ref())
-    }
-
-    /// Returns the statement identifier, when known. Use [`crate::Client::statement_handle`]
-    /// to inspect the existing execution instead of resubmitting it. An identifier
-    /// supplied before submission does not confirm that the server accepted it.
-    pub fn statement_id(&self) -> Option<Uuid> {
-        self.statement_metadata.as_ref().and_then(|m| m.id)
-    }
-
-    /// Set permanent status for error.
-    pub fn set_permanent(mut self) -> Self {
-        self.status = ErrorStatus::Permanent;
-        self
-    }
-
-    /// Set temporary status for error.
-    ///
-    /// By set temporary, we indicate this error is retryable.
-    pub fn set_temporary(mut self) -> Self {
-        self.status = ErrorStatus::Temporary;
-        self
-    }
-
-    /// Set persistent status for error.
-    ///
-    /// By setting persistent, we indicate the retry should be stopped.
-    pub fn set_persistent(mut self) -> Self {
-        self.status = ErrorStatus::Persistent;
-        self
-    }
-
-    /// Return the kind of this error.
-    pub fn kind(&self) -> ErrorKind {
-        self.kind
-    }
-
-    /// Returns the retained server error code, including codes introduced by newer
-    /// servers. After retries this describes the last failed attempt, not the
-    /// delivery outcome across attempts.
-    pub fn code(&self) -> Option<&str> {
-        self.api_error
-            .as_deref()
-            .and_then(|e| e.code.as_deref())
-            .or_else(|| self.statement_details().map(|e| e.code.as_str()))
-    }
-
-    /// Returns the original structured server details, when provided.
-    /// After retries these describe the last failed response. They are not
-    /// rewritten when an earlier unknown attempt makes the overall append
-    /// outcome uncertain; use [`Self::append_details`] for that conclusion.
-    pub fn details(&self) -> Option<&serde_json::Value> {
-        self.api_error
-            .as_deref()
-            .and_then(|e| e.details.as_ref())
-            .or_else(|| self.statement_details().and_then(|e| e.details.as_ref()))
-    }
-
-    /// Return the error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    /// Return the HTTP response status when the error came from a server.
-    pub fn http_status(&self) -> Option<StatusCode> {
-        self.http_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.status)
-    }
-
-    /// Return the request identifier supplied by ScopeDB or an intermediary.
-    pub fn request_id(&self) -> Option<&str> {
-        self.http_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.request_id.as_deref())
-    }
-
-    /// Return the delay suggested by the HTTP `Retry-After` header.
-    pub fn retry_after(&self) -> Option<Duration> {
-        self.http_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.retry_after)
-    }
-
-    /// Returns whether retrying this operation is currently appropriate.
-    /// This is a policy decision, not a commit acknowledgement: false can mean
-    /// a permanent rejection, an exhausted retry budget, or an unknown outcome.
-    /// For statement handles, retry on the same handle. Errors from `query()` or
-    /// `execute()` after submission never indicate that resubmitting is safe.
-    pub fn is_retryable(&self) -> bool {
-        self.is_temporary()
-    }
-
-    /// Check if this error is temporary.
-    pub fn is_temporary(&self) -> bool {
-        self.status == ErrorStatus::Temporary
-    }
-
-    /// Check if this error is permanent.
-    pub fn is_permanent(&self) -> bool {
-        self.status == ErrorStatus::Permanent
-    }
-
-    /// Check if this error is persistent.
-    pub fn is_persistent(&self) -> bool {
-        self.status == ErrorStatus::Persistent
-    }
-
-    pub(crate) fn set_write_timeout(mut self) -> Self {
-        self.write_details = Some(WriteErrorDetails {
-            reason: WriteErrorReason::Timeout,
-            outcome: AppendState::Unknown,
-        });
-        self
-    }
-
-    pub(crate) fn set_catalog_outcome(mut self, outcome: CatalogMutationOutcome) -> Self {
-        self.catalog_outcome = Some(outcome);
-        self
-    }
-
-    pub(crate) fn set_append_details(mut self, details: AppendErrorDetails) -> Self {
-        self.append_details = Some(details);
-        self
-    }
-
-    pub(crate) fn set_statement_details(mut self, details: StatementErrorDetails) -> Self {
-        self.statement_metadata
-            .get_or_insert_with(Default::default)
-            .details = Some(details);
-        self
-    }
-
-    pub(crate) fn set_statement_id(mut self, id: Uuid) -> Self {
-        self.statement_metadata
-            .get_or_insert_with(Default::default)
-            .id = Some(id);
-        self
-    }
-
-    pub(crate) fn set_http_status(mut self, status: StatusCode) -> Self {
-        self.http_metadata_mut().status = Some(status);
-        self
-    }
-
-    pub(crate) fn set_request_id(mut self, request_id: String) -> Self {
-        self.http_metadata_mut().request_id = Some(request_id);
-        self
-    }
-
-    pub(crate) fn set_retry_after(mut self, retry_after: Duration) -> Self {
-        self.http_metadata_mut().retry_after = Some(retry_after);
-        self
-    }
-
-    pub(crate) fn set_server_retryable(mut self, retryable: Option<bool>) -> Self {
-        self.http_metadata_mut().retryable = retryable;
-        self
-    }
-
-    pub(crate) fn server_retryable(&self) -> Option<bool> {
-        self.http_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.retryable)
-    }
-
-    pub(crate) fn set_api_error(
-        mut self,
-        code: Option<String>,
-        details: Option<serde_json::Value>,
-    ) -> Self {
-        if code.is_some() || details.is_some() {
-            self.api_error = Some(Box::new(ApiErrorDetails { code, details }));
-        }
-        self
-    }
-
-    fn http_metadata_mut(&mut self) -> &mut HttpErrorMetadata {
-        self.http_metadata
-            .get_or_insert_with(|| Box::new(HttpErrorMetadata::default()))
     }
 }
 
