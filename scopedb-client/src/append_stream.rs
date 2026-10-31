@@ -101,7 +101,7 @@ impl AppendAdmissionError {
         &self.cause
     }
 
-    /// Consumes the admission result and returns its underlying failure.
+    /// Consumes the admission error and returns its underlying failure.
     pub fn into_cause(self) -> Error {
         *self.cause
     }
@@ -331,19 +331,6 @@ pub struct AppendStreamBuilder {
 }
 
 impl AppendStreamBuilder {
-    pub(crate) fn new(table: Table) -> Self {
-        Self {
-            table,
-            flush_interval: DEFAULT_FLUSH_INTERVAL,
-            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
-            max_pending_bytes: DEFAULT_MAX_PENDING_BYTES,
-            options: AppendOptions::default(),
-            failure_policy: AppendFailurePolicy::Stop,
-            circuit_breaker: Some(AppendCircuitBreakerOptions::default()),
-            batch_failure_listeners: Vec::new(),
-        }
-    }
-
     /// Chooses whether to stop or continue after a batch fails. Defaults to Stop.
     pub fn failure_policy(mut self, failure_policy: AppendFailurePolicy) -> Self {
         self.failure_policy = failure_policy;
@@ -453,6 +440,19 @@ impl AppendStreamBuilder {
             circuit_breaker: self.circuit_breaker,
             batch_failure_listeners: self.batch_failure_listeners,
         }))
+    }
+
+    pub(crate) fn new(table: Table) -> Self {
+        Self {
+            table,
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
+            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            max_pending_bytes: DEFAULT_MAX_PENDING_BYTES,
+            options: AppendOptions::default(),
+            failure_policy: AppendFailurePolicy::Stop,
+            circuit_breaker: Some(AppendCircuitBreakerOptions::default()),
+            batch_failure_listeners: Vec::new(),
+        }
     }
 }
 
@@ -655,36 +655,6 @@ pub struct AppendStream {
 }
 
 impl AppendStream {
-    fn new(config: AppendStreamConfig) -> Self {
-        let (tx, rx) = mpsc::channel(config.channel_capacity);
-        let shared = Arc::new(Mutex::new(SharedState::default()));
-        let pending_bytes = Arc::new(PendingBytesBudget::new(config.max_pending_bytes));
-        let shutdown_notify = Arc::new(Notify::new());
-
-        let worker = tokio::spawn(run_append_worker(
-            config,
-            rx,
-            shared.clone(),
-            pending_bytes.clone(),
-            shutdown_notify.clone(),
-        ));
-        tokio::spawn(monitor_append_worker(
-            worker,
-            shared.clone(),
-            pending_bytes.clone(),
-            shutdown_notify.clone(),
-        ));
-
-        Self {
-            inner: Arc::new(AppendStreamInner {
-                tx,
-                shared,
-                pending_bytes,
-                shutdown_notify,
-            }),
-        }
-    }
-
     /// Serializes and admits one row, waiting for bounded local capacity.
     ///
     /// Success means local admission only. Use [`Self::flush`] or
@@ -947,6 +917,36 @@ impl AppendStream {
             in_flight_batches: shared.in_flight_batches,
             last_failure: shared.last_failure.clone(),
             last_report: shared.last_report.clone(),
+        }
+    }
+
+    fn new(config: AppendStreamConfig) -> Self {
+        let (tx, rx) = mpsc::channel(config.channel_capacity);
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        let pending_bytes = Arc::new(PendingBytesBudget::new(config.max_pending_bytes));
+        let shutdown_notify = Arc::new(Notify::new());
+
+        let worker = tokio::spawn(run_append_worker(
+            config,
+            rx,
+            shared.clone(),
+            pending_bytes.clone(),
+            shutdown_notify.clone(),
+        ));
+        tokio::spawn(monitor_append_worker(
+            worker,
+            shared.clone(),
+            pending_bytes.clone(),
+            shutdown_notify.clone(),
+        ));
+
+        Self {
+            inner: Arc::new(AppendStreamInner {
+                tx,
+                shared,
+                pending_bytes,
+                shutdown_notify,
+            }),
         }
     }
 

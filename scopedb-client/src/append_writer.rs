@@ -46,14 +46,6 @@ pub struct AppendWriterBuilder {
 }
 
 impl AppendWriterBuilder {
-    pub(crate) fn new(table: Table) -> Self {
-        Self {
-            table,
-            options: AppendOptions::default(),
-            failure_policy: AppendFailurePolicy::Stop,
-        }
-    }
-
     /// Sets the target uncompressed NDJSON size (default 4 MiB, maximum 8 MiB).
     /// A single row may exceed this target up to the 8 MiB protocol limit.
     pub fn target_batch_bytes(mut self, bytes: usize) -> Self {
@@ -121,6 +113,14 @@ impl AppendWriterBuilder {
             options: self.options,
             failure_policy: self.failure_policy,
         })
+    }
+
+    pub(crate) fn new(table: Table) -> Self {
+        Self {
+            table,
+            options: AppendOptions::default(),
+            failure_policy: AppendFailurePolicy::Stop,
+        }
     }
 }
 

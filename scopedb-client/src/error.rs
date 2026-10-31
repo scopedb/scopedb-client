@@ -340,14 +340,6 @@ impl Error {
         self
     }
 
-    pub(crate) fn set_write_timeout(mut self) -> Self {
-        self.write_details = Some(WriteErrorDetails {
-            reason: WriteErrorReason::Timeout,
-            outcome: AppendState::Unknown,
-        });
-        self
-    }
-
     /// Returns client timeout details for a table append after sending began.
     /// Existing error kinds, sources, and HTTP diagnostics remain available.
     pub fn write_details(&self) -> Option<&WriteErrorDetails> {
@@ -359,11 +351,6 @@ impl Error {
         self.append_details.as_ref()
     }
 
-    pub(crate) fn set_append_details(mut self, details: AppendErrorDetails) -> Self {
-        self.append_details = Some(details);
-        self
-    }
-
     /// Return structured statement failure details, when available.
     pub fn statement_details(&self) -> Option<&StatementErrorDetails> {
         self.statement_metadata
@@ -371,56 +358,11 @@ impl Error {
             .and_then(|m| m.details.as_ref())
     }
 
-    pub(crate) fn set_statement_details(mut self, details: StatementErrorDetails) -> Self {
-        self.statement_metadata
-            .get_or_insert_with(Default::default)
-            .details = Some(details);
-        self
-    }
-
     /// Returns the statement identifier, when known. Use [`crate::Client::statement_handle`]
     /// to inspect the existing execution instead of resubmitting it. An identifier
     /// supplied before submission does not confirm that the server accepted it.
     pub fn statement_id(&self) -> Option<Uuid> {
         self.statement_metadata.as_ref().and_then(|m| m.id)
-    }
-
-    pub(crate) fn set_statement_id(mut self, id: Uuid) -> Self {
-        self.statement_metadata
-            .get_or_insert_with(Default::default)
-            .id = Some(id);
-        self
-    }
-
-    pub(crate) fn set_http_status(mut self, status: StatusCode) -> Self {
-        self.http_metadata_mut().status = Some(status);
-        self
-    }
-
-    pub(crate) fn set_request_id(mut self, request_id: String) -> Self {
-        self.http_metadata_mut().request_id = Some(request_id);
-        self
-    }
-
-    pub(crate) fn set_retry_after(mut self, retry_after: Duration) -> Self {
-        self.http_metadata_mut().retry_after = Some(retry_after);
-        self
-    }
-
-    pub(crate) fn set_server_retryable(mut self, retryable: Option<bool>) -> Self {
-        self.http_metadata_mut().retryable = retryable;
-        self
-    }
-
-    pub(crate) fn server_retryable(&self) -> Option<bool> {
-        self.http_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.retryable)
-    }
-
-    fn http_metadata_mut(&mut self) -> &mut HttpErrorMetadata {
-        self.http_metadata
-            .get_or_insert_with(|| Box::new(HttpErrorMetadata::default()))
     }
 
     /// Set permanent status for error.
@@ -464,17 +406,6 @@ impl Error {
             .as_deref()
             .and_then(|e| e.details.as_ref())
             .or_else(|| self.statement_details().and_then(|e| e.details.as_ref()))
-    }
-
-    pub(crate) fn set_api_error(
-        mut self,
-        code: Option<String>,
-        details: Option<serde_json::Value>,
-    ) -> Self {
-        if code.is_some() || details.is_some() {
-            self.api_error = Some(Box::new(ApiErrorDetails { code, details }));
-        }
-        self
     }
 
     /// Return the error message.
@@ -523,5 +454,74 @@ impl Error {
     /// Check if this error is persistent.
     pub fn is_persistent(&self) -> bool {
         self.status == ErrorStatus::Persistent
+    }
+
+    pub(crate) fn set_write_timeout(mut self) -> Self {
+        self.write_details = Some(WriteErrorDetails {
+            reason: WriteErrorReason::Timeout,
+            outcome: AppendState::Unknown,
+        });
+        self
+    }
+
+    pub(crate) fn set_append_details(mut self, details: AppendErrorDetails) -> Self {
+        self.append_details = Some(details);
+        self
+    }
+
+    pub(crate) fn set_statement_details(mut self, details: StatementErrorDetails) -> Self {
+        self.statement_metadata
+            .get_or_insert_with(Default::default)
+            .details = Some(details);
+        self
+    }
+
+    pub(crate) fn set_statement_id(mut self, id: Uuid) -> Self {
+        self.statement_metadata
+            .get_or_insert_with(Default::default)
+            .id = Some(id);
+        self
+    }
+
+    pub(crate) fn set_http_status(mut self, status: StatusCode) -> Self {
+        self.http_metadata_mut().status = Some(status);
+        self
+    }
+
+    pub(crate) fn set_request_id(mut self, request_id: String) -> Self {
+        self.http_metadata_mut().request_id = Some(request_id);
+        self
+    }
+
+    pub(crate) fn set_retry_after(mut self, retry_after: Duration) -> Self {
+        self.http_metadata_mut().retry_after = Some(retry_after);
+        self
+    }
+
+    pub(crate) fn set_server_retryable(mut self, retryable: Option<bool>) -> Self {
+        self.http_metadata_mut().retryable = retryable;
+        self
+    }
+
+    pub(crate) fn server_retryable(&self) -> Option<bool> {
+        self.http_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.retryable)
+    }
+
+    pub(crate) fn set_api_error(
+        mut self,
+        code: Option<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        if code.is_some() || details.is_some() {
+            self.api_error = Some(Box::new(ApiErrorDetails { code, details }));
+        }
+        self
+    }
+
+    fn http_metadata_mut(&mut self) -> &mut HttpErrorMetadata {
+        self.http_metadata
+            .get_or_insert_with(|| Box::new(HttpErrorMetadata::default()))
     }
 }

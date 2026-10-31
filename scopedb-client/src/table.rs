@@ -36,15 +36,6 @@ pub struct Table {
 }
 
 impl Table {
-    pub(crate) fn new(client: Client, table: String) -> Self {
-        Self {
-            client,
-            database: "scopedb".to_string(),
-            schema: "public".to_string(),
-            table,
-        }
-    }
-
     pub fn with_database(mut self, database: impl Into<String>) -> Self {
         self.database = database.into();
         self
@@ -114,6 +105,15 @@ impl Table {
         self.client
             .catalog()
             .table(&self.database, &self.schema, &self.table)
+    }
+
+    pub(crate) fn new(client: Client, table: String) -> Self {
+        Self {
+            client,
+            database: "scopedb".to_string(),
+            schema: "public".to_string(),
+            table,
+        }
     }
 
     pub(crate) fn validate_append(&self) -> Result<(), Error> {
