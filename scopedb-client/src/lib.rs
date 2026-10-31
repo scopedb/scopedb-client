@@ -18,8 +18,8 @@
 pub mod migration {}
 
 mod append;
-mod append_batch;
 mod append_stream;
+mod append_writer;
 mod catalog;
 mod client;
 mod error;
@@ -32,11 +32,6 @@ mod test_support;
 
 pub use append::AppendDeliveryOutcome;
 pub use append::AppendFailurePolicy;
-pub use append_batch::AppendBatch;
-pub use append_batch::AppendBatchBuilder;
-pub use append_batch::AppendBatchError;
-pub use append_batch::AppendBatchReport;
-pub use append_batch::AppendBatchResult;
 pub use append_stream::AppendAdmissionResult;
 pub use append_stream::AppendBatchFailureAction;
 pub use append_stream::AppendBatchFailureEvent;
@@ -50,6 +45,11 @@ pub use append_stream::AppendStreamBuilder;
 pub use append_stream::AppendStreamState;
 pub use append_stream::AppendStreamStats;
 pub use append_stream::AppendTrySendError;
+pub use append_writer::AppendRequestResult;
+pub use append_writer::AppendWriteError;
+pub use append_writer::AppendWriteReport;
+pub use append_writer::AppendWriter;
+pub use append_writer::AppendWriterBuilder;
 pub use catalog::Catalog;
 pub use catalog::CatalogColumn;
 pub use catalog::CatalogColumnIndex;

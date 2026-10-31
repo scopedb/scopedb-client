@@ -6,7 +6,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### New Features
 
-* Add reusable finite batch writers with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix.
+* Add reusable `AppendWriter` instances through `Table::append_batch()` with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix. `AppendWriteReport` describes one write call and `AppendRequestResult` identifies each request within it.
 
 ## v0.4.2 (2026-10-27)
 

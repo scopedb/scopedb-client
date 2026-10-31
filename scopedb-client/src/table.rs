@@ -98,8 +98,8 @@ impl Table {
     }
 
     /// Builds a reusable writer for finite input slices with per-batch input ranges.
-    pub fn append_batch(&self) -> crate::AppendBatchBuilder {
-        crate::AppendBatchBuilder::new(self.clone())
+    pub fn append_batch(&self) -> crate::AppendWriterBuilder {
+        crate::AppendWriterBuilder::new(self.clone())
     }
 
     /// Builds an asynchronous, bounded and concurrent append stream for this table.

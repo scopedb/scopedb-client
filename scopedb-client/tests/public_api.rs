@@ -56,7 +56,7 @@ fn application_api_surface_compiles(client: &scopedb_client::Client) {
     let table = client.table("events").with_schema("public");
     let resource = table.catalog();
     let _description = resource.get();
-    let batch: scopedb_client::AppendBatch = table
+    let writer: scopedb_client::AppendWriter = table
         .append_batch()
         .target_batch_bytes(1024)
         .max_batch_rows(100)
@@ -66,7 +66,7 @@ fn application_api_surface_compiles(client: &scopedb_client::Client) {
         .build()
         .unwrap();
     let rows = [serde_json::json!({"id": 1})];
-    let _write = batch.write(&rows);
+    let _write = writer.write(&rows);
     let _stream = table
         .append_stream()
         .target_batch_bytes(1024)
