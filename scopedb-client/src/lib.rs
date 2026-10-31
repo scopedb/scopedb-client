@@ -32,6 +32,7 @@ mod test_support;
 
 pub use append::AppendDeliveryOutcome;
 pub use append::AppendFailurePolicy;
+pub use append_stream::AppendAdmissionError;
 pub use append_stream::AppendAdmissionResult;
 pub use append_stream::AppendBatchFailureAction;
 pub use append_stream::AppendBatchFailureEvent;

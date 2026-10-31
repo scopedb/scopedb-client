@@ -78,6 +78,49 @@ pub struct AppendAdmissionResult {
     pub accepted_rows: u64,
 }
 
+/// A bulk admission failure with the prefix accepted by that call.
+///
+/// Accepted rows remain owned by the stream and may still be written. Settle
+/// the stream before reconciling them; this count is not a remote acknowledgement.
+#[derive(Debug, Clone)]
+pub struct AppendAdmissionError {
+    accepted_rows: u64,
+    cause: Box<Error>,
+}
+
+impl AppendAdmissionError {
+    /// Returns the number of rows this call admitted before its first failure.
+    pub fn accepted_rows(&self) -> u64 {
+        self.accepted_rows
+    }
+
+    /// Returns the encoding, capacity, or stream failure that stopped admission.
+    pub fn cause(&self) -> &Error {
+        &self.cause
+    }
+
+    /// Consumes the admission result and returns its underlying failure.
+    pub fn into_cause(self) -> Error {
+        *self.cause
+    }
+}
+
+impl fmt::Display for AppendAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "append admission accepted {} rows before failing: {}",
+            self.accepted_rows, self.cause
+        )
+    }
+}
+
+impl StdError for AppendAdmissionError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+
 /// Aggregate settlement information since the previous delivery barrier.
 /// Counts do not identify individual input records. Use application-owned
 /// business keys to reconcile rows before replaying them.
@@ -775,10 +818,18 @@ impl AppendStream {
 
     /// Admits an iterator of rows sequentially with bounded memory.
     ///
-    /// If admission fails partway, the error includes the accepted count.
+    /// If admission fails partway, [`AppendAdmissionError::accepted_rows`] identifies
+    /// the prefix admitted by this call, independently of other producers.
     /// Call [`Self::shutdown`] to settle those rows; [`Self::stats`] retains
-    /// cumulative counts.
-    pub async fn send_all<I>(&self, rows: I) -> Result<AppendAdmissionResult, Error>
+    /// cumulative counts. Dropping this future can leave an admitted prefix
+    /// without returning a count; it does not cancel those rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppendAdmissionError`] when encoding, capacity, or stream state
+    /// prevents the next admission. Inspect [`AppendAdmissionError::cause`] for
+    /// the underlying SDK error.
+    pub async fn send_all<I>(&self, rows: I) -> Result<AppendAdmissionResult, AppendAdmissionError>
     where
         I: IntoIterator,
         I::Item: Serialize,
@@ -787,7 +838,10 @@ impl AppendStream {
         for row in rows {
             self.send(&row)
                 .await
-                .map_err(|error| error.with_context("accepted_rows", accepted_rows))?;
+                .map_err(|error| AppendAdmissionError {
+                    accepted_rows,
+                    cause: Box::new(error),
+                })?;
             accepted_rows = accepted_rows.saturating_add(1);
         }
         Ok(AppendAdmissionResult { accepted_rows })
@@ -1699,6 +1753,53 @@ mod tests {
     use crate::test_support::MockDisconnect;
     use crate::test_support::MockResponse;
     use crate::test_support::MockServer;
+
+    #[tokio::test]
+    async fn bulk_admission_failure_preserves_its_own_prefix_and_leaves_the_stream_usable() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request));
+        let stream = server
+            .client()
+            .table("events")
+            .append_stream()
+            .build()
+            .unwrap();
+        stream.send(&serde_json::json!({"id":0})).await.unwrap();
+        let failure = stream
+            .send_all([
+                serde_json::json!({"id":1}),
+                serde_json::json!([2]),
+                serde_json::json!({"id":3}),
+            ])
+            .await
+            .unwrap_err();
+        assert_eq!(failure.accepted_rows(), 1);
+        assert_eq!(failure.cause().kind(), ErrorKind::Unexpected);
+        assert!(StdError::source(&failure).is_some());
+        assert_eq!(stream.stats().accepted_rows, 2);
+        stream.send(&serde_json::json!({"id":4})).await.unwrap();
+        let report = stream.shutdown().await.unwrap();
+        assert_eq!(report.committed_rows, 3);
+        let requests = server.requests();
+        let mut rows: Vec<serde_json::Value> = requests
+            .iter()
+            .flat_map(|request| {
+                request
+                    .body
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+            })
+            .collect();
+        rows.sort_by_key(|row| row["id"].as_u64().unwrap());
+        assert_eq!(
+            rows,
+            vec![
+                serde_json::json!({"id":0}),
+                serde_json::json!({"id":1}),
+                serde_json::json!({"id":4})
+            ]
+        );
+        assert_eq!(failure.into_cause().kind(), ErrorKind::Unexpected);
+    }
 
     #[test]
     fn report_outcomes_include_drops_and_unknown_rows() {

@@ -52,7 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => {
             // There is no stream-wide abort or rollback. Settle the already
             // accepted prefix even if row production or admission stopped.
-            eprintln!("row admission stopped; settling the accepted prefix: {error}");
+            eprintln!(
+                "row admission stopped after {} rows; settling the accepted prefix: {}",
+                error.accepted_rows(),
+                error.cause()
+            );
             Some(error)
         }
     };
