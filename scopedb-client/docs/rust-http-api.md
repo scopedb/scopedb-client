@@ -20,7 +20,7 @@ PUT replaces the selected subtree, including all its children. Omitted collectio
 
 Definitions include databases, schemas, tables, views, comments, computed-column `expression`, explicit column `indexes`, partitioning, clustering, `distinct`, and `retention_days`. Storage is accepted on creation and omitted from exports. Typed definitions reject unknown fields at every modeled level. `raw()` reads and applies `serde_json::Value` to retain unknown fields and arbitrary-precision JSON numbers.
 
-Mutations use the client's `write_timeout` and never retry automatically. A transport or response-decoding interruption after sending produces `catalog_commit_outcome_unknown`; read the current definition before deciding whether to replay. A dry run cannot commit, so it does not receive this code solely for a transport failure.
+Mutations use the client's `write_timeout` and never retry automatically. `Error::catalog_outcome()` distinguishes a known `CatalogMutationOutcome::Rejected` from `Unknown`, which requires reading the current definition before replaying. Transport interruptions, malformed responses, and gateway or timeout responses leave the outcome unknown, even when an intermediary supplies an error code. Original server codes and diagnostics remain available; interruptions without a server code use `catalog_commit_outcome_unknown`. Reads, dry runs, and local validation failures have no mutation outcome.
 
 ## Table ingest
 

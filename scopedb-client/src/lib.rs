@@ -60,6 +60,7 @@ pub use self::catalog::CatalogColumnIndex;
 pub use self::catalog::CatalogDatabase;
 pub use self::catalog::CatalogDistinct;
 pub use self::catalog::CatalogDocument;
+pub use self::catalog::CatalogMutationOutcome;
 pub use self::catalog::CatalogOptions;
 pub use self::catalog::CatalogResource;
 pub use self::catalog::CatalogResult;

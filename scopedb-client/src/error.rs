@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::AppendErrorDetails;
 use crate::AppendState;
+use crate::CatalogMutationOutcome;
 use crate::StatementErrorDetails;
 
 /// ErrorKind is all kinds of Error of ScopeDB client.
@@ -178,6 +179,7 @@ pub struct Error {
     api_error: Option<Box<ApiErrorDetails>>,
     append_details: Option<AppendErrorDetails>,
     write_details: Option<WriteErrorDetails>,
+    catalog_outcome: Option<CatalogMutationOutcome>,
     statement_metadata: Option<Box<StatementErrorMetadata>>,
     http_metadata: Option<Box<HttpErrorMetadata>>,
 
@@ -234,6 +236,10 @@ impl fmt::Display for Error {
             write!(f, ", source: {source}")?;
         }
 
+        if let Some(outcome) = self.catalog_outcome() {
+            write!(f, ", catalog_outcome: {outcome:?}")?;
+        }
+
         Ok(())
     }
 }
@@ -250,6 +256,7 @@ impl fmt::Debug for Error {
             de.field("context", &self.context);
             de.field("append_details", &self.append_details);
             de.field("write_details", &self.write_details);
+            de.field("catalog_outcome", &self.catalog_outcome);
             de.field("statement_id", &self.statement_id());
             de.field("statement_details", &self.statement_details());
             de.field("http_metadata", &self.http_metadata);
@@ -282,6 +289,9 @@ impl fmt::Debug for Error {
                 ", write_reason: {}, write_outcome: {}",
                 details.reason, details.outcome
             )?;
+        }
+        if let Some(outcome) = self.catalog_outcome() {
+            write!(f, ", catalog_outcome: {outcome:?}")?;
         }
         writeln!(f)?;
 
@@ -320,6 +330,7 @@ impl Error {
             api_error: None,
             append_details: None,
             write_details: None,
+            catalog_outcome: None,
             statement_metadata: None,
             http_metadata: None,
             source: None,
@@ -356,6 +367,14 @@ impl Error {
     /// use [`Self::details`] for its original, unmodified server payload.
     pub fn append_details(&self) -> Option<&AppendErrorDetails> {
         self.append_details.as_ref()
+    }
+
+    /// Returns the commit outcome of a failed Catalog mutation after sending
+    /// began. Unknown requires reconciliation even if [`Self::code`] contains
+    /// a server or intermediary error code. Reads, dry runs, and local validation
+    /// failures return None.
+    pub fn catalog_outcome(&self) -> Option<CatalogMutationOutcome> {
+        self.catalog_outcome
     }
 
     /// Return structured statement failure details, when available.
@@ -475,6 +494,11 @@ impl Error {
             reason: WriteErrorReason::Timeout,
             outcome: AppendState::Unknown,
         });
+        self
+    }
+
+    pub(crate) fn set_catalog_outcome(mut self, outcome: CatalogMutationOutcome) -> Self {
+        self.catalog_outcome = Some(outcome);
         self
     }
 

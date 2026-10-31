@@ -18,6 +18,7 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 
+use scopedb_client::CatalogMutationOutcome;
 use scopedb_client::CatalogOptions;
 use scopedb_client::Client;
 use scopedb_client::ErrorKind;
@@ -324,6 +325,10 @@ async fn catalog_round_trip_preserves_unknown_fields_and_preconditions() {
         .await
         .unwrap_err();
     assert_eq!(stale.code(), Some("catalog_version_mismatch"));
+    assert_eq!(
+        stale.catalog_outcome(),
+        Some(CatalogMutationOutcome::Rejected)
+    );
     assert_eq!(stale.details().unwrap()["current"], "new");
     assert!(!stale.is_retryable());
     let requests = task.join().unwrap();
@@ -371,6 +376,10 @@ async fn malformed_mutation_responses_keep_the_commit_outcome_unknown() {
             .await
             .unwrap_err();
         assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+        assert_eq!(
+            error.catalog_outcome(),
+            Some(CatalogMutationOutcome::Unknown)
+        );
         assert!(!error.is_retryable());
     }
     assert_eq!(task.join().unwrap().len(), 2);
@@ -486,6 +495,10 @@ async fn catalog_requires_etag_and_preserves_ambiguous_mutations() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(
+        error.catalog_outcome(),
+        Some(CatalogMutationOutcome::Unknown)
+    );
     assert!(!error.is_retryable());
     task.join().unwrap();
 
@@ -514,6 +527,10 @@ async fn catalog_requires_etag_and_preserves_ambiguous_mutations() {
         if !dry_run {
             assert!(!error.is_retryable());
         }
+        assert_eq!(
+            error.catalog_outcome(),
+            (!dry_run).then_some(CatalogMutationOutcome::Unknown)
+        );
     }
     let requests = task.join().unwrap();
     assert_eq!(requests.len(), 2);
@@ -631,6 +648,10 @@ async fn catalog_write_budget_preserves_a_shorter_custom_http_timeout() {
     .unwrap()
     .unwrap_err();
     assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(
+        error.catalog_outcome(),
+        Some(CatalogMutationOutcome::Unknown)
+    );
     assert!(!error.is_retryable());
     release_tx.send(()).unwrap();
     assert_eq!(task.join().unwrap().len(), 1);
@@ -683,10 +704,45 @@ async fn response_body_interruptions_follow_operation_retry_safety() {
     assert!(submit.is_persistent());
     for error in [catalog_get, catalog_dry_run, refresh, cancel] {
         assert!(error.is_retryable());
+        assert_eq!(error.catalog_outcome(), None);
         assert_eq!(error.http_status().map(|status| status.as_u16()), Some(200));
     }
     assert!(!catalog_write.is_retryable());
     assert_eq!(catalog_write.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(
+        catalog_write.catalog_outcome(),
+        Some(CatalogMutationOutcome::Unknown)
+    );
     assert!(!submit.is_retryable());
     assert_eq!(task.join().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn catalog_gateway_codes_do_not_establish_a_rejected_mutation() {
+    for status in [408, 502, 503] {
+        let payload = json!({
+            "code": "upstream_unavailable",
+            "message": "response unavailable",
+            "request_id": "gateway-request",
+            "retryable": true,
+            "details": {"stage": "response"}
+        });
+        let (client, task) = server(vec![(status, payload.to_string())]);
+        let error = client
+            .table("events")
+            .catalog()
+            .delete(CatalogOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.catalog_outcome(),
+            Some(CatalogMutationOutcome::Unknown)
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(error.code(), Some("upstream_unavailable"));
+        assert_eq!(error.request_id(), Some("gateway-request"));
+        assert_eq!(error.http_status().unwrap().as_u16(), status);
+        assert_eq!(error.details(), payload.get("details"));
+        assert_eq!(task.join().unwrap().len(), 1);
+    }
 }
