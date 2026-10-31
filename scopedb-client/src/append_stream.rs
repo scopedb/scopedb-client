@@ -1687,7 +1687,7 @@ impl AppendWorker {
 
 fn unknown_append_error<E>(message: impl Into<String>, source: Option<E>) -> Error
 where
-    E: Into<anyhow::Error>,
+    E: std::error::Error + Send + Sync + 'static,
 {
     let mut error =
         Error::new(ErrorKind::AppendRowsFailed, message).set_append_details(AppendErrorDetails {

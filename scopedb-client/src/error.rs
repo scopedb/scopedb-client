@@ -183,7 +183,7 @@ pub struct Error {
     statement_metadata: Option<Box<StatementErrorMetadata>>,
     http_metadata: Option<Box<HttpErrorMetadata>>,
 
-    source: Option<Arc<anyhow::Error>>,
+    source: Option<Arc<dyn std::error::Error + Send + Sync>>,
 }
 
 impl fmt::Display for Error {
@@ -230,10 +230,6 @@ impl fmt::Display for Error {
                 ", write_reason: {}, write_outcome: {}",
                 details.reason, details.outcome
             )?;
-        }
-
-        if let Some(source) = &self.source {
-            write!(f, ", source: {source}")?;
         }
 
         if let Some(outcome) = self.catalog_outcome() {
@@ -305,7 +301,11 @@ impl fmt::Debug for Error {
         if let Some(source) = &self.source {
             writeln!(f)?;
             writeln!(f, "Source:")?;
-            writeln!(f, "   {source:#}")?;
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
+            while let Some(error) = cause {
+                writeln!(f, "   {error}")?;
+                cause = error.source();
+            }
         }
 
         Ok(())
@@ -314,7 +314,7 @@ impl fmt::Debug for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|v| v.as_ref().as_ref())
+        self.source.as_ref().map(|source| source.as_ref() as _)
     }
 }
 
@@ -348,10 +348,10 @@ impl Error {
     /// # Panics
     ///
     /// Panics if the source has already been set.
-    pub fn set_source(mut self, src: impl Into<anyhow::Error>) -> Self {
+    pub fn set_source(mut self, src: impl std::error::Error + Send + Sync + 'static) -> Self {
         assert!(self.source.is_none(), "the source error has been set");
 
-        self.source = Some(Arc::new(src.into()));
+        self.source = Some(Arc::new(src));
         self
     }
 
@@ -567,6 +567,17 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_keep_the_cause_separate_from_the_operation_message() {
+        let error = Error::new(ErrorKind::Unexpected, "failed to read response")
+            .set_source(std::io::Error::other("connection interrupted"));
+        assert!(!error.to_string().contains("connection interrupted"));
+        let cause = std::error::Error::source(&error).unwrap();
+        assert_eq!(cause.to_string(), "connection interrupted");
+        assert!(cause.is::<std::io::Error>());
+        assert!(format!("{error:?}").contains("connection interrupted"));
+    }
 
     #[test]
     #[should_panic(expected = "the source error has been set")]
