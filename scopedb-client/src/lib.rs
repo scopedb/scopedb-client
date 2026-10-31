@@ -28,8 +28,6 @@ mod protocol;
 mod result;
 mod statement;
 mod table;
-#[cfg(test)]
-mod test_support;
 
 /// The HTTP client version used by this SDK.
 pub use reqwest;

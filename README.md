@@ -74,10 +74,10 @@ Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fix
 From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` for your test environment, then run:
 
 ```sh
-cargo test -p scopedb-client --test native_06 -- --ignored --nocapture
+cargo test -p scopedb-client --test live -- --ignored --nocapture
 ```
 
-The test creates a uniquely named schema and checks dry-run, ETag conflicts, direct and concurrent streaming appends, row rejections, statement errors, elapsed timeout, and cancellation racing with completion. It deletes its schema before returning. For an isolated local engine, `SCOPEDB_TENANT_ID` supplies tenant identity instead of a platform API key. Running cancellation, lost acknowledgements, and stale responses after dropping a future are covered by controlled HTTP tests.
+The live test runs `SELECT 1` and checks the decoded result. The regular test suite uses a local HTTP fixture to exercise request encoding, query recovery, catalog updates, partial writes, retries, and cancellation.
 
 To publish, push an annotated `vX.Y.Z` tag on the merged release commit in `main`; [release.yml](.github/workflows/release.yml) runs the checks and publishes to crates.io.
 

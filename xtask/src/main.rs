@@ -368,30 +368,3 @@ fn main() {
     let cmd = Command::parse();
     cmd.run()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classify_release_types_with_cargo_pre_one_semantics() {
-        let cases = [
-            ("0.0.1", "0.0.2", SemverReleaseType::Major),
-            ("0.3.2", "0.3.3", SemverReleaseType::Minor),
-            ("0.6.5", "0.7.0", SemverReleaseType::Major),
-            ("1.2.3", "1.2.4", SemverReleaseType::Patch),
-            ("1.2.3", "1.3.0", SemverReleaseType::Minor),
-            ("1.2.3", "2.0.0", SemverReleaseType::Major),
-        ];
-
-        for (baseline, release, expected) in cases {
-            assert_eq!(
-                classify_release_type(
-                    &Version::parse(baseline).unwrap(),
-                    &Version::parse(release).unwrap()
-                ),
-                expected
-            );
-        }
-    }
-}

@@ -59,12 +59,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "async-compression"
 version = "0.4.51"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1456,7 +1450,6 @@ dependencies = [
 name = "scopedb-client"
 version = "0.4.2"
 dependencies = [
- "anyhow",
  "fastrace",
  "fastrace-reqwest",
  "httpdate",

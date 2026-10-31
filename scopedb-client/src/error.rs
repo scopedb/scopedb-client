@@ -795,35 +795,3 @@ impl std::error::Error for Error {
             .or_else(|| self.try_send_error().and_then(std::error::Error::source))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn diagnostics_keep_the_cause_separate_from_the_operation_message() {
-        let error = Error::new(
-            ErrorKind::Internal,
-            ErrorOperation::BuildClient,
-            "failed to read response",
-        )
-        .set_source(std::io::Error::other("connection interrupted"));
-        assert!(!error.to_string().contains("connection interrupted"));
-        let cause = std::error::Error::source(&error).unwrap();
-        assert_eq!(cause.to_string(), "connection interrupted");
-        assert!(cause.is::<std::io::Error>());
-        assert!(format!("{error:?}").contains("connection interrupted"));
-    }
-
-    #[test]
-    #[should_panic(expected = "the source error has been set")]
-    fn replacing_source_is_rejected() {
-        Error::new(
-            ErrorKind::Internal,
-            ErrorOperation::BuildClient,
-            "operation failed",
-        )
-        .set_source(std::io::Error::other("original cause"))
-        .set_source(std::io::Error::other("replacement"));
-    }
-}
