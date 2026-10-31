@@ -30,6 +30,8 @@ mod table;
 #[cfg(test)]
 mod test_support;
 
+pub use append::AppendDeliveryOutcome;
+pub use append::AppendFailurePolicy;
 pub use append_batch::AppendBatch;
 pub use append_batch::AppendBatchBuilder;
 pub use append_batch::AppendBatchError;
@@ -40,10 +42,8 @@ pub use append_stream::AppendBatchFailureAction;
 pub use append_stream::AppendBatchFailureEvent;
 pub use append_stream::AppendCircuitBreakerOptions;
 pub use append_stream::AppendCircuitState;
-pub use append_stream::AppendDeliveryOutcome;
 pub use append_stream::AppendDeliveryReport;
 pub use append_stream::AppendDroppedRows;
-pub use append_stream::AppendFailurePolicy;
 pub use append_stream::AppendLastFailure;
 pub use append_stream::AppendStream;
 pub use append_stream::AppendStreamBuilder;

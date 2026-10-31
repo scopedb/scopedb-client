@@ -27,6 +27,31 @@ use crate::ErrorKind;
 use crate::client::MAX_APPEND_BODY_BYTES;
 use crate::client::MAX_APPEND_ROWS;
 
+/// Determines whether to stop scheduling rows after one HTTP batch fails.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AppendFailurePolicy {
+    /// Stop scheduling new batches after observing a failure.
+    #[default]
+    Stop,
+    /// Continue scheduling later batches, retaining every failure in the report.
+    Continue,
+}
+
+/// The aggregate result of settling append operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AppendDeliveryOutcome {
+    /// Every covered row was committed and no local rows were dropped.
+    Ok,
+    /// Some covered rows committed and some were lost or have an unknown outcome.
+    Partial,
+    /// No covered row committed and all losses are known not to have committed.
+    Failed,
+    /// No covered row is known to have committed and at least one may have committed.
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RetryConfig {
     pub max_retries: usize,

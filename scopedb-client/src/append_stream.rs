@@ -38,6 +38,8 @@ use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
 use crate::append::AppendBatchRequest;
+use crate::append::AppendDeliveryOutcome;
+use crate::append::AppendFailurePolicy;
 use crate::append::AppendOptions;
 use crate::append::append_batch;
 use crate::append::config_error;
@@ -51,17 +53,6 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 const DEFAULT_MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD: usize = 5;
 const DEFAULT_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(30);
-
-/// Determines whether to stop scheduling rows after one HTTP batch fails.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum AppendFailurePolicy {
-    /// Stop scheduling new batches after observing a failure.
-    #[default]
-    Stop,
-    /// Continue scheduling later batches, retaining every failure in the report.
-    Continue,
-}
 
 /// The lifecycle state of an append stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,20 +71,6 @@ pub enum AppendCircuitState {
     Closed,
     Open,
     HalfOpen,
-}
-
-/// The aggregate result of a delivery barrier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum AppendDeliveryOutcome {
-    /// Every covered row was committed and no local rows were dropped.
-    Ok,
-    /// Some covered rows committed and some were lost or have an unknown outcome.
-    Partial,
-    /// No covered row committed and all losses are known not to have committed.
-    Failed,
-    /// No covered row is known to have committed and at least one may have committed.
-    Unknown,
 }
 
 /// Rows accepted by a bulk local-admission operation.
