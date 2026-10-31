@@ -14,6 +14,7 @@
 
 #![doc = include_str!("../README.md")]
 
+#[doc = include_str!("../docs/migration-0.5.md")]
 #[doc = include_str!("../docs/migration-0.4.md")]
 pub mod migration {}
 
@@ -41,6 +42,7 @@ pub use self::append_stream::AppendBatchFailureAction;
 pub use self::append_stream::AppendBatchFailureEvent;
 pub use self::append_stream::AppendCircuitBreakerOptions;
 pub use self::append_stream::AppendCircuitState;
+pub use self::append_stream::AppendDeliveryError;
 pub use self::append_stream::AppendDeliveryReport;
 pub use self::append_stream::AppendDroppedRows;
 pub use self::append_stream::AppendLastFailure;
