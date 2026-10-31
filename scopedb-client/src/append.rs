@@ -52,7 +52,7 @@ pub enum AppendDeliveryOutcome {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct RetryConfig {
+pub struct RetryOptions {
     pub max_retries: usize,
     pub retry_unknown: bool,
     pub initial_backoff: Duration,
@@ -64,7 +64,7 @@ pub struct AppendOptions {
     pub batch_bytes: usize,
     pub max_batch_rows: usize,
     pub max_in_flight_requests: usize,
-    pub retry: RetryConfig,
+    pub retry: RetryOptions,
     pub attempt_timeout: Option<Duration>,
 }
 
@@ -74,7 +74,7 @@ impl Default for AppendOptions {
             batch_bytes: 4 * 1024 * 1024,
             max_batch_rows: MAX_APPEND_ROWS,
             max_in_flight_requests: 4,
-            retry: RetryConfig {
+            retry: RetryOptions {
                 max_retries: 8,
                 retry_unknown: false,
                 initial_backoff: Duration::from_millis(100),

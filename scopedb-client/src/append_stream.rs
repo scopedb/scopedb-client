@@ -1693,7 +1693,7 @@ mod tests {
 
     use super::*;
     use crate::Client;
-    use crate::append::RetryConfig;
+    use crate::append::RetryOptions;
     use crate::client::MAX_APPEND_BODY_BYTES;
     use crate::client::MAX_APPEND_ROWS;
     use crate::test_support::MockDisconnect;
@@ -1713,7 +1713,7 @@ mod tests {
                 batch_bytes: 1024,
                 max_batch_rows: 100,
                 max_in_flight_requests: 1,
-                retry: RetryConfig {
+                retry: RetryOptions {
                     max_retries: 0,
                     retry_unknown: false,
                     initial_backoff: Duration::ZERO,
