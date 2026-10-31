@@ -20,9 +20,9 @@ use serde::Serialize;
 use crate::AppendErrorDetails;
 use crate::AppendRowsResult;
 use crate::AppendState;
-use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
+use crate::Table;
 use crate::client::MAX_APPEND_BODY_BYTES;
 use crate::client::MAX_APPEND_ROWS;
 
@@ -122,15 +122,6 @@ impl AppendOptions {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AppendBatchRequest {
-    pub client: Client,
-    pub database: String,
-    pub schema: String,
-    pub table: String,
-    pub options: AppendOptions,
-}
-
 pub fn validate_deadline(name: &str, duration: Duration) -> Result<(), Error> {
     if Instant::now().checked_add(duration).is_none() {
         Err(config_error(format!("{name} is too large")))
@@ -201,26 +192,16 @@ fn validate_record_payload(payload: &str) -> Result<(), RecordError> {
 }
 
 pub async fn append_batch(
-    request: AppendBatchRequest,
+    table: Table,
+    options: AppendOptions,
     payload: String,
 ) -> (Result<AppendRowsResult, Error>, usize) {
     let mut retries = 0usize;
-    let mut backoff = request
-        .options
-        .retry
-        .initial_backoff
-        .min(request.options.retry.max_backoff);
+    let mut backoff = options.retry.initial_backoff.min(options.retry.max_backoff);
     let mut saw_unknown = false;
     loop {
-        let result = request
-            .client
-            .append_rows_with_timeout(
-                &request.database,
-                &request.schema,
-                &request.table,
-                payload.clone(),
-                request.options.attempt_timeout,
-            )
+        let result = table
+            .append_with_timeout(payload.clone(), options.attempt_timeout)
             .await;
 
         let error = match result {
@@ -230,8 +211,8 @@ pub async fn append_batch(
         saw_unknown |= error
             .append_details()
             .is_some_and(|details| details.status == AppendState::Unknown);
-        let retryable = append_retryable(&error, request.options.retry.retry_unknown);
-        if !retryable || retries >= request.options.retry.max_retries {
+        let retryable = append_retryable(&error, options.retry.retry_unknown);
+        if !retryable || retries >= options.retry.max_retries {
             let error = if retryable {
                 error.with_context("retries", retries).set_persistent()
             } else {
@@ -239,12 +220,12 @@ pub async fn append_batch(
             };
             return (Err(preserve_unknown_outcome(error, saw_unknown)), retries);
         }
-        let retry_delay = retry_delay(backoff, &error, request.options.retry.max_backoff);
+        let retry_delay = retry_delay(backoff, &error, options.retry.max_backoff);
         if !retry_delay.is_zero() {
             tokio::time::sleep(retry_delay).await;
         }
         retries += 1;
-        backoff = next_backoff(backoff, request.options.retry.max_backoff);
+        backoff = next_backoff(backoff, options.retry.max_backoff);
     }
 }
 

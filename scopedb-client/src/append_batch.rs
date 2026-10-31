@@ -27,9 +27,8 @@ use crate::AppendDeliveryOutcome;
 use crate::AppendFailurePolicy;
 use crate::AppendRowsResult;
 use crate::AppendState;
-use crate::Client;
 use crate::Error;
-use crate::append::AppendBatchRequest;
+use crate::Table;
 use crate::append::AppendOptions;
 use crate::append::append_batch;
 use crate::append::encode_record;
@@ -41,20 +40,14 @@ use crate::append::encode_record;
 /// temporary rejections. Unknown outcomes are not replayed by default.
 #[derive(Debug, Clone)]
 pub struct AppendBatchBuilder {
-    client: Client,
-    database: String,
-    schema: String,
-    table: String,
+    table: Table,
     options: AppendOptions,
     failure_policy: AppendFailurePolicy,
 }
 
 impl AppendBatchBuilder {
-    pub(crate) fn new(client: Client, database: String, schema: String, table: String) -> Self {
+    pub(crate) fn new(table: Table) -> Self {
         Self {
-            client,
-            database,
-            schema,
             table,
             options: AppendOptions::default(),
             failure_policy: AppendFailurePolicy::Stop,
@@ -122,25 +115,10 @@ impl AppendBatchBuilder {
     /// Validates configuration without starting background tasks or making requests.
     pub fn build(self) -> Result<AppendBatch, Error> {
         self.options.validate()?;
-        self.client.make_resource_url(&[
-            "catalog",
-            "databases",
-            &self.database,
-            "schemas",
-            &self.schema,
-            "tables",
-            &self.table,
-            "ingest",
-        ])?;
-        let request = AppendBatchRequest {
-            client: self.client,
-            database: self.database,
-            schema: self.schema,
+        self.table.validate_append()?;
+        Ok(AppendBatch {
             table: self.table,
             options: self.options,
-        };
-        Ok(AppendBatch {
-            request,
             failure_policy: self.failure_policy,
         })
     }
@@ -151,7 +129,8 @@ impl AppendBatchBuilder {
 /// Clones share the HTTP connection pool, not buffers, concurrency limits or reports.
 #[derive(Debug, Clone)]
 pub struct AppendBatch {
-    request: AppendBatchRequest,
+    table: Table,
+    options: AppendOptions,
     failure_policy: AppendFailurePolicy,
 }
 
@@ -358,7 +337,7 @@ impl AppendBatch {
         loop {
             while !stopped
                 && cursor < rows.len()
-                && pending.len() < self.request.options.max_in_flight_requests
+                && pending.len() < self.options.max_in_flight_requests
             {
                 let start = cursor;
                 let mut payload = String::new();
@@ -377,7 +356,6 @@ impl AppendBatch {
                         }
                     };
                     if self
-                        .request
                         .options
                         .would_overflow(payload.len(), count, encoded.len())
                     {
@@ -390,7 +368,7 @@ impl AppendBatch {
                     payload.push_str(&encoded);
                     count += 1;
                     cursor += 1;
-                    if self.request.options.is_full(payload.len(), count) {
+                    if self.options.is_full(payload.len(), count) {
                         break;
                     }
                 }
@@ -398,9 +376,10 @@ impl AppendBatch {
                     break;
                 }
                 let input_range = start..cursor;
-                let request = self.request.clone();
+                let table = self.table.clone();
+                let options = self.options.clone();
                 pending.push(Box::pin(async move {
-                    let (result, retries) = append_batch(request, payload).await;
+                    let (result, retries) = append_batch(table, options, payload).await;
                     AppendBatchResult {
                         input_range,
                         result,
@@ -468,6 +447,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::Client;
     use crate::test_support::MockResponse;
     use crate::test_support::MockServer;
 

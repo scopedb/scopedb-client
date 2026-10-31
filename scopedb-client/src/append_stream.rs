@@ -34,10 +34,9 @@ use tokio::task::JoinSet;
 use crate::AppendErrorDetails;
 use crate::AppendRowsResult;
 use crate::AppendState;
-use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
-use crate::append::AppendBatchRequest;
+use crate::Table;
 use crate::append::AppendDeliveryOutcome;
 use crate::append::AppendFailurePolicy;
 use crate::append::AppendOptions;
@@ -276,10 +275,7 @@ type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 /// a separate sink. [`AppendStream::try_send`] never waits for capacity;
 /// [`AppendStream::send`] provides backpressure instead.
 pub struct AppendStreamBuilder {
-    client: Client,
-    database: String,
-    schema: String,
-    table: String,
+    table: Table,
     flush_interval: Duration,
     channel_capacity: usize,
     max_pending_bytes: usize,
@@ -290,11 +286,8 @@ pub struct AppendStreamBuilder {
 }
 
 impl AppendStreamBuilder {
-    pub(crate) fn new(client: Client, database: String, schema: String, table: String) -> Self {
+    pub(crate) fn new(table: Table) -> Self {
         Self {
-            client,
-            database,
-            schema,
             table,
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
@@ -406,9 +399,6 @@ impl AppendStreamBuilder {
         })?;
 
         Ok(AppendStream::new(AppendStreamConfig {
-            client: self.client,
-            database: self.database,
-            schema: self.schema,
             table: self.table,
             options: self.options,
             flush_interval: self.flush_interval,
@@ -422,16 +412,7 @@ impl AppendStreamBuilder {
 }
 
 fn validate_builder(builder: &AppendStreamBuilder) -> Result<(), Error> {
-    builder.client.make_resource_url(&[
-        "catalog",
-        "databases",
-        &builder.database,
-        "schemas",
-        &builder.schema,
-        "tables",
-        &builder.table,
-        "ingest",
-    ])?;
+    builder.table.validate_append()?;
     builder.options.validate()?;
     if builder.channel_capacity > Semaphore::MAX_PERMITS {
         return Err(config_error("channel_capacity is too large"));
@@ -464,10 +445,7 @@ fn validate_builder(builder: &AppendStreamBuilder) -> Result<(), Error> {
 }
 
 struct AppendStreamConfig {
-    client: Client,
-    database: String,
-    schema: String,
-    table: String,
+    table: Table,
     flush_interval: Duration,
     channel_capacity: usize,
     max_pending_bytes: usize,
@@ -1209,16 +1187,11 @@ impl AppendWorker {
             .map(|record| record.payload.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let request = AppendBatchRequest {
-            client: self.config.client.clone(),
-            database: self.config.database.clone(),
-            schema: self.config.schema.clone(),
-            table: self.config.table.clone(),
-            options: self.config.options.clone(),
-        };
+        let table = self.config.table.clone();
+        let options = self.config.options.clone();
         lock(&self.shared).in_flight_batches += 1;
         self.in_flight.spawn(async move {
-            let (result, retries) = append_batch(request, payload).await;
+            let (result, retries) = append_batch(table, options, payload).await;
             BatchOutcome {
                 records,
                 batch_bytes,
@@ -1719,6 +1692,7 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use crate::Client;
     use crate::append::RetryConfig;
     use crate::client::MAX_APPEND_BODY_BYTES;
     use crate::client::MAX_APPEND_ROWS;
@@ -1729,10 +1703,9 @@ mod tests {
     #[test]
     fn report_outcomes_include_drops_and_unknown_rows() {
         let config = AppendStreamConfig {
-            client: Client::new("http://127.0.0.1:1", reqwest::Client::new()).unwrap(),
-            database: "scopedb".to_string(),
-            schema: "public".to_string(),
-            table: "events".to_string(),
+            table: Client::new("http://127.0.0.1:1", reqwest::Client::new())
+                .unwrap()
+                .table("events"),
             flush_interval: Duration::from_secs(1),
             channel_capacity: 1,
             max_pending_bytes: 1024,
