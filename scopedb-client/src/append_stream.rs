@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::error::Error as StdError;
 use std::fmt;
+use std::mem;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -31,18 +31,19 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 
+use crate::AppendDeliveryOutcome;
 use crate::AppendErrorDetails;
+use crate::AppendFailurePolicy;
 use crate::AppendRowsResult;
 use crate::AppendState;
-use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
-use crate::append::AppendBatchRequest;
+use crate::Table;
 use crate::append::AppendOptions;
+use crate::append::RecordError;
 use crate::append::append_batch;
 use crate::append::config_error;
-use crate::append::prepare_record;
-use crate::append::prepare_record_for_try_send;
+use crate::append::encode_record;
 use crate::append::validate_deadline;
 use crate::append::validate_positive;
 
@@ -51,17 +52,6 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 const DEFAULT_MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD: usize = 5;
 const DEFAULT_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(30);
-
-/// Determines whether to stop scheduling rows after one HTTP batch fails.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum AppendFailurePolicy {
-    /// Stop scheduling new batches after observing a failure.
-    #[default]
-    Stop,
-    /// Continue scheduling later batches, retaining every failure in the report.
-    Continue,
-}
 
 /// The lifecycle state of an append stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,24 +72,53 @@ pub enum AppendCircuitState {
     HalfOpen,
 }
 
-/// The aggregate result of a delivery barrier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum AppendDeliveryOutcome {
-    /// Every covered row was committed and no local rows were dropped.
-    Ok,
-    /// Some covered rows committed and some were lost or have an unknown outcome.
-    Partial,
-    /// No covered row committed and all losses are known not to have committed.
-    Failed,
-    /// No covered row is known to have committed and at least one may have committed.
-    Unknown,
-}
-
 /// Rows accepted by a bulk local-admission operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppendAdmissionResult {
     pub accepted_rows: u64,
+}
+
+/// A bulk admission failure with the prefix accepted by that call.
+///
+/// Accepted rows remain owned by the stream and may still be written. Settle
+/// the stream before reconciling them; this count is not a remote acknowledgement.
+#[derive(Debug, Clone)]
+pub struct AppendAdmissionError {
+    accepted_rows: u64,
+    cause: Box<Error>,
+}
+
+impl AppendAdmissionError {
+    /// Returns the number of rows this call admitted before its first failure.
+    pub fn accepted_rows(&self) -> u64 {
+        self.accepted_rows
+    }
+
+    /// Returns the encoding, capacity, or stream failure that stopped admission.
+    pub fn cause(&self) -> &Error {
+        &self.cause
+    }
+
+    /// Consumes the admission error and returns its underlying failure.
+    pub fn into_cause(self) -> Error {
+        *self.cause
+    }
+}
+
+impl fmt::Display for AppendAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "append admission accepted {} rows before failing: {}",
+            self.accepted_rows, self.cause
+        )
+    }
+}
+
+impl std::error::Error for AppendAdmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
 }
 
 /// Aggregate settlement information since the previous delivery barrier.
@@ -225,6 +244,16 @@ pub enum AppendTrySendError {
     Closed,
 }
 
+impl From<RecordError> for AppendTrySendError {
+    fn from(error: RecordError) -> Self {
+        match error {
+            RecordError::Serialization(error) => Self::Serialization(error),
+            RecordError::InvalidRecord => Self::InvalidRecord,
+            RecordError::RecordTooLarge { bytes, limit } => Self::RecordTooLarge { bytes, limit },
+        }
+    }
+}
+
 impl fmt::Display for AppendTrySendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -243,8 +272,8 @@ impl fmt::Display for AppendTrySendError {
     }
 }
 
-impl StdError for AppendTrySendError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl std::error::Error for AppendTrySendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serialization(err) => Some(err),
             _ => None,
@@ -289,10 +318,7 @@ type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 /// a separate sink. [`AppendStream::try_send`] never waits for capacity;
 /// [`AppendStream::send`] provides backpressure instead.
 pub struct AppendStreamBuilder {
-    client: Client,
-    database: String,
-    schema: String,
-    table: String,
+    table: Table,
     flush_interval: Duration,
     channel_capacity: usize,
     max_pending_bytes: usize,
@@ -303,22 +329,6 @@ pub struct AppendStreamBuilder {
 }
 
 impl AppendStreamBuilder {
-    pub(crate) fn new(client: Client, database: String, schema: String, table: String) -> Self {
-        Self {
-            client,
-            database,
-            schema,
-            table,
-            flush_interval: DEFAULT_FLUSH_INTERVAL,
-            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
-            max_pending_bytes: DEFAULT_MAX_PENDING_BYTES,
-            options: AppendOptions::default(),
-            failure_policy: AppendFailurePolicy::Stop,
-            circuit_breaker: Some(AppendCircuitBreakerOptions::default()),
-            batch_failure_listeners: Vec::new(),
-        }
-    }
-
     /// Chooses whether to stop or continue after a batch fails. Defaults to Stop.
     pub fn failure_policy(mut self, failure_policy: AppendFailurePolicy) -> Self {
         self.failure_policy = failure_policy;
@@ -419,9 +429,6 @@ impl AppendStreamBuilder {
         })?;
 
         Ok(AppendStream::new(AppendStreamConfig {
-            client: self.client,
-            database: self.database,
-            schema: self.schema,
             table: self.table,
             options: self.options,
             flush_interval: self.flush_interval,
@@ -432,19 +439,23 @@ impl AppendStreamBuilder {
             batch_failure_listeners: self.batch_failure_listeners,
         }))
     }
+
+    pub(crate) fn new(table: Table) -> Self {
+        Self {
+            table,
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
+            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            max_pending_bytes: DEFAULT_MAX_PENDING_BYTES,
+            options: AppendOptions::default(),
+            failure_policy: AppendFailurePolicy::Stop,
+            circuit_breaker: Some(AppendCircuitBreakerOptions::default()),
+            batch_failure_listeners: Vec::new(),
+        }
+    }
 }
 
 fn validate_builder(builder: &AppendStreamBuilder) -> Result<(), Error> {
-    builder.client.make_resource_url(&[
-        "catalog",
-        "databases",
-        &builder.database,
-        "schemas",
-        &builder.schema,
-        "tables",
-        &builder.table,
-        "ingest",
-    ])?;
+    builder.table.validate_append()?;
     builder.options.validate()?;
     if builder.channel_capacity > Semaphore::MAX_PERMITS {
         return Err(config_error("channel_capacity is too large"));
@@ -477,10 +488,7 @@ fn validate_builder(builder: &AppendStreamBuilder) -> Result<(), Error> {
 }
 
 struct AppendStreamConfig {
-    client: Client,
-    database: String,
-    schema: String,
-    table: String,
+    table: Table,
     flush_interval: Duration,
     channel_capacity: usize,
     max_pending_bytes: usize,
@@ -645,36 +653,6 @@ pub struct AppendStream {
 }
 
 impl AppendStream {
-    fn new(config: AppendStreamConfig) -> Self {
-        let (tx, rx) = mpsc::channel(config.channel_capacity);
-        let shared = Arc::new(Mutex::new(SharedState::default()));
-        let pending_bytes = Arc::new(PendingBytesBudget::new(config.max_pending_bytes));
-        let shutdown_notify = Arc::new(Notify::new());
-
-        let worker = tokio::spawn(run_append_worker(
-            config,
-            rx,
-            shared.clone(),
-            pending_bytes.clone(),
-            shutdown_notify.clone(),
-        ));
-        tokio::spawn(monitor_append_worker(
-            worker,
-            shared.clone(),
-            pending_bytes.clone(),
-            shutdown_notify.clone(),
-        ));
-
-        Self {
-            inner: Arc::new(AppendStreamInner {
-                tx,
-                shared,
-                pending_bytes,
-                shutdown_notify,
-            }),
-        }
-    }
-
     /// Serializes and admits one row, waiting for bounded local capacity.
     ///
     /// Success means local admission only. Use [`Self::flush`] or
@@ -684,7 +662,7 @@ impl AppendStream {
         T: Serialize + ?Sized,
     {
         self.check_open()?;
-        let payload = prepare_record(row)?;
+        let payload = encode_record(row)?;
         let reserved_bytes = payload.len().saturating_add(1);
         let reservation = self
             .inner
@@ -738,7 +716,7 @@ impl AppendStream {
             }
         }
 
-        let payload = match prepare_record_for_try_send(row) {
+        let payload = match encode_record(row).map_err(AppendTrySendError::from) {
             Ok(payload) => payload,
             Err(err) => {
                 let reason = match err {
@@ -810,10 +788,18 @@ impl AppendStream {
 
     /// Admits an iterator of rows sequentially with bounded memory.
     ///
-    /// If admission fails partway, the error includes the accepted count.
+    /// If admission fails partway, [`AppendAdmissionError::accepted_rows`] identifies
+    /// the prefix admitted by this call, independently of other producers.
     /// Call [`Self::shutdown`] to settle those rows; [`Self::stats`] retains
-    /// cumulative counts.
-    pub async fn send_all<I>(&self, rows: I) -> Result<AppendAdmissionResult, Error>
+    /// cumulative counts. Dropping this future can leave an admitted prefix
+    /// without returning a count; it does not cancel those rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppendAdmissionError`] when encoding, capacity, or stream state
+    /// prevents the next admission. Inspect [`AppendAdmissionError::cause`] for
+    /// the underlying SDK error.
+    pub async fn send_all<I>(&self, rows: I) -> Result<AppendAdmissionResult, AppendAdmissionError>
     where
         I: IntoIterator,
         I::Item: Serialize,
@@ -822,7 +808,10 @@ impl AppendStream {
         for row in rows {
             self.send(&row)
                 .await
-                .map_err(|error| error.with_context("accepted_rows", accepted_rows))?;
+                .map_err(|error| AppendAdmissionError {
+                    accepted_rows,
+                    cause: Box::new(error),
+                })?;
             accepted_rows = accepted_rows.saturating_add(1);
         }
         Ok(AppendAdmissionResult { accepted_rows })
@@ -926,6 +915,36 @@ impl AppendStream {
             in_flight_batches: shared.in_flight_batches,
             last_failure: shared.last_failure.clone(),
             last_report: shared.last_report.clone(),
+        }
+    }
+
+    fn new(config: AppendStreamConfig) -> Self {
+        let (tx, rx) = mpsc::channel(config.channel_capacity);
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        let pending_bytes = Arc::new(PendingBytesBudget::new(config.max_pending_bytes));
+        let shutdown_notify = Arc::new(Notify::new());
+
+        let worker = tokio::spawn(run_append_worker(
+            config,
+            rx,
+            shared.clone(),
+            pending_bytes.clone(),
+            shutdown_notify.clone(),
+        ));
+        tokio::spawn(monitor_append_worker(
+            worker,
+            shared.clone(),
+            pending_bytes.clone(),
+            shutdown_notify.clone(),
+        ));
+
+        Self {
+            inner: Arc::new(AppendStreamInner {
+                tx,
+                shared,
+                pending_bytes,
+                shutdown_notify,
+            }),
         }
     }
 
@@ -1214,24 +1233,19 @@ impl AppendWorker {
         if self.fatal.is_some() {
             return;
         }
-        let records = std::mem::take(&mut self.rows);
-        let batch_bytes = std::mem::take(&mut self.current_bytes);
+        let records = mem::take(&mut self.rows);
+        let batch_bytes = mem::take(&mut self.current_bytes);
         self.batch_deadline = None;
         let payload = records
             .iter()
             .map(|record| record.payload.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let request = AppendBatchRequest {
-            client: self.config.client.clone(),
-            database: self.config.database.clone(),
-            schema: self.config.schema.clone(),
-            table: self.config.table.clone(),
-            options: self.config.options.clone(),
-        };
+        let table = self.config.table.clone();
+        let options = self.config.options.clone();
         lock(&self.shared).in_flight_batches += 1;
         self.in_flight.spawn(async move {
-            let (result, retries) = append_batch(request, payload).await;
+            let (result, retries) = append_batch(table, options, payload).await;
             BatchOutcome {
                 records,
                 batch_bytes,
@@ -1468,7 +1482,7 @@ impl AppendWorker {
         barrier: Option<BarrierCommand>,
     ) {
         rx.close();
-        let buffered = std::mem::take(&mut self.rows);
+        let buffered = mem::take(&mut self.rows);
         self.mark_records_failed(buffered);
         self.current_bytes = 0;
         self.batch_deadline = None;
@@ -1732,20 +1746,67 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::append::RetryConfig;
+    use crate::Client;
+    use crate::append::RetryOptions;
     use crate::client::MAX_APPEND_BODY_BYTES;
     use crate::client::MAX_APPEND_ROWS;
     use crate::test_support::MockDisconnect;
     use crate::test_support::MockResponse;
     use crate::test_support::MockServer;
 
+    #[tokio::test]
+    async fn bulk_admission_failure_preserves_its_own_prefix_and_leaves_the_stream_usable() {
+        let server = MockServer::start(|_, request| MockResponse::committed(request));
+        let stream = server
+            .client()
+            .table("events")
+            .append_stream()
+            .build()
+            .unwrap();
+        stream.send(&serde_json::json!({"id":0})).await.unwrap();
+        let failure = stream
+            .send_all([
+                serde_json::json!({"id":1}),
+                serde_json::json!([2]),
+                serde_json::json!({"id":3}),
+            ])
+            .await
+            .unwrap_err();
+        assert_eq!(failure.accepted_rows(), 1);
+        assert_eq!(failure.cause().kind(), ErrorKind::Unexpected);
+        assert!(std::error::Error::source(&failure).is_some());
+        assert_eq!(stream.stats().accepted_rows, 2);
+        stream.send(&serde_json::json!({"id":4})).await.unwrap();
+        let report = stream.shutdown().await.unwrap();
+        assert_eq!(report.committed_rows, 3);
+        let requests = server.requests();
+        let mut rows: Vec<serde_json::Value> = requests
+            .iter()
+            .flat_map(|request| {
+                request
+                    .body
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+            })
+            .collect();
+        rows.sort_by_key(|row| row["id"].as_u64().unwrap());
+        assert_eq!(
+            rows,
+            vec![
+                serde_json::json!({"id":0}),
+                serde_json::json!({"id":1}),
+                serde_json::json!({"id":4})
+            ]
+        );
+        assert_eq!(failure.into_cause().kind(), ErrorKind::Unexpected);
+    }
+
     #[test]
     fn report_outcomes_include_drops_and_unknown_rows() {
         let config = AppendStreamConfig {
-            client: Client::new("http://127.0.0.1:1", reqwest::Client::new()).unwrap(),
-            database: "scopedb".to_string(),
-            schema: "public".to_string(),
-            table: "events".to_string(),
+            table: Client::new("http://127.0.0.1:1", reqwest::Client::new())
+                .unwrap()
+                .table("events"),
             flush_interval: Duration::from_secs(1),
             channel_capacity: 1,
             max_pending_bytes: 1024,
@@ -1753,7 +1814,7 @@ mod tests {
                 batch_bytes: 1024,
                 max_batch_rows: 100,
                 max_in_flight_requests: 1,
-                retry: RetryConfig {
+                retry: RetryOptions {
                     max_retries: 0,
                     retry_unknown: false,
                     initial_backoff: Duration::ZERO,
@@ -1850,7 +1911,7 @@ mod tests {
 
         let row = serde_json::json!({"payload": "x".repeat(MAX_APPEND_BODY_BYTES)});
         assert!(matches!(
-            prepare_record_for_try_send(&row),
+            encode_record(&row).map_err(AppendTrySendError::from),
             Err(AppendTrySendError::RecordTooLarge {
                 limit: MAX_APPEND_BODY_BYTES,
                 ..
@@ -1878,7 +1939,7 @@ mod tests {
         assert_eq!(restored.request_id(), Some("request-123"));
         assert_eq!(restored.retry_after(), Some(Duration::from_secs(2)));
         assert!(restored.is_temporary());
-        let cause = StdError::source(&restored)
+        let cause = std::error::Error::source(&restored)
             .unwrap()
             .downcast_ref::<std::io::Error>()
             .unwrap();
@@ -2271,7 +2332,11 @@ mod tests {
         assert_eq!(server.requests().len(), 1);
         assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
         assert!(!error.is_retryable());
-        assert!(StdError::source(&error).unwrap().is::<reqwest::Error>());
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .is::<reqwest::Error>()
+        );
     }
 
     #[tokio::test]
@@ -2290,7 +2355,11 @@ mod tests {
 
         assert_eq!(server.requests().len(), 1);
         assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-        assert!(StdError::source(&error).unwrap().is::<reqwest::Error>());
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .is::<reqwest::Error>()
+        );
         assert_eq!(stream.stats().retries, 0);
     }
 
@@ -2379,7 +2448,11 @@ mod tests {
                 assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
                 assert!(format!("{error:?}").contains(&format!("retries: {max_retries}")));
                 if disconnect {
-                    assert!(StdError::source(&error).unwrap().is::<reqwest::Error>());
+                    assert!(
+                        std::error::Error::source(&error)
+                            .unwrap()
+                            .is::<reqwest::Error>()
+                    );
                 } else {
                     assert_eq!(
                         error.http_status(),

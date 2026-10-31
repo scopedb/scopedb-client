@@ -12,11 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
+use crate::AppendRowsResult;
+use crate::AppendStreamBuilder;
+use crate::AppendWriterBuilder;
+use crate::CatalogResource;
 use crate::CatalogTable;
 use crate::Client;
 use crate::Error;
-use crate::append_stream::AppendStreamBuilder;
-use crate::protocol::AppendRowsResult;
+
+const DEFAULT_DATABASE: &str = "scopedb";
+const DEFAULT_SCHEMA: &str = "public";
 
 /// A table selected for writes or catalog reads.
 ///
@@ -26,36 +33,27 @@ use crate::protocol::AppendRowsResult;
 #[derive(Debug, Clone)]
 pub struct Table {
     client: Client,
-    database: Option<String>,
-    schema: Option<String>,
+    database: String,
+    schema: String,
     table: String,
 }
 
 impl Table {
-    pub(crate) fn new(client: Client, table: String) -> Self {
-        Self {
-            client,
-            database: None,
-            schema: None,
-            table,
-        }
-    }
-
     pub fn with_database(mut self, database: impl Into<String>) -> Self {
-        self.database = Some(database.into());
+        self.database = database.into();
         self
     }
 
     pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
-        self.schema = Some(schema.into());
+        self.schema = schema.into();
         self
     }
 
     pub fn identifier(&self) -> String {
         [
-            self.database.as_deref().unwrap_or("scopedb"),
-            self.schema.as_deref().unwrap_or("public"),
-            &self.table,
+            self.database.as_str(),
+            self.schema.as_str(),
+            self.table.as_str(),
         ]
         .map(quote_ident)
         .join(".")
@@ -91,46 +89,58 @@ impl Table {
     /// ```
     pub async fn append(&self, ndjson: impl Into<String>) -> Result<AppendRowsResult, Error> {
         self.client
-            .append_rows(
-                self.database.as_deref().unwrap_or("scopedb"),
-                self.schema.as_deref().unwrap_or("public"),
-                &self.table,
-                ndjson,
-            )
+            .append_rows(&self.database, &self.schema, &self.table, ndjson)
             .await
     }
 
     /// Builds a reusable writer for finite input slices with per-batch input ranges.
-    pub fn append_batch(&self) -> crate::AppendBatchBuilder {
-        crate::AppendBatchBuilder::new(
-            self.client.clone(),
-            self.database
-                .clone()
-                .unwrap_or_else(|| "scopedb".to_string()),
-            self.schema.clone().unwrap_or_else(|| "public".to_string()),
-            self.table.clone(),
-        )
+    pub fn append_batch(&self) -> AppendWriterBuilder {
+        AppendWriterBuilder::new(self.clone())
     }
 
     /// Builds an asynchronous, bounded and concurrent append stream for this table.
     pub fn append_stream(&self) -> AppendStreamBuilder {
-        AppendStreamBuilder::new(
-            self.client.clone(),
-            self.database
-                .clone()
-                .unwrap_or_else(|| "scopedb".to_string()),
-            self.schema.clone().unwrap_or_else(|| "public".to_string()),
-            self.table.clone(),
-        )
+        AppendStreamBuilder::new(self.clone())
     }
 
     /// Selects this table's complete definition and ETag for conditional changes.
-    pub fn catalog(&self) -> crate::CatalogResource<CatalogTable> {
-        self.client.catalog().table(
-            self.database.as_deref().unwrap_or("scopedb"),
-            self.schema.as_deref().unwrap_or("public"),
+    pub fn catalog(&self) -> CatalogResource<CatalogTable> {
+        self.client
+            .catalog()
+            .table(&self.database, &self.schema, &self.table)
+    }
+
+    pub(crate) fn new(client: Client, table: String) -> Self {
+        Self {
+            client,
+            database: DEFAULT_DATABASE.to_string(),
+            schema: DEFAULT_SCHEMA.to_string(),
+            table,
+        }
+    }
+
+    pub(crate) fn validate_append(&self) -> Result<(), Error> {
+        self.client.make_resource_url(&[
+            "catalog",
+            "databases",
+            &self.database,
+            "schemas",
+            &self.schema,
+            "tables",
             &self.table,
-        )
+            "ingest",
+        ])?;
+        Ok(())
+    }
+
+    pub(crate) async fn append_with_timeout(
+        &self,
+        payload: String,
+        timeout: Option<Duration>,
+    ) -> Result<AppendRowsResult, Error> {
+        self.client
+            .append_rows_with_timeout(&self.database, &self.schema, &self.table, payload, timeout)
+            .await
     }
 }
 
@@ -158,7 +168,48 @@ fn quote_ident(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::quote_ident;
+    use super::*;
+    use crate::test_support::MockResponse;
+    use crate::test_support::MockServer;
+
+    #[tokio::test]
+    async fn writers_and_catalog_keep_the_selected_table_and_base_path() {
+        let server = MockServer::start(|_, request| {
+            if request.target.ends_with("/ingest") {
+                MockResponse::committed(request)
+            } else {
+                MockResponse::json(200, r#"{"name":"events/blue","columns":[]}"#)
+                    .with_header("ETag", "\"version\"")
+            }
+        });
+        let client = Client::builder(format!("{}/proxy/", server.endpoint))
+            .http_client(reqwest::Client::builder().no_proxy().build().unwrap())
+            .build()
+            .unwrap();
+        let table = client
+            .table("events/blue")
+            .with_database("analytics")
+            .with_schema("archive");
+        let writer = table.append_batch().build().unwrap();
+        let stream = table.append_stream().build().unwrap();
+        let catalog = table.catalog();
+        table.append(r#"{"id":1}"#).await.unwrap();
+        // A later selector change must not retarget an already built writer.
+        drop(table.with_schema("public"));
+        let report = writer.write(&[serde_json::json!({"id":2})]).await.unwrap();
+        assert_eq!(report.committed_rows(), 1);
+        stream.send(&serde_json::json!({"id":3})).await.unwrap();
+        stream.shutdown().await.unwrap();
+        catalog.get().await.unwrap();
+
+        let target = "/proxy/v1/catalog/databases/analytics/schemas/archive/tables/events%2Fblue";
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4);
+        for request in &requests[..3] {
+            assert_eq!(request.target, format!("{target}/ingest"));
+        }
+        assert_eq!(requests[3].target, target);
+    }
 
     #[test]
     fn identifiers_always_use_the_same_defaults_as_append_and_catalog() {

@@ -171,12 +171,6 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    pub(crate) fn new(client: Client) -> Self {
-        Self {
-            resource: CatalogResource::new(client, &["catalog"]),
-        }
-    }
-
     pub async fn get(&self) -> Result<CatalogSnapshot<CatalogDocument>, Error> {
         self.resource.get().await
     }
@@ -201,12 +195,14 @@ impl Catalog {
             &["catalog", "databases", database],
         )
     }
+
     pub fn schema(&self, database: &str, schema: &str) -> CatalogResource<CatalogSchema> {
         CatalogResource::new(
             self.resource.client.clone(),
             &["catalog", "databases", database, "schemas", schema],
         )
     }
+
     pub fn table(
         &self,
         database: &str,
@@ -226,6 +222,7 @@ impl Catalog {
             ],
         )
     }
+
     pub fn view(&self, database: &str, schema: &str, view: &str) -> CatalogResource<CatalogView> {
         CatalogResource::new(
             self.resource.client.clone(),
@@ -239,6 +236,12 @@ impl Catalog {
                 view,
             ],
         )
+    }
+
+    pub(crate) fn new(client: Client) -> Self {
+        Self {
+            resource: CatalogResource::new(client, &["catalog"]),
+        }
     }
 }
 
@@ -257,18 +260,18 @@ pub struct CatalogResource<T> {
 }
 
 impl<T> CatalogResource<T> {
-    fn new(client: Client, path: &[&str]) -> Self {
-        Self {
-            client,
-            path: path.iter().map(|s| (*s).to_string()).collect(),
-            definition: PhantomData,
-        }
-    }
-
     pub fn raw(&self) -> CatalogResource<serde_json::Value> {
         CatalogResource {
             client: self.client.clone(),
             path: self.path.clone(),
+            definition: PhantomData,
+        }
+    }
+
+    fn new(client: Client, path: &[&str]) -> Self {
+        Self {
+            client,
+            path: path.iter().map(|s| (*s).to_string()).collect(),
             definition: PhantomData,
         }
     }

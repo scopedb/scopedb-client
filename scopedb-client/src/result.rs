@@ -187,6 +187,24 @@ impl ResultSet {
         ))
     }
 
+    pub(crate) fn from_statement_result_set(result_set: StatementResultSet) -> ResultSet {
+        ResultSet {
+            num_rows: result_set.metadata.num_rows,
+            schema: Schema {
+                fields: result_set
+                    .metadata
+                    .fields
+                    .into_iter()
+                    .map(|field| FieldSchema {
+                        name: field.name,
+                        data_type: field.data_type,
+                    })
+                    .collect(),
+            },
+            data: result_set.data,
+        }
+    }
+
     fn validate_row_count(&self) -> Result<(), Error> {
         let rows = self.raw_rows();
         if rows.len() != self.num_rows {
@@ -247,24 +265,6 @@ impl ResultSet {
             ));
         }
         Ok(())
-    }
-
-    pub(crate) fn from_statement_result_set(result_set: StatementResultSet) -> ResultSet {
-        ResultSet {
-            num_rows: result_set.metadata.num_rows,
-            schema: Schema {
-                fields: result_set
-                    .metadata
-                    .fields
-                    .into_iter()
-                    .map(|field| FieldSchema {
-                        name: field.name,
-                        data_type: field.data_type,
-                    })
-                    .collect(),
-            },
-            data: result_set.data,
-        }
     }
 }
 

@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp;
 use std::time::Duration;
 
-use tokio::time::sleep;
 use uuid::Uuid;
 
+use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
-use crate::client::Client;
+use crate::ResultSet;
+use crate::StatementStatus;
 use crate::protocol::StatementRequest;
-use crate::protocol::StatementStatus;
-use crate::result::ResultSet;
 
 /// A query with optional execution limits. Use [`Self::execute`] to wait for its
 /// result, or [`Self::submit`] to retain a handle for progress and cancellation.
@@ -202,9 +202,9 @@ impl StatementHandle {
                         .set_statement_id(self.statement_id));
                     }
                     StatementStatus::Pending(..) | StatementStatus::Running(..) => {
-                        sleep(delay).await;
+                        tokio::time::sleep(delay).await;
                         if delay < max_delay {
-                            delay = std::cmp::min(delay.saturating_mul(2), max_delay);
+                            delay = cmp::min(delay.saturating_mul(2), max_delay);
                         }
                     }
                 }

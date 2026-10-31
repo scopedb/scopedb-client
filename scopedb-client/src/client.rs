@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::time::Duration;
 
 use fastrace_reqwest::traceparent_headers;
@@ -26,19 +27,20 @@ use reqwest::header::HeaderValue;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::AppendErrorDetails;
+use crate::AppendRowsResult;
+use crate::AppendState;
+use crate::Catalog;
 use crate::Error;
 use crate::ErrorKind;
 use crate::ResultSet;
 use crate::Statement;
+use crate::StatementHandle;
+use crate::StatementStatus;
 use crate::Table;
-use crate::protocol::AppendErrorDetails;
-use crate::protocol::AppendRowsResult;
-use crate::protocol::AppendState;
 use crate::protocol::StatementRequest;
-use crate::protocol::StatementStatus;
 use crate::protocol::apply_response_metadata;
 use crate::protocol::decode_statement_response;
-use crate::statement::StatementHandle;
 
 const JSON_CONTENT_ENCODING: &str = "zstd";
 const UNCOMPRESSED_CONTENT_LENGTH: &str = "X-ScopeDB-Uncompressed-Content-Length";
@@ -71,8 +73,8 @@ pub struct ClientBuilder {
     write_timeout: Duration,
 }
 
-impl std::fmt::Debug for ClientBuilder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientBuilder")
             .field("endpoint", &self.endpoint)
             .field("client", &self.client)
@@ -253,8 +255,8 @@ impl Client {
     }
 
     /// Selects the complete declarative catalog or an individual resource.
-    pub fn catalog(&self) -> crate::Catalog {
-        crate::Catalog::new(self.clone())
+    pub fn catalog(&self) -> Catalog {
+        Catalog::new(self.clone())
     }
 
     /// Appends at most 8 MiB of uncompressed newline-delimited JSON to a table.
@@ -608,10 +610,7 @@ mod tests {
     use reqwest::header::HeaderMap;
     use serde_json::json;
 
-    use super::Client;
-    use super::JSON_CONTENT_ENCODING;
-    use super::UNCOMPRESSED_CONTENT_LENGTH;
-    use super::decode_append_response;
+    use super::*;
     use crate::ErrorKind;
     use crate::protocol::AppendState;
 

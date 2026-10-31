@@ -4,9 +4,13 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+* `AppendStream::send_all()` returns `AppendAdmissionError` on failure. Read `accepted_rows()` for the prefix admitted by that call and `cause()` for the underlying SDK error; use `into_cause()` when an existing error path needs an owned `Error`. Admission does not confirm remote delivery; settle accepted rows with `flush()` or `shutdown()` before reconciliation.
+
 ### New Features
 
-* Add reusable finite batch writers with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix.
+* Add reusable `AppendWriter` instances through `Table::append_batch()` with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix. `AppendWriteReport` describes one write call and `AppendRequestResult` identifies each request within it.
 
 ## v0.4.2 (2026-10-27)
 

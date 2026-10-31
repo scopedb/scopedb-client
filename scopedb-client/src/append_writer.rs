@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
 use std::future::poll_fn;
@@ -27,12 +26,11 @@ use crate::AppendDeliveryOutcome;
 use crate::AppendFailurePolicy;
 use crate::AppendRowsResult;
 use crate::AppendState;
-use crate::Client;
 use crate::Error;
-use crate::append::AppendBatchRequest;
+use crate::Table;
 use crate::append::AppendOptions;
 use crate::append::append_batch;
-use crate::append::prepare_record;
+use crate::append::encode_record;
 
 /// Configures a reusable writer for finite slices of rows.
 ///
@@ -40,27 +38,13 @@ use crate::append::prepare_record;
 /// 200,000 rows per request, four concurrent batches and eight retries of
 /// temporary rejections. Unknown outcomes are not replayed by default.
 #[derive(Debug, Clone)]
-pub struct AppendBatchBuilder {
-    client: Client,
-    database: String,
-    schema: String,
-    table: String,
+pub struct AppendWriterBuilder {
+    table: Table,
     options: AppendOptions,
     failure_policy: AppendFailurePolicy,
 }
 
-impl AppendBatchBuilder {
-    pub(crate) fn new(client: Client, database: String, schema: String, table: String) -> Self {
-        Self {
-            client,
-            database,
-            schema,
-            table,
-            options: AppendOptions::default(),
-            failure_policy: AppendFailurePolicy::Stop,
-        }
-    }
-
+impl AppendWriterBuilder {
     /// Sets the target uncompressed NDJSON size (default 4 MiB, maximum 8 MiB).
     /// A single row may exceed this target up to the 8 MiB protocol limit.
     pub fn target_batch_bytes(mut self, bytes: usize) -> Self {
@@ -120,29 +104,22 @@ impl AppendBatchBuilder {
     }
 
     /// Validates configuration without starting background tasks or making requests.
-    pub fn build(self) -> Result<AppendBatch, Error> {
+    pub fn build(self) -> Result<AppendWriter, Error> {
         self.options.validate()?;
-        self.client.make_resource_url(&[
-            "catalog",
-            "databases",
-            &self.database,
-            "schemas",
-            &self.schema,
-            "tables",
-            &self.table,
-            "ingest",
-        ])?;
-        let request = AppendBatchRequest {
-            client: self.client,
-            database: self.database,
-            schema: self.schema,
+        self.table.validate_append()?;
+        Ok(AppendWriter {
             table: self.table,
             options: self.options,
-        };
-        Ok(AppendBatch {
-            request,
             failure_policy: self.failure_policy,
         })
+    }
+
+    pub(crate) fn new(table: Table) -> Self {
+        Self {
+            table,
+            options: AppendOptions::default(),
+            failure_policy: AppendFailurePolicy::Stop,
+        }
     }
 }
 
@@ -150,8 +127,9 @@ impl AppendBatchBuilder {
 ///
 /// Clones share the HTTP connection pool, not buffers, concurrency limits or reports.
 #[derive(Debug, Clone)]
-pub struct AppendBatch {
-    request: AppendBatchRequest,
+pub struct AppendWriter {
+    table: Table,
+    options: AppendOptions,
     failure_policy: AppendFailurePolicy,
 }
 
@@ -161,18 +139,18 @@ pub struct AppendBatch {
 /// ranges cover a contiguous input prefix; [`Self::unsubmitted`] covers the rest.
 #[derive(Debug, Clone)]
 #[must_use]
-pub struct AppendBatchReport {
+pub struct AppendWriteReport {
     input_rows: usize,
-    batches: Vec<AppendBatchResult>,
+    batches: Vec<AppendRequestResult>,
     unsubmitted: Range<usize>,
 }
 
-impl AppendBatchReport {
+impl AppendWriteReport {
     pub fn input_rows(&self) -> usize {
         self.input_rows
     }
 
-    pub fn batches(&self) -> &[AppendBatchResult] {
+    pub fn batches(&self) -> &[AppendRequestResult] {
         &self.batches
     }
 
@@ -214,13 +192,13 @@ impl AppendBatchReport {
 
 /// One logical HTTP batch, including all of its retries.
 #[derive(Debug, Clone)]
-pub struct AppendBatchResult {
+pub struct AppendRequestResult {
     input_range: Range<usize>,
     result: Result<AppendRowsResult, Error>,
     retries: usize,
 }
 
-impl AppendBatchResult {
+impl AppendRequestResult {
     pub fn input_range(&self) -> Range<usize> {
         self.input_range.clone()
     }
@@ -250,13 +228,13 @@ impl AppendBatchResult {
 /// The report includes every scheduled batch, including successful batches.
 /// Replaying the entire input can duplicate those rows and unknown outcomes.
 #[derive(Debug, Clone)]
-pub struct AppendBatchError {
+pub struct AppendWriteError {
     cause: Box<Error>,
     input_index: Option<usize>,
-    report: AppendBatchReport,
+    report: AppendWriteReport,
 }
 
-impl AppendBatchError {
+impl AppendWriteError {
     /// Returns the local encoding error, or a failed batch's final error.
     pub fn cause(&self) -> &Error {
         &self.cause
@@ -264,21 +242,21 @@ impl AppendBatchError {
 
     /// Identifies a local serialization or row-validation failure, when present.
     /// That row belongs to the unsubmitted suffix. Remote row errors are mapped
-    /// through [`AppendBatchResult::input_index`] instead.
+    /// through [`AppendRequestResult::input_index`] instead.
     pub fn input_index(&self) -> Option<usize> {
         self.input_index
     }
 
-    pub fn report(&self) -> &AppendBatchReport {
+    pub fn report(&self) -> &AppendWriteReport {
         &self.report
     }
 
-    pub fn into_report(self) -> AppendBatchReport {
+    pub fn into_report(self) -> AppendWriteReport {
         self.report
     }
 }
 
-impl fmt::Display for AppendBatchError {
+impl fmt::Display for AppendWriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -290,17 +268,17 @@ impl fmt::Display for AppendBatchError {
     }
 }
 
-impl StdError for AppendBatchError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+impl std::error::Error for AppendWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.cause.as_ref())
     }
 }
 
-type PendingBatch = Pin<Box<dyn Future<Output = AppendBatchResult> + Send>>;
+type PendingBatch = Pin<Box<dyn Future<Output = AppendRequestResult> + Send>>;
 
 // Poll requests in the caller's task so cancellation drops the requests and
 // their retry loops together, without detached workers or another executor.
-async fn next_batch(pending: &mut Vec<PendingBatch>) -> AppendBatchResult {
+async fn next_batch(pending: &mut Vec<PendingBatch>) -> AppendRequestResult {
     poll_fn(|cx| {
         for index in 0..pending.len() {
             if let Poll::Ready(result) = pending[index].as_mut().poll(cx) {
@@ -313,7 +291,7 @@ async fn next_batch(pending: &mut Vec<PendingBatch>) -> AppendBatchResult {
     .await
 }
 
-impl AppendBatch {
+impl AppendWriter {
     /// Writes a finite slice, returning Ok only when every row is acknowledged.
     ///
     /// Serializes incrementally, using the same row validation, batch limits and
@@ -342,8 +320,8 @@ impl AppendBatch {
     pub async fn write<T: Serialize>(
         &self,
         rows: &[T],
-    ) -> Result<AppendBatchReport, AppendBatchError> {
-        let mut report = AppendBatchReport {
+    ) -> Result<AppendWriteReport, AppendWriteError> {
+        let mut report = AppendWriteReport {
             input_rows: rows.len(),
             batches: Vec::new(),
             unsubmitted: 0..rows.len(),
@@ -358,7 +336,7 @@ impl AppendBatch {
         loop {
             while !stopped
                 && cursor < rows.len()
-                && pending.len() < self.request.options.max_in_flight_requests
+                && pending.len() < self.options.max_in_flight_requests
             {
                 let start = cursor;
                 let mut payload = String::new();
@@ -367,17 +345,16 @@ impl AppendBatch {
                     let encoded = match lookahead
                         .take()
                         .map(Ok)
-                        .unwrap_or_else(|| prepare_record(&rows[cursor]))
+                        .unwrap_or_else(|| encode_record(&rows[cursor]))
                     {
                         Ok(encoded) => encoded,
                         Err(error) => {
-                            local_failure = Some((cursor, error));
+                            local_failure = Some((cursor, Error::from(error)));
                             stopped = true;
                             break;
                         }
                     };
                     if self
-                        .request
                         .options
                         .would_overflow(payload.len(), count, encoded.len())
                     {
@@ -390,7 +367,7 @@ impl AppendBatch {
                     payload.push_str(&encoded);
                     count += 1;
                     cursor += 1;
-                    if self.request.options.is_full(payload.len(), count) {
+                    if self.options.is_full(payload.len(), count) {
                         break;
                     }
                 }
@@ -398,10 +375,11 @@ impl AppendBatch {
                     break;
                 }
                 let input_range = start..cursor;
-                let request = self.request.clone();
+                let table = self.table.clone();
+                let options = self.options.clone();
                 pending.push(Box::pin(async move {
-                    let (result, retries) = append_batch(request, payload).await;
-                    AppendBatchResult {
+                    let (result, retries) = append_batch(table, options, payload).await;
+                    AppendRequestResult {
                         input_range,
                         result,
                         retries,
@@ -421,7 +399,7 @@ impl AppendBatch {
         report.batches.sort_by_key(|batch| batch.input_range.start);
         report.unsubmitted = submitted..rows.len();
         if let Some((index, cause)) = local_failure {
-            return Err(AppendBatchError {
+            return Err(AppendWriteError {
                 cause: Box::new(cause),
                 input_index: Some(index),
                 report,
@@ -446,7 +424,7 @@ impl AppendBatch {
             })
             .cloned();
         match cause {
-            Some(cause) => Err(AppendBatchError {
+            Some(cause) => Err(AppendWriteError {
                 cause: Box::new(cause),
                 input_index: None,
                 report,
@@ -468,6 +446,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::Client;
     use crate::test_support::MockResponse;
     use crate::test_support::MockServer;
 
@@ -531,7 +510,7 @@ mod tests {
             report
                 .batches()
                 .iter()
-                .map(AppendBatchResult::input_range)
+                .map(AppendRequestResult::input_range)
                 .collect::<Vec<_>>(),
             vec![0..2, 2..4, 4..6]
         );
@@ -683,7 +662,7 @@ mod tests {
             report
                 .batches()
                 .iter()
-                .map(AppendBatchResult::input_range)
+                .map(AppendRequestResult::input_range)
                 .collect::<Vec<_>>(),
             vec![0..1, 1..2, 2..3]
         );

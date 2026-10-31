@@ -20,15 +20,39 @@ use serde::Serialize;
 use crate::AppendErrorDetails;
 use crate::AppendRowsResult;
 use crate::AppendState;
-use crate::AppendTrySendError;
-use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
+use crate::Table;
 use crate::client::MAX_APPEND_BODY_BYTES;
 use crate::client::MAX_APPEND_ROWS;
 
+/// Determines whether to stop scheduling rows after one HTTP batch fails.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AppendFailurePolicy {
+    /// Stop scheduling new batches after observing a failure.
+    #[default]
+    Stop,
+    /// Continue scheduling later batches, retaining every failure in the report.
+    Continue,
+}
+
+/// The aggregate result of settling append operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AppendDeliveryOutcome {
+    /// Every covered row was committed and no local rows were dropped.
+    Ok,
+    /// Some covered rows committed and some were lost or have an unknown outcome.
+    Partial,
+    /// No covered row committed and all losses are known not to have committed.
+    Failed,
+    /// No covered row is known to have committed and at least one may have committed.
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy)]
-pub struct RetryConfig {
+pub struct RetryOptions {
     pub max_retries: usize,
     pub retry_unknown: bool,
     pub initial_backoff: Duration,
@@ -40,7 +64,7 @@ pub struct AppendOptions {
     pub batch_bytes: usize,
     pub max_batch_rows: usize,
     pub max_in_flight_requests: usize,
-    pub retry: RetryConfig,
+    pub retry: RetryOptions,
     pub attempt_timeout: Option<Duration>,
 }
 
@@ -50,7 +74,7 @@ impl Default for AppendOptions {
             batch_bytes: 4 * 1024 * 1024,
             max_batch_rows: MAX_APPEND_ROWS,
             max_in_flight_requests: 4,
-            retry: RetryConfig {
+            retry: RetryOptions {
                 max_retries: 8,
                 retry_unknown: false,
                 initial_backoff: Duration::from_millis(100),
@@ -98,15 +122,6 @@ impl AppendOptions {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct AppendBatchRequest {
-    pub client: Client,
-    pub database: String,
-    pub schema: String,
-    pub table: String,
-    pub options: AppendOptions,
-}
-
 pub fn validate_deadline(name: &str, duration: Duration) -> Result<(), Error> {
     if Instant::now().checked_add(duration).is_none() {
         Err(config_error(format!("{name} is too large")))
@@ -127,70 +142,66 @@ pub fn config_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::ConfigInvalid, message)
 }
 
-pub fn prepare_record<T>(row: &T) -> Result<String, Error>
-where
-    T: Serialize + ?Sized,
-{
-    let payload = serde_json::to_string(row).map_err(|err| {
-        Error::new(ErrorKind::Unexpected, "failed to serialize append row").set_source(err)
-    })?;
-    validate_record_payload(&payload).map_err(|err| match err {
-        AppendTrySendError::RecordTooLarge { bytes, limit } => Error::new(
-            ErrorKind::Unexpected,
-            format!("append row is {bytes} bytes, exceeding the {limit}-byte limit"),
-        ),
-        _ => Error::new(
-            ErrorKind::Unexpected,
-            "append row must serialize to a JSON object",
-        ),
-    })?;
-    Ok(payload)
+#[derive(Debug)]
+pub enum RecordError {
+    Serialization(serde_json::Error),
+    InvalidRecord,
+    RecordTooLarge { bytes: usize, limit: usize },
 }
 
-pub fn prepare_record_for_try_send<T>(row: &T) -> Result<String, AppendTrySendError>
+impl From<RecordError> for Error {
+    fn from(error: RecordError) -> Self {
+        match error {
+            RecordError::Serialization(error) => {
+                Error::new(ErrorKind::Unexpected, "failed to serialize append row")
+                    .set_source(error)
+            }
+            RecordError::InvalidRecord => Error::new(
+                ErrorKind::Unexpected,
+                "append row must serialize to a JSON object",
+            ),
+            RecordError::RecordTooLarge { bytes, limit } => Error::new(
+                ErrorKind::Unexpected,
+                format!("append row is {bytes} bytes, exceeding the {limit}-byte limit"),
+            ),
+        }
+    }
+}
+
+pub fn encode_record<T>(row: &T) -> Result<String, RecordError>
 where
     T: Serialize + ?Sized,
 {
-    let payload = serde_json::to_string(row).map_err(AppendTrySendError::Serialization)?;
+    let payload = serde_json::to_string(row).map_err(RecordError::Serialization)?;
     validate_record_payload(&payload)?;
     Ok(payload)
 }
 
-fn validate_record_payload(payload: &str) -> Result<(), AppendTrySendError> {
+fn validate_record_payload(payload: &str) -> Result<(), RecordError> {
     let bytes = payload.len();
     if bytes > MAX_APPEND_BODY_BYTES {
-        return Err(AppendTrySendError::RecordTooLarge {
+        return Err(RecordError::RecordTooLarge {
             bytes,
             limit: MAX_APPEND_BODY_BYTES,
         });
     }
     if !payload.starts_with('{') {
-        return Err(AppendTrySendError::InvalidRecord);
+        return Err(RecordError::InvalidRecord);
     }
     Ok(())
 }
 
 pub async fn append_batch(
-    request: AppendBatchRequest,
+    table: Table,
+    options: AppendOptions,
     payload: String,
 ) -> (Result<AppendRowsResult, Error>, usize) {
     let mut retries = 0usize;
-    let mut backoff = request
-        .options
-        .retry
-        .initial_backoff
-        .min(request.options.retry.max_backoff);
+    let mut backoff = options.retry.initial_backoff.min(options.retry.max_backoff);
     let mut saw_unknown = false;
     loop {
-        let result = request
-            .client
-            .append_rows_with_timeout(
-                &request.database,
-                &request.schema,
-                &request.table,
-                payload.clone(),
-                request.options.attempt_timeout,
-            )
+        let result = table
+            .append_with_timeout(payload.clone(), options.attempt_timeout)
             .await;
 
         let error = match result {
@@ -200,8 +211,8 @@ pub async fn append_batch(
         saw_unknown |= error
             .append_details()
             .is_some_and(|details| details.status == AppendState::Unknown);
-        let retryable = append_retryable(&error, request.options.retry.retry_unknown);
-        if !retryable || retries >= request.options.retry.max_retries {
+        let retryable = append_retryable(&error, options.retry.retry_unknown);
+        if !retryable || retries >= options.retry.max_retries {
             let error = if retryable {
                 error.with_context("retries", retries).set_persistent()
             } else {
@@ -209,12 +220,12 @@ pub async fn append_batch(
             };
             return (Err(preserve_unknown_outcome(error, saw_unknown)), retries);
         }
-        let retry_delay = retry_delay(backoff, &error, request.options.retry.max_backoff);
+        let retry_delay = retry_delay(backoff, &error, options.retry.max_backoff);
         if !retry_delay.is_zero() {
             tokio::time::sleep(retry_delay).await;
         }
         retries += 1;
-        backoff = next_backoff(backoff, request.options.retry.max_backoff);
+        backoff = next_backoff(backoff, options.retry.max_backoff);
     }
 }
 
@@ -281,8 +292,8 @@ mod tests {
     #[test]
     fn rejects_non_object_rows() {
         assert!(matches!(
-            prepare_record_for_try_send(&vec![1, 2, 3]),
-            Err(AppendTrySendError::InvalidRecord)
+            encode_record(&vec![1, 2, 3]),
+            Err(RecordError::InvalidRecord)
         ));
     }
 
