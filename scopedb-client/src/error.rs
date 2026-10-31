@@ -272,6 +272,7 @@ enum AppendProgress {
 /// Raw [`Self::details`] and HTTP metadata describe the last failed response.
 /// [`Self::append_details`] retains uncertainty across retry attempts. Retry
 /// classification is separate from whether a write may have committed.
+#[doc = include_str!("../docs/errors.md")]
 #[derive(Clone)]
 pub struct Error {
     kind: ErrorKind,
@@ -724,6 +725,9 @@ impl fmt::Display for Error {
         if let Some(delay) = self.retry_after() {
             write!(f, ", retry_after: {delay:?}")?;
         }
+        if let Some(details) = self.append_details() {
+            write!(f, ", append_outcome: {}", details.status)?;
+        }
         if let Some(details) = self.write_details() {
             write!(
                 f,
@@ -740,16 +744,18 @@ impl fmt::Display for Error {
         if let Some(report) = self.append_write_report() {
             write!(
                 f,
-                ", committed_rows: {}, input_rows: {}",
+                ", committed_rows: {}, input_rows: {}, outcome: {:?}, unsubmitted: {:?}",
                 report.committed_rows(),
-                report.input_rows()
+                report.input_rows(),
+                report.outcome(),
+                report.unsubmitted()
             )?;
         }
         if let Some(report) = self.append_delivery_report() {
             write!(
                 f,
-                ", committed_rows: {}, accepted_rows: {}",
-                report.committed_rows, report.accepted_rows
+                ", committed_rows: {}, accepted_rows: {}, unknown_rows: {}, outcome: {:?}",
+                report.committed_rows, report.accepted_rows, report.unknown_rows, report.outcome
             )?;
         }
         Ok(())

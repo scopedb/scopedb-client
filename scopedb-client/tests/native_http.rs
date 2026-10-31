@@ -541,7 +541,7 @@ async fn cancellation_can_remain_running_then_fail_without_losing_details() {
     let running = json!({"status":"running","statement_id":id,"created_at":"2026-10-23T00:00:00Z","progress":progress});
     let mut failed = running.clone();
     failed["status"] = json!("failed");
-    failed["error"] = serde_json::from_str(r#"{"code":"future_failure","message":"original failure","details":{"counter":184467440737095516160}}"#).unwrap();
+    failed["error"] = serde_json::from_str(r#"{"code":"statement_timeout","message":"original failure","details":{"counter":184467440737095516160}}"#).unwrap();
     let (client, task) = server(vec![
         (200, running.to_string()),
         (200, running.to_string()),
@@ -562,8 +562,10 @@ async fn cancellation_can_remain_running_then_fail_without_losing_details() {
         StatementStatus::Running(_)
     ));
     let error = handle.wait().await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Internal);
-    assert_eq!(error.code(), Some("future_failure"));
+    assert_eq!(error.kind(), ErrorKind::Timeout);
+    assert_eq!(error.operation(), ErrorOperation::WaitStatement);
+    assert!(!error.is_retryable());
+    assert_eq!(error.code(), Some("statement_timeout"));
     assert_eq!(error.message(), "original failure");
     assert_eq!(
         error.details().unwrap()["counter"].to_string(),

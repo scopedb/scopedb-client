@@ -100,7 +100,7 @@ println!("{:?}", result.into_objects()?);
 # }
 ```
 
-`cancel()` now returns the complete [`StatementStatus`](https://docs.rs/scopedb-client/latest/scopedb_client/enum.StatementStatus.html). A query can finish before cancellation takes effect. Pending or running statuses still need `wait()`; observed cancellation makes `wait()` return `ErrorKind::StatementCancelled`.
+`cancel()` now returns the complete [`StatementStatus`](https://docs.rs/scopedb-client/latest/scopedb_client/enum.StatementStatus.html). A query can finish before cancellation takes effect. Pending or running statuses still need `wait()`; observed cancellation makes `wait()` return `ErrorKind::Cancelled`.
 
 When matching status variants directly, read `failed.error` instead of `failed.message`. Cancelled statuses no longer carry a message. Read cached progress with `snapshot().map(StatementStatus::progress)` and match `StatementStatus::Finished` for a cached result.
 

@@ -2,6 +2,24 @@
 
 Version 0.5 makes partial stream progress available on failure. Applications upgrading from 0.3 should first follow [Upgrade from 0.3 to 0.4](migration-0.4.md).
 
+## Match failure categories and operations
+
+`ErrorKind` describes a stable failure category, while `ErrorOperation` identifies the public operation. A missing table is `NotFound` in both Append and Catalog; a partial aggregate operation is `Incomplete` and retains its progress report.
+
+| In 0.4                                         | In 0.5                                                        |
+| ---------------------------------------------- | ------------------------------------------------------------- |
+| `ErrorKind::ConfigInvalid`                     | `ErrorKind::InvalidInput`                                     |
+| `ErrorKind::StatementCancelled`                | `ErrorKind::Cancelled`                                        |
+| `AppendRowsFailed` / `CatalogFailed`           | Normalized category plus `Error::operation()` and commit data |
+| `ErrorKind::StatementFailed`                   | `statement_details()` and the normalized server-code category |
+| `ErrorKind::Unexpected`                        | Specific category such as `InvalidResponse` or `Internal`     |
+| `is_temporary()` / `is_persistent()`           | `is_retryable()` plus typed progress and commit outcomes      |
+| `is_permanent()`                               | Failure kind and `is_retryable()`                             |
+| Diagnostic retry counts                        | `retries()` and `retry_exhausted()` on the failed request     |
+| `ErrorKind::into_static()` / string conversion | `ErrorKind::as_str()`                                         |
+
+`Error::new`, `with_context`, `set_source`, and retry-state setters are internal. Applications should represent their own failures with application-owned error types, retaining the SDK error as a cause when needed. SDK-only functions return `Result<T, Error>` without a dynamic error wrapper. See the [error-handling guide](errors.md) for recovery contracts and diagnostics.
+
 ## Inspect failed delivery reports
 
 `AppendStream::flush()` and `shutdown()` keep returning `Result<AppendDeliveryReport, Error>`. A failure now retains its terminal interval in `Error::append_delivery_report()`, including committed, rejected, unknown, and dropped row counts. Returning that error through `?` preserves the report and the original diagnostics.
@@ -33,4 +51,4 @@ Every statement now carries an ID before submission. After losing a submission r
 
 ## Inspect Catalog mutation outcomes
 
-Use `Error::catalog_outcome()` to distinguish `CatalogMutationOutcome::Rejected` from `Unknown`. Unknown requires reading the resource before replaying the mutation, including when a gateway supplies a structured error code. Reads, dry runs, and local validation failures return None. `code()`, `details()`, and HTTP metadata retain the original diagnostics.
+Use `Error::catalog_outcome()` to distinguish `CatalogMutationOutcome::Rejected` from `Unknown`. Unknown requires reading the resource before replaying the mutation, including when a gateway supplies a structured error code. Reads, dry runs, and local validation failures return None. Replace checks for the client-generated `catalog_commit_outcome_unknown` code with this typed outcome. `code()`, `details()`, and HTTP metadata retain original server diagnostics; client-side uncertainty no longer synthesizes server codes.

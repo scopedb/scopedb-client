@@ -196,7 +196,7 @@ async fn native_06_lifecycle() -> Result<()> {
             .await
             .err()
             .ok_or_else(|| anyhow!("expected failed statement"))?;
-        ensure!(failed.code() == Some("statement_failed") && !failed.message().is_empty());
+        ensure!(failed.statement_details().is_some() && !failed.message().is_empty());
         println!("FAILED code={}", failed.code().unwrap());
         let timeout = client
             .statement(format!("FROM {}", table.identifier()))
@@ -446,7 +446,8 @@ async fn exercise_data_paths(client: &Client, schema: &str) -> Result<()> {
     match (active.snapshot().unwrap(), settled) {
         (StatementStatus::Finished(_), Ok(_)) => {}
         (StatementStatus::Failed(_), Err(error)) => {
-            ensure!(error.kind() == scopedb_client::ErrorKind::Internal);
+            ensure!(error.operation() == scopedb_client::ErrorOperation::WaitStatement);
+            ensure!(error.statement_details().is_some());
         }
         (StatementStatus::Cancelled(_), Err(error)) => {
             ensure!(error.kind() == scopedb_client::ErrorKind::Cancelled);

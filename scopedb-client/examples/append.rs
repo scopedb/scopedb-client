@@ -15,7 +15,6 @@
 mod common;
 
 use scopedb_client::AppendState;
-use scopedb_client::ErrorKind;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,12 +46,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Err(error) => {
-            if error.kind() == ErrorKind::Unavailable
-                && matches!(
-                    error.append_details().map(|details| details.status),
-                    Some(AppendState::Unknown)
-                )
-            {
+            if matches!(
+                error.append_details().map(|details| details.status),
+                Some(AppendState::Unknown)
+            ) {
                 eprintln!("commit outcome is unknown; reconcile before replaying this payload");
             }
             Err(error.into())
