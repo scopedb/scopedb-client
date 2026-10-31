@@ -29,7 +29,7 @@ mod result;
 mod statement;
 mod table;
 
-/// The HTTP client version used by this SDK.
+/// Re-exported HTTP client crate for configuring [`ClientBuilder::http_client`].
 pub use reqwest;
 
 pub use self::append::AppendDeliveryOutcome;

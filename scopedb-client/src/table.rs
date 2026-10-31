@@ -25,11 +25,10 @@ use crate::Error;
 const DEFAULT_DATABASE: &str = "scopedb";
 const DEFAULT_SCHEMA: &str = "public";
 
-/// A table selected for writes or catalog reads.
+/// Reference to a table for appending rows or managing its catalog definition.
 ///
-/// The table must already exist for writes. Database and schema default to
-/// `scopedb` and `public`; override them with [`Self::with_database`] and
-/// [`Self::with_schema`].
+/// The database and schema default to `scopedb` and `public`; override them with
+/// [`Self::with_database`] and [`Self::with_schema`].
 #[derive(Debug, Clone)]
 pub struct Table {
     client: Client,
@@ -39,16 +38,20 @@ pub struct Table {
 }
 
 impl Table {
+    /// Overrides the database name (defaults to `scopedb`).
     pub fn with_database(mut self, database: impl Into<String>) -> Self {
         self.database = database.into();
         self
     }
 
+    /// Overrides the schema name (defaults to `public`).
     pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
         self.schema = schema.into();
         self
     }
 
+    /// Returns the backtick-quoted `` `database`.`schema`.`table` `` identifier for ScopeQL
+    /// statements.
     pub fn identifier(&self) -> String {
         [
             self.database.as_str(),
@@ -59,6 +62,7 @@ impl Table {
         .join(".")
     }
 
+    /// Executes `DROP TABLE` for this table.
     pub async fn drop(&self) -> Result<(), Error> {
         self.client
             .statement(format!("DROP TABLE {}", self.identifier()))
@@ -67,15 +71,16 @@ impl Table {
             .map(|_| ())
     }
 
-    /// Writes newline-delimited JSON to this table in one HTTP attempt.
+    /// Appends newline-delimited JSON rows to an existing table in one HTTP attempt.
     ///
-    /// Each line must be a JSON object matching the destination columns. A request
-    /// allows at most 8 MiB of uncompressed NDJSON and 200,000 rows. The SDK sends
-    /// it with zstd compression and does not automatically retry it.
+    /// Each non-empty line must be a JSON object matching the table schema, up to
+    /// 8 MiB of uncompressed NDJSON and 200,000 rows. Integer values in NDJSON
+    /// input must fit in `i64` (including `uint` columns and nested JSON); query
+    /// results support the full `u64` range.
     ///
-    /// Integer inputs must fit in a signed 64-bit integer, including values in
-    /// `uint` columns and nested JSON. Larger integers are rejected without
-    /// narrowing; query results still support the full `u64` range.
+    /// On failure, inspect [`Error::append_details`] for [`crate::AppendState`].
+    /// When the status is [`crate::AppendState::Unknown`], reconcile before
+    /// replaying the payload.
     ///
     /// ```no_run
     /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
@@ -93,17 +98,19 @@ impl Table {
             .await
     }
 
-    /// Builds a reusable writer for finite input slices with per-batch input ranges.
+    /// Returns an [`AppendWriterBuilder`] for writing finite slices of rows with per-batch progress
+    /// reports.
     pub fn append_writer(&self) -> AppendWriterBuilder {
         AppendWriterBuilder::new(self.clone())
     }
 
-    /// Builds an asynchronous, bounded and concurrent append stream for this table.
+    /// Returns an [`AppendStreamBuilder`] for buffered, concurrent background streaming.
     pub fn append_stream(&self) -> AppendStreamBuilder {
         AppendStreamBuilder::new(self.clone())
     }
 
-    /// Selects this table's complete definition and ETag for conditional changes.
+    /// Selects this table's [`CatalogResource`] for reading, updating, or deleting its schema
+    /// definition.
     pub fn catalog(&self) -> CatalogResource<CatalogTable> {
         self.client
             .catalog()

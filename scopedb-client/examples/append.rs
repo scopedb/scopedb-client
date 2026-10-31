@@ -21,8 +21,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = common::client()?;
     let table = common::write_table(&client)?;
 
-    // Direct append sends exactly one caller-owned NDJSON request. Each value
-    // is serialized as one line; JSON arrays are not accepted by this API.
     let ndjson = [
         serde_json::json!({
             "id": 1,

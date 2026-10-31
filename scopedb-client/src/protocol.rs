@@ -28,15 +28,15 @@ use crate::ErrorKind;
 use crate::ErrorOperation;
 use crate::ResultSet;
 
-/// The commit outcome used by table append responses and client-side write interruptions.
+/// Commit outcome of a table append request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppendState {
-    /// Every row in the request was committed.
+    /// All rows in the request committed.
     Committed,
-    /// The request was rejected before any row was committed.
+    /// The request was rejected before committing any rows.
     Rejected,
-    /// The server cannot determine whether the request committed.
+    /// Commit outcome could not be determined.
     Unknown,
 }
 
@@ -50,14 +50,14 @@ impl fmt::Display for AppendState {
     }
 }
 
-/// The result of a committed table append.
+/// Result of a committed table append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResult {
     pub status: AppendState,
     pub num_rows_inserted: i64,
 }
 
-/// A validation error for one row in an append request.
+/// Row-level validation error within a rejected append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowError {
     pub row_index: u64,
@@ -65,9 +65,11 @@ pub struct AppendRowError {
     pub message: String,
 }
 
-/// Table-append failure details. When exposed through [`Error::append_details`],
-/// status includes uncertainty from earlier retry attempts; row diagnostics
-/// remain relative to the last failed response.
+/// Failure details for a table append request.
+///
+/// On [`Error::append_details`], `status` is [`AppendState::Unknown`] if any
+/// attempt had an unknown commit outcome, while `row_errors` reflect the last
+/// failed response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
     pub status: AppendState,
@@ -231,6 +233,7 @@ pub struct StatementRequest {
     pub format: &'static str,
 }
 
+/// Execution status snapshot of a submitted statement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum StatementStatus {
@@ -246,6 +249,7 @@ pub enum StatementStatus {
     Cancelled(StatementStatusCancelled),
 }
 
+/// Status of a statement queued for execution.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusPending {
@@ -254,6 +258,7 @@ pub struct StatementStatusPending {
     pub progress: StatementEstimatedProgress,
 }
 
+/// Status of an actively executing statement.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusRunning {
@@ -262,6 +267,7 @@ pub struct StatementStatusRunning {
     pub progress: StatementEstimatedProgress,
 }
 
+/// Status of a statement that completed successfully.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusFinished {
@@ -273,11 +279,13 @@ pub struct StatementStatusFinished {
 }
 
 impl StatementStatusFinished {
+    /// Returns the decoded [`ResultSet`].
     pub fn result_set(&self) -> ResultSet {
         ResultSet::from_statement_result_set(self.result_set.clone())
     }
 }
 
+/// Status of a statement that terminated with an execution error.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusFailed {
@@ -287,7 +295,7 @@ pub struct StatementStatusFailed {
     pub error: StatementErrorDetails,
 }
 
-/// Structured failure returned for a failed statement.
+/// Structured server error for a failed statement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatementErrorDetails {
     pub code: String,
@@ -296,6 +304,7 @@ pub struct StatementErrorDetails {
     pub details: Option<serde_json::Value>,
 }
 
+/// Status of a cancelled statement.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusCancelled {
@@ -349,19 +358,21 @@ impl StatementStatus {
     }
 }
 
+/// Estimated progress and timing metrics for a statement.
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct StatementEstimatedProgress {
     /// Total progress in percentage: `[0.0, 100.0]`.
     #[serde(deserialize_with = "deserialize_progress_float")]
     pub total_percentage: f64,
-    /// Duration in nanoseconds since the statement is submitted.
+    /// Elapsed nanoseconds since submission.
     pub nanos_from_submitted: i64,
-    /// Duration in nanoseconds since the statement is started.
+    /// Elapsed nanoseconds since execution started.
     pub nanos_from_started: i64,
     #[serde(flatten)]
     pub details: StatementProgress,
 }
 
+/// Stage, partition, row, byte, and compute counters for a statement.
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatementProgress {
     /// Compute consumed by the statement, in seconds.
@@ -435,6 +446,7 @@ pub struct FieldMetadata {
     pub data_type: DataType,
 }
 
+/// ScopeDB column and result data type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataType {
     #[serde(rename = "int")]

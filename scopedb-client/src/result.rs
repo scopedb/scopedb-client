@@ -24,6 +24,7 @@ use crate::ErrorOperation;
 use crate::protocol::ResultSetData;
 use crate::protocol::StatementResultSet;
 
+/// Column metadata for a [`ResultSet`].
 #[derive(Debug, Clone)]
 pub struct Schema {
     fields: Vec<FieldSchema>,
@@ -35,6 +36,7 @@ impl Schema {
     }
 }
 
+/// Name and [`DataType`] of a result column.
 #[derive(Debug, Clone)]
 pub struct FieldSchema {
     name: String,
@@ -51,6 +53,7 @@ impl FieldSchema {
     }
 }
 
+/// Rows and column schema returned by a finished statement.
 #[derive(Debug, Clone)]
 pub struct ResultSet {
     schema: Schema,
@@ -58,7 +61,7 @@ pub struct ResultSet {
     data: ResultSetData,
 }
 
-/// One typed result row keyed by its ScopeQL output column name.
+/// Typed result row keyed by output column name.
 pub type ResultObject = BTreeMap<String, Value>;
 
 impl ResultSet {
@@ -70,14 +73,14 @@ impl ResultSet {
         &self.schema
     }
 
-    /// Returns the unparsed JSON-format cells exactly as received from ScopeDB.
+    /// Returns the unparsed string or null cells as received from the server.
     pub fn raw_rows(&self) -> &[Vec<Option<String>>] {
         match &self.data {
             ResultSetData::Json { rows } => rows,
         }
     }
 
-    /// Converts all result cells to their typed Rust representation.
+    /// Borrows the result set and parses all cells into [`Value`] rows.
     pub fn to_values(&self) -> Result<Vec<Vec<Value>>, Error> {
         self.validate_shape()?;
         self.raw_rows()
@@ -98,7 +101,7 @@ impl ResultSet {
             .collect()
     }
 
-    /// Consumes the result set and returns typed rows.
+    /// Consumes the result set and parses all cells into [`Value`] rows.
     pub fn into_values(self) -> Result<Vec<Vec<Value>>, Error> {
         self.validate_shape()?;
         let ResultSet { schema, data, .. } = self;
@@ -122,11 +125,10 @@ impl ResultSet {
             .collect()
     }
 
-    /// Converts all rows to maps keyed by unique output column names.
+    /// Borrows the result set and converts rows into maps keyed by column name.
     ///
-    /// Duplicate output names are rejected instead of silently discarding a
-    /// value. Use [`ResultSet::to_values`] when a query intentionally returns
-    /// duplicate column names.
+    /// Returns [`ErrorKind::InvalidInput`] if the schema contains duplicate
+    /// column names; use [`Self::to_values`] for queries with duplicate output names.
     pub fn to_objects(&self) -> Result<Vec<ResultObject>, Error> {
         self.validate_unique_fields()?;
         self.to_values().map(|rows| {
@@ -143,7 +145,10 @@ impl ResultSet {
         })
     }
 
-    /// Consumes the result set and returns rows keyed by output column name.
+    /// Consumes the result set and converts rows into maps keyed by column name.
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the schema contains duplicate
+    /// column names; use [`Self::into_values`] for queries with duplicate output names.
     pub fn into_objects(self) -> Result<Vec<ResultObject>, Error> {
         self.validate_unique_fields()?;
         let names = self
@@ -159,7 +164,8 @@ impl ResultSet {
         })
     }
 
-    /// Returns the first row keyed by output column name, or `None` when empty.
+    /// Parses and returns the first row as a [`ResultObject`], or `None` if the result set is
+    /// empty.
     pub fn first(&self) -> Result<Option<ResultObject>, Error> {
         self.validate_row_count()?;
         let Some(row) = self.raw_rows().first() else {
@@ -368,8 +374,10 @@ fn parse_owned_cell(value: Option<String>, data_type: DataType) -> Result<Value,
     }
 }
 
-/// A typed result cell. Equality compares encoded array, object, any, and binary
-/// values as strings; floats use Rust's usual equality, including NaN != NaN.
+/// Typed cell value decoded from a [`ResultSet`].
+///
+/// [`PartialEq`] compares `Binary`, `Array`, `Object`, and `Any` by their wire
+/// string representation.
 #[derive(Clone, PartialEq)]
 pub enum Value {
     /// Signed integer value.

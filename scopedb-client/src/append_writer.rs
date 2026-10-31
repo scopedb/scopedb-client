@@ -32,11 +32,11 @@ use crate::append::AppendOptions;
 use crate::append::append_batch;
 use crate::append::encode_record;
 
-/// Configures a reusable writer for finite slices of rows.
+/// Builder for an [`AppendWriter`].
 ///
-/// Defaults match [`crate::AppendStreamBuilder`]: 4 MiB target batches, at most
-/// 200,000 rows per request, four concurrent batches and eight retries of
-/// temporary rejections. Unknown outcomes are not replayed by default.
+/// Defaults match [`crate::AppendStreamBuilder`]: 4 MiB target batches, up to
+/// 200,000 rows per batch, 4 concurrent batches, [`AppendFailurePolicy::Stop`],
+/// and up to 8 retries of temporary [`AppendState::Rejected`] responses.
 #[derive(Debug, Clone)]
 pub struct AppendWriterBuilder {
     table: Table,
@@ -45,65 +45,71 @@ pub struct AppendWriterBuilder {
 }
 
 impl AppendWriterBuilder {
-    /// Sets the target uncompressed NDJSON size (default 4 MiB, maximum 8 MiB).
-    /// A single row may exceed this target up to the 8 MiB protocol limit.
+    /// Sets the target uncompressed NDJSON batch size (default 4 MiB, maximum 8 MiB).
+    ///
+    /// A single row larger than this target is sent in its own batch up to the
+    /// 8 MiB protocol limit.
     pub fn target_batch_bytes(mut self, bytes: usize) -> Self {
         self.options.batch_bytes = bytes;
         self
     }
 
-    /// Sets the maximum rows per HTTP request, up to 200,000.
+    /// Sets the maximum rows per HTTP batch (default and maximum 200,000).
     pub fn max_batch_rows(mut self, rows: usize) -> Self {
         self.options.max_batch_rows = rows;
         self
     }
 
-    /// Sets concurrency per write call (default four). Use one for ordered submission.
+    /// Sets the maximum in-flight batches per [`AppendWriter::write`] call (default 4). Use `1` for
+    /// sequential submission.
     pub fn max_concurrent_batches(mut self, batches: usize) -> Self {
         self.options.max_in_flight_requests = batches;
         self
     }
 
-    /// Sets the number of additional attempts after an initial failure (default eight).
+    /// Sets the maximum retry attempts after an initial batch failure (default 8).
     pub fn max_retries(mut self, retries: usize) -> Self {
         self.options.retry.max_retries = retries;
         self
     }
 
-    /// Opts into replaying transient unknown outcomes, which can duplicate rows.
-    /// Client timeouts are never replayed automatically, even when enabled.
+    /// Enables retrying transient [`AppendState::Unknown`] responses (default `false`).
+    ///
+    /// Retrying an unknown outcome can insert duplicate rows. Client timeouts
+    /// are never replayed automatically.
     pub fn retry_unknown(mut self, enabled: bool) -> Self {
         self.options.retry.retry_unknown = enabled;
         self
     }
 
-    /// Sets the initial exponential retry delay (default 100 ms).
+    /// Sets the initial retry backoff delay (default 100 ms).
     pub fn initial_backoff(mut self, delay: Duration) -> Self {
         self.options.retry.initial_backoff = delay;
         self
     }
 
-    /// Caps retry delays, including Retry-After (default five seconds).
+    /// Sets the maximum retry delay, capping exponential backoff and `Retry-After` headers (default
+    /// 5 s).
     pub fn max_backoff(mut self, delay: Duration) -> Self {
         self.options.retry.max_backoff = delay;
         self
     }
 
-    /// Overrides the client's timeout per HTTP attempt. Must be finite and positive.
+    /// Overrides the client's [`crate::ClientBuilder::write_timeout`] with a positive per-attempt
+    /// timeout.
     pub fn attempt_timeout(mut self, timeout: Duration) -> Self {
         self.options.attempt_timeout = Some(timeout);
         self
     }
 
-    /// Chooses whether a remote failure stops scheduling later batches (default Stop).
-    /// Continue still returns an error if any batch fails. Local encoding failures
-    /// stop reading input under either policy.
+    /// Sets whether a batch failure stops scheduling subsequent batches (default
+    /// [`AppendFailurePolicy::Stop`]).
     pub fn failure_policy(mut self, policy: AppendFailurePolicy) -> Self {
         self.failure_policy = policy;
         self
     }
 
-    /// Validates configuration without starting background tasks or making requests.
+    /// Validates the configuration and returns a reusable [`AppendWriter`].
     pub fn build(self) -> Result<AppendWriter, Error> {
         self.options
             .validate()
@@ -127,9 +133,10 @@ impl AppendWriterBuilder {
     }
 }
 
-/// A reusable writer whose calls batch and settle independently.
+/// Reusable batch writer for finite slices of rows.
 ///
-/// Clones share the HTTP connection pool, not buffers, concurrency limits or reports.
+/// Each [`Self::write`] call batches and settles its input slice independently.
+/// Clones share the underlying HTTP connection pool.
 #[derive(Debug, Clone)]
 pub struct AppendWriter {
     table: Table,
@@ -137,10 +144,11 @@ pub struct AppendWriter {
     failure_policy: AppendFailurePolicy,
 }
 
-/// Complete settlement information for one finite input slice.
+/// Settlement report for one [`AppendWriter::write`] call.
 ///
-/// Results are ordered by input range, regardless of completion order. Their
-/// ranges cover a contiguous input prefix; [`Self::unsubmitted`] covers the rest.
+/// [`Self::batches`] are ordered by their [`AppendRequestResult::input_range`]
+/// and cover a contiguous prefix of the input slice; [`Self::unsubmitted`]
+/// covers the remaining suffix.
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct AppendWriteReport {
@@ -150,22 +158,22 @@ pub struct AppendWriteReport {
 }
 
 impl AppendWriteReport {
+    /// Returns the total number of rows in the input slice.
     pub fn input_rows(&self) -> usize {
         self.input_rows
     }
 
+    /// Returns the scheduled batches in input order.
     pub fn batches(&self) -> &[AppendRequestResult] {
         &self.batches
     }
 
-    /// Returns the suffix that never entered single-batch execution.
-    /// Its rows are known not to have been committed by this call.
+    /// Returns the input index range that was never sent and is known not to have committed.
     pub fn unsubmitted(&self) -> Range<usize> {
         self.unsubmitted.clone()
     }
 
-    /// Counts logical input rows acknowledged at least once. Unknown retries
-    /// may have inserted additional copies that this count cannot measure.
+    /// Returns the number of input rows in batches acknowledged as committed.
     pub fn committed_rows(&self) -> usize {
         self.batches
             .iter()
@@ -174,9 +182,11 @@ impl AppendWriteReport {
             .sum()
     }
 
-    /// Summarizes committed, failed, unknown and unsubmitted input rows.
-    /// Partial can include unknown outcomes. Inspect each batch before deciding
-    /// which input can be replayed; the summary alone cannot establish that.
+    /// Returns the aggregate [`AppendDeliveryOutcome`] for this write call.
+    ///
+    /// [`AppendDeliveryOutcome::Partial`] may include batches with
+    /// [`AppendState::Unknown`]; inspect [`Self::batches`] before replaying
+    /// failed ranges.
     pub fn outcome(&self) -> AppendDeliveryOutcome {
         if self.unsubmitted.is_empty() && self.batches.iter().all(|batch| batch.result.is_ok()) {
             AppendDeliveryOutcome::Ok
@@ -196,7 +206,7 @@ impl AppendWriteReport {
     }
 }
 
-/// One logical HTTP batch, including all of its retries.
+/// Outcome of one batch within an [`AppendWriteReport`], including any retry attempts.
 #[derive(Debug, Clone)]
 pub struct AppendRequestResult {
     input_range: Range<usize>,
@@ -205,21 +215,23 @@ pub struct AppendRequestResult {
 }
 
 impl AppendRequestResult {
+    /// Returns the input slice range covered by this batch.
     pub fn input_range(&self) -> Range<usize> {
         self.input_range.clone()
     }
 
-    /// Returns the final result without changing server-relative row-error indexes.
+    /// Returns the final outcome of the batch.
     pub fn result(&self) -> &Result<AppendRowsResult, Error> {
         &self.result
     }
 
+    /// Returns the number of retry attempts made for this batch.
     pub fn retries(&self) -> usize {
         self.retries
     }
 
-    /// Maps a zero-based request row index to the original input slice.
-    /// Out-of-range indexes, including malformed server indexes, return None.
+    /// Maps a zero-based [`crate::AppendRowError::row_index`] from this batch
+    /// to its index in the original input slice. Returns `None` for indexes outside this batch.
     pub fn input_index(&self, row_index: u64) -> Option<usize> {
         let index = self
             .input_range
@@ -247,21 +259,7 @@ async fn next_batch(pending: &mut Vec<PendingBatch>) -> AppendRequestResult {
 }
 
 impl AppendWriter {
-    /// Writes a finite slice, returning Ok only when every row is acknowledged.
-    ///
-    /// Serializes incrementally, using the same row validation, batch limits and
-    /// retries as AppendStream. A local encoding failure stops input processing
-    /// and leaves any buffered rows in the unsubmitted suffix.
-    ///
-    /// Stop mode stops scheduling after observing a remote failure; already
-    /// scheduled requests are always settled before return. Continue mode
-    /// attempts later batches but still returns Err if any batch fails.
-    /// Requests may finish out of order; use concurrency one for sequential submission.
-    ///
-    /// Dropping this future stops scheduling and retrying. Requests already sent
-    /// may still commit; cancellation does not roll back writes or return a report.
-    /// Memory for encoded rows is bounded by concurrency and batch sizes rather
-    /// than the total input size; result metadata grows with the number of batches.
+    /// Batches and writes `rows`, returning `Ok` when every row is committed.
     ///
     /// ```no_run
     /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
@@ -272,6 +270,18 @@ impl AppendWriter {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// If any row fails local encoding or any batch fails after retries, returns
+    /// [`Error`] with [`Error::append_write_report`] recording every scheduled
+    /// batch and the [`AppendWriteReport::unsubmitted`] suffix. Local encoding
+    /// errors also set [`Error::append_input_index`], stop input processing under
+    /// either failure policy, and leave the partially built batch unsubmitted.
+    ///
+    /// Under [`AppendFailurePolicy::Stop`], no new batches are scheduled after
+    /// a batch failure is observed, while in-flight batches are settled before returning.
+    /// Under [`AppendFailurePolicy::Continue`], remaining batches are still
+    /// attempted before returning the error. Dropping this future stops
+    /// scheduling and retrying, though requests already sent may still commit.
     pub async fn write<T: Serialize>(&self, rows: &[T]) -> Result<AppendWriteReport, Error> {
         let mut report = AppendWriteReport {
             input_rows: rows.len(),

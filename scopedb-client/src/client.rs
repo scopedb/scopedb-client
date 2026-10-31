@@ -63,11 +63,7 @@ pub struct Client {
     write_timeout: Duration,
 }
 
-/// Builds a ScopeDB client with an optional API key and custom HTTP client.
-///
-/// The API key is attached by the ScopeDB client itself, so callers can still
-/// provide a preconfigured reqwest client for TLS, proxy, timeout, and pooling
-/// settings.
+/// Builder for a [`Client`] with an optional API key, write timeout, and custom HTTP client.
 pub struct ClientBuilder {
     endpoint: String,
     client: Option<reqwest::Client>,
@@ -87,20 +83,18 @@ impl fmt::Debug for ClientBuilder {
 }
 
 impl ClientBuilder {
-    /// Sets the ScopeDB API key sent as a sensitive Bearer credential.
+    /// Sets the Bearer API key attached to each request.
     ///
-    /// This per-request value takes precedence over an `Authorization` default
-    /// configured on the underlying HTTP client.
+    /// Overrides any default `Authorization` header on a custom HTTP client.
     pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
         self
     }
 
-    /// Uses a preconfigured compatible HTTP client.
+    /// Sets a custom HTTP client for TLS, proxy, and connection-pool settings.
     ///
-    /// Use the re-exported [`crate::reqwest`] version. Disable redirects and
-    /// transport retries to prevent replaying writes; the SDK's default client
-    /// already does this.
+    /// Construct the client with [`crate::reqwest`] and disable redirects and
+    /// transport retries so writes are not replayed at the HTTP layer:
     ///
     /// ```
     /// use scopedb_client::reqwest;
@@ -116,25 +110,24 @@ impl ClientBuilder {
         self
     }
 
-    /// Bounds each table append and Catalog mutation HTTP request, including
-    /// reading the response body. Defaults to 30 seconds and must be finite and nonzero.
-    /// This deadline cannot be disabled; increase it when writes need more time.
-    /// The budget starts after local encoding, compression, and request preparation.
-    /// Stream `attempt_timeout` settings override this default. A timeout does
-    /// not roll back the write; its commit outcome can be unknown.
+    /// Sets the per-attempt timeout for table appends and catalog mutations,
+    /// including reading the response body.
     ///
-    /// This is a per-attempt budget. Waiting for stream capacity, retry backoff,
-    /// and the total duration of a flush or shutdown are outside it.
-    /// Append timeouts are exposed through [`Error::write_details`] and are
-    /// never automatically replayed.
+    /// Defaults to 30 seconds and must be finite and positive.
+    /// [`crate::AppendWriterBuilder::attempt_timeout`] and
+    /// [`crate::AppendStreamBuilder::attempt_timeout`] override this default.
+    /// Timeouts configured on a custom HTTP client also apply.
     ///
-    /// Shorter timeouts on a custom HTTP client still apply.
+    /// A timed-out write has an unknown commit outcome and is not replayed
+    /// automatically. Append timeouts populate [`Error::write_details`], and
+    /// catalog mutation timeouts set [`Error::catalog_outcome`] to
+    /// [`crate::CatalogMutationOutcome::Unknown`].
     pub fn write_timeout(mut self, timeout: Duration) -> Self {
         self.write_timeout = timeout;
         self
     }
 
-    /// Validates the endpoint and authentication settings and builds the client.
+    /// Validates configuration and builds the [`Client`].
     pub fn build(self) -> Result<Client, Error> {
         if self.write_timeout.is_zero() {
             return Err(Error::new(
@@ -195,7 +188,7 @@ impl ClientBuilder {
 }
 
 impl Client {
-    /// Starts a client builder for the common API-key authentication path.
+    /// Returns a builder for `endpoint`.
     pub fn builder(endpoint: impl ToString) -> ClientBuilder {
         ClientBuilder {
             endpoint: endpoint.to_string(),
@@ -205,12 +198,11 @@ impl Client {
         }
     }
 
-    /// Creates a ScopeDB client from an endpoint and a compatible HTTP client.
+    /// Creates a client from an HTTP(S) endpoint URL and a [`crate::reqwest::Client`].
     ///
-    /// Use the HTTP types re-exported from [`crate::reqwest`] to avoid a
-    /// dependency-version mismatch in applications using another reqwest major.
-    /// Configure the HTTP client as described in [`ClientBuilder::http_client`]
-    /// to prevent automatic write replay. The write timeout defaults to 30 seconds.
+    /// Configure `client` as shown in [`ClientBuilder::http_client`]. The write
+    /// timeout defaults to 30 seconds; use [`Self::builder`] to customize it or
+    /// attach an API key.
     pub fn new<E: IntoUrl>(endpoint: E, client: reqwest::Client) -> Result<Self, Error> {
         match endpoint.into_url() {
             Ok(mut endpoint) => {
@@ -247,34 +239,38 @@ impl Client {
         }
     }
 
+    /// Creates a [`Statement`] builder for `statement`.
     pub fn statement(&self, statement: impl Into<String>) -> Statement {
         Statement::new(self.clone(), statement.into())
     }
 
+    /// Returns a [`StatementHandle`] for an existing `statement_id` without making a request.
     pub fn statement_handle(&self, statement_id: Uuid) -> StatementHandle {
         StatementHandle::new(self.clone(), statement_id)
     }
 
+    /// Selects `table` in the default `scopedb.public` namespace.
     pub fn table(&self, table: impl Into<String>) -> Table {
         Table::new(self.clone(), table.into())
     }
 
-    /// Executes a ScopeQL statement and waits for all result rows.
-    /// Errors after submission retain [`Error::statement_id`] for resuming the
-    /// existing execution with [`Self::statement_handle`], not resubmitting it.
+    /// Submits `statement` and waits for its [`ResultSet`].
+    ///
+    /// If waiting fails after submission, pass [`Error::statement_id`] to
+    /// [`Self::statement_handle`] to inspect or resume waiting on the running
+    /// execution rather than resubmitting the query.
     pub async fn query(&self, statement: impl Into<String>) -> Result<ResultSet, Error> {
         self.statement(statement).execute().await
     }
 
-    /// Selects the complete declarative catalog or an individual resource.
+    /// Accesses the declarative [`Catalog`].
     pub fn catalog(&self) -> Catalog {
         Catalog::new(self.clone())
     }
 
-    /// Appends at most 8 MiB of uncompressed newline-delimited JSON to a table.
+    /// Appends newline-delimited JSON rows to `database.schema.table` in a single request.
     ///
-    /// Sends one request without automatic retries. An unknown outcome remains
-    /// non-retryable through [`Error::is_retryable`] because replay may duplicate rows.
+    /// See [`Table::append`] for payload limits and recovery semantics.
     pub async fn append_rows(
         &self,
         database: &str,

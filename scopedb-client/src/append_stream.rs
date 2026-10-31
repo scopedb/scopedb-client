@@ -54,7 +54,7 @@ const DEFAULT_MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD: usize = 5;
 const DEFAULT_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// The lifecycle state of an append stream.
+/// Lifecycle state of an [`AppendStream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendStreamState {
@@ -64,7 +64,7 @@ pub enum AppendStreamState {
     Failed,
 }
 
-/// The state of the continue-mode availability circuit breaker.
+/// State of the [`AppendFailurePolicy::Continue`] availability circuit breaker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendCircuitState {
@@ -73,21 +73,22 @@ pub enum AppendCircuitState {
     HalfOpen,
 }
 
-/// Rows accepted by a bulk local-admission operation.
+/// Number of rows admitted to an [`AppendStream`] by [`AppendStream::send_all`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppendAdmissionResult {
     pub accepted_rows: u64,
 }
 
-/// Aggregate settlement information since the previous delivery barrier.
-/// Counts do not identify individual input records. Use application-owned
-/// business keys to reconcile rows before replaying them.
+/// Settlement counts for an [`AppendStream`] interval since the previous completed barrier.
+///
+/// Counts aggregate across batches in the interval and do not identify
+/// individual rows; use application keys to reconcile rows when
+/// `unknown_rows > 0` or `outcome == AppendDeliveryOutcome::Partial`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendDeliveryReport {
     pub outcome: AppendDeliveryOutcome,
     pub accepted_rows: u64,
-    /// Logical input rows acknowledged as committed at least once. Retrying an
-    /// unknown outcome may insert additional copies that this count cannot measure.
+    /// Rows in batches acknowledged as committed.
     pub committed_rows: u64,
     pub failed_rows: u64,
     pub unknown_rows: u64,
@@ -96,13 +97,11 @@ pub struct AppendDeliveryReport {
     pub failed_batches: u64,
     pub unknown_batches: u64,
     pub retries: u64,
-    /// Wall time spent waiting for this barrier.
-    /// A shared terminal failure report starts at the earliest outstanding barrier.
-    /// Zero when the worker terminates unexpectedly and its wait time is unavailable.
+    /// Elapsed wall time waiting for this barrier.
     pub duration: Duration,
 }
 
-/// Local drop counters grouped by admission failure reason.
+/// Cumulative rows rejected at local [`AppendStream::try_send`] admission, by reason.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AppendDroppedRows {
     pub buffer_full: u64,
@@ -112,14 +111,14 @@ pub struct AppendDroppedRows {
     pub closed: u64,
 }
 
-/// The most recent remote append failure observed by the stream.
+/// Most recent remote batch failure observed by an [`AppendStream`].
 #[derive(Debug, Clone)]
 pub struct AppendLastFailure {
     pub at: SystemTime,
     pub error: Error,
 }
 
-/// A point-in-time snapshot of append stream counters and state.
+/// Point-in-time cumulative counters and state for an [`AppendStream`].
 #[derive(Debug, Clone)]
 pub struct AppendStreamStats {
     pub state: AppendStreamState,
@@ -138,7 +137,7 @@ pub struct AppendStreamStats {
     pub last_report: Option<AppendDeliveryReport>,
 }
 
-/// Action taken after a batch failure listener is invoked.
+/// Stream action taken after a batch failure in [`AppendBatchFailureEvent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendBatchFailureAction {
@@ -147,7 +146,7 @@ pub enum AppendBatchFailureAction {
     Stopped,
 }
 
-/// Diagnostic event emitted after a rejected or ambiguous append batch.
+/// Event passed to [`AppendStreamBuilder::on_batch_failure`] when a batch fails after retries.
 pub struct AppendBatchFailureEvent {
     pub error: Error,
     pub batch_rows: usize,
@@ -168,7 +167,7 @@ impl fmt::Debug for AppendBatchFailureEvent {
     }
 }
 
-/// Continue-mode circuit breaker settings.
+/// Availability circuit breaker settings for [`AppendFailurePolicy::Continue`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AppendCircuitBreakerOptions {
@@ -191,7 +190,7 @@ impl Default for AppendCircuitBreakerOptions {
     }
 }
 
-/// A synchronous local-admission failure from [`AppendStream::try_send`].
+/// Synchronous local-admission error returned by [`AppendStream::try_send`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AppendTrySendError {
@@ -242,17 +241,17 @@ impl std::error::Error for AppendTrySendError {
 
 type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 
-/// Configures a bounded, concurrent table append stream.
+/// Builder for an [`AppendStream`].
 ///
-/// Retries temporary rejections by default. Replaying unknown outcomes requires
-/// [`Self::retry_unknown`] because an unacknowledged attempt may have committed.
+/// Defaults to 4 MiB target batches, 4 concurrent requests, and
+/// [`AppendFailurePolicy::Stop`]. Transient rejections are retried; retrying
+/// unknown outcomes requires opting into [`Self::retry_unknown`].
 ///
 /// # Telemetry
 ///
-/// For a log or telemetry sink that should keep running after batch failures,
-/// use [`AppendFailurePolicy::Continue`] and keep the circuit breaker enabled.
-/// Start with one concurrent batch per stream when producers run on multiple
-/// application replicas; tune the total concurrency across all producers.
+/// For log or telemetry sinks that should keep running after a batch fails, use
+/// [`AppendFailurePolicy::Continue`] with [`AppendStream::try_send`] and monitor
+/// [`AppendStream::stats`] or [`Self::on_batch_failure`]:
 ///
 /// ```no_run
 /// use scopedb_client::AppendFailurePolicy;
@@ -271,11 +270,6 @@ type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 /// # Ok(())
 /// # }
 /// ```
-///
-/// Continue mode is best effort. Monitor reports and [`AppendStream::stats`]
-/// for failed, unknown, and locally dropped rows. Send failure diagnostics to
-/// a separate sink. [`AppendStream::try_send`] never waits for capacity;
-/// [`AppendStream::send`] provides backpressure instead.
 pub struct AppendStreamBuilder {
     table: Table,
     flush_interval: Duration,
@@ -288,87 +282,97 @@ pub struct AppendStreamBuilder {
 }
 
 impl AppendStreamBuilder {
-    /// Chooses whether to stop or continue after a batch fails. Defaults to Stop.
+    /// Sets whether the stream stops or continues after a batch fails (default
+    /// [`AppendFailurePolicy::Stop`]).
     pub fn failure_policy(mut self, failure_policy: AppendFailurePolicy) -> Self {
         self.failure_policy = failure_policy;
         self
     }
 
-    /// Sets the target NDJSON payload size (default 4 MiB, maximum 8 MiB).
-    /// One row may exceed this target up to 8 MiB.
+    /// Sets the target uncompressed NDJSON batch size (default 4 MiB, maximum 8 MiB).
+    ///
+    /// A single row larger than this target is sent in its own batch up to 8 MiB.
     pub fn target_batch_bytes(mut self, target_batch_bytes: usize) -> Self {
         self.options.batch_bytes = target_batch_bytes;
         self
     }
 
-    /// Sets the maximum rows in one HTTP batch, up to the 200,000-row protocol limit.
+    /// Sets the maximum rows per HTTP batch (default and maximum 200,000).
     pub fn max_batch_rows(mut self, max_batch_rows: usize) -> Self {
         self.options.max_batch_rows = max_batch_rows;
         self
     }
 
-    /// Sets the maximum delay between buffering the first row and dispatching its batch.
+    /// Sets the flush interval for partially filled batches (default 1 s).
     pub fn flush_interval(mut self, flush_interval: Duration) -> Self {
         self.flush_interval = flush_interval;
         self
     }
 
+    /// Sets the maximum number of queued commands in the local admission channel (default 1,024).
     pub fn channel_capacity(mut self, channel_capacity: usize) -> Self {
         self.channel_capacity = channel_capacity;
         self
     }
 
-    /// Sets the maximum bytes admitted locally but not yet settled remotely.
+    /// Sets the maximum uncompressed bytes admitted locally and awaiting remote settlement (default
+    /// 64 MiB).
     pub fn max_buffered_bytes(mut self, max_buffered_bytes: usize) -> Self {
         self.max_pending_bytes = max_buffered_bytes;
         self
     }
 
-    /// Sets the maximum number of append batches sent concurrently per stream (default 4).
+    /// Sets the maximum in-flight HTTP batches for this stream (default 4).
     pub fn max_concurrent_batches(mut self, max_concurrent_batches: usize) -> Self {
         self.options.max_in_flight_requests = max_concurrent_batches;
         self
     }
 
+    /// Sets the maximum retry attempts after an initial batch failure (default 8).
     pub fn max_retries(mut self, max_retries: usize) -> Self {
         self.options.retry.max_retries = max_retries;
         self
     }
 
-    /// Opts into replaying transient unknown outcomes. This can duplicate rows.
-    /// Client timeouts are never replayed automatically, even when enabled.
+    /// Enables retrying transient [`AppendState::Unknown`] responses (default `false`).
+    ///
+    /// Retrying an unknown outcome can insert duplicate rows. Client timeouts
+    /// are never replayed automatically.
     pub fn retry_unknown(mut self, enabled: bool) -> Self {
         self.options.retry.retry_unknown = enabled;
         self
     }
 
+    /// Sets the initial retry backoff delay (default 100 ms).
     pub fn initial_backoff(mut self, initial_backoff: Duration) -> Self {
         self.options.retry.initial_backoff = initial_backoff;
         self
     }
 
+    /// Sets the maximum retry delay, capping exponential backoff and `Retry-After` headers (default
+    /// 5 s).
     pub fn max_backoff(mut self, max_backoff: Duration) -> Self {
         self.options.retry.max_backoff = max_backoff;
         self
     }
 
-    /// Sets a timeout for each HTTP attempt, overriding the client's write timeout.
-    /// A timeout has an unknown commit outcome. By default the client uses 30 seconds.
-    /// The duration must be finite and nonzero; this deadline cannot be disabled.
+    /// Overrides the client's [`crate::ClientBuilder::write_timeout`] with a positive per-attempt
+    /// timeout.
     pub fn attempt_timeout(mut self, attempt_timeout: Duration) -> Self {
         self.options.attempt_timeout = Some(attempt_timeout);
         self
     }
 
-    /// Configures the continue-mode availability circuit, or disables it with `None`.
-    /// Enabled by default: five consecutive availability failures pause dispatch
-    /// for 30 seconds before probing recovery.
+    /// Configures the [`AppendFailurePolicy::Continue`] circuit breaker, or disables it with
+    /// `None`.
+    ///
+    /// Defaults to opening for 30 seconds after 5 consecutive availability failures.
     pub fn circuit_breaker(mut self, circuit_breaker: Option<AppendCircuitBreakerOptions>) -> Self {
         self.circuit_breaker = circuit_breaker;
         self
     }
 
-    /// Observes remote batch failures. Listener panics are isolated from the worker.
+    /// Registers a synchronous callback for a batch's final failure.
     pub fn on_batch_failure<F>(mut self, listener: F) -> Self
     where
         F: Fn(&AppendBatchFailureEvent) + Send + Sync + 'static,
@@ -377,6 +381,8 @@ impl AppendStreamBuilder {
         self
     }
 
+    /// Validates configuration and spawns the background stream worker on the current Tokio
+    /// runtime.
     pub fn build(self) -> Result<AppendStream, Error> {
         validate_builder(&self)
             .map_err(|error| error.with_operation(ErrorOperation::BuildAppendStream))?;
@@ -651,19 +657,23 @@ struct AppendStreamInner {
     shutdown_notify: Arc<Notify>,
 }
 
-/// A cloneable, bounded producer handle for asynchronous table appends.
-/// Dropping every handle drains admitted rows in the background while the Tokio
-/// runtime remains alive. Use shutdown() to observe settlement before exiting.
+/// Cloneable handle to a bounded background append stream.
+///
+/// Admitted rows belong to the stream rather than an individual producer call.
+/// Call [`Self::flush`] to await an intermediate barrier or [`Self::shutdown`]
+/// to close admission and await final settlement. If all handles are dropped
+/// without calling `shutdown`, the background worker drains already admitted
+/// rows while the Tokio runtime remains active.
 #[derive(Clone)]
 pub struct AppendStream {
     inner: Arc<AppendStreamInner>,
 }
 
 impl AppendStream {
-    /// Serializes and admits one row, waiting for bounded local capacity.
+    /// Serializes `row` and waits for local buffer capacity to admit it into the stream.
     ///
-    /// Success means local admission only. Use [`Self::flush`] or
-    /// [`Self::shutdown`] to wait for remote settlement.
+    /// Returning `Ok(())` confirms local admission; call [`Self::flush`] or
+    /// [`Self::shutdown`] to observe remote delivery outcomes.
     pub async fn send<T>(&self, row: &T) -> Result<(), Error>
     where
         T: Serialize + ?Sized,
@@ -703,8 +713,10 @@ impl AppendStream {
         Ok(())
     }
 
-    /// Attempts synchronous local admission without waiting for capacity.
-    /// Returns an error if the circuit is open or local capacity is full.
+    /// Attempts to serialize and admit `row` without waiting for local buffer capacity.
+    ///
+    /// Rejected rows increment [`AppendStreamStats::dropped_rows`] and
+    /// [`AppendStreamStats::dropped_by_reason`].
     pub fn try_send<T>(&self, row: &T) -> Result<(), AppendTrySendError>
     where
         T: Serialize + ?Sized,
@@ -793,18 +805,15 @@ impl AppendStream {
         Ok(())
     }
 
-    /// Admits an iterator of rows sequentially with bounded memory.
+    /// Serializes and admits an iterator of rows sequentially, awaiting local buffer capacity as
+    /// needed.
     ///
-    /// If admission fails partway, [`Error::append_admission`] identifies
-    /// the prefix admitted by this call, independently of other producers.
-    /// Call [`Self::shutdown`] to settle those rows; [`Self::stats`] retains
-    /// cumulative counts. Dropping this future can leave an admitted prefix
-    /// without returning a count; it does not cancel those rows.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error`] with admission progress when encoding, capacity, or
-    /// stream state prevents the next admission.
+    /// If an item fails encoding or the stream closes mid-iteration,
+    /// [`Error::append_admission`] reports how many rows from this call were
+    /// admitted. Those rows remain owned by the stream; call [`Self::flush`] or
+    /// [`Self::shutdown`] to observe their delivery.
+    /// Dropping this future stops admitting further rows while leaving already
+    /// admitted rows in the stream.
     pub async fn send_all<I>(&self, rows: I) -> Result<AppendAdmissionResult, Error>
     where
         I: IntoIterator,
@@ -820,19 +829,19 @@ impl AppendStream {
         Ok(AppendAdmissionResult { accepted_rows })
     }
 
-    /// Dispatches rows admitted before this barrier and waits for their outcomes.
+    /// Dispatches buffered rows and waits for all rows admitted before this call to settle.
     ///
-    /// The report covers activity since the previous barrier. On a Stop-mode
-    /// failure, [`Error::append_delivery_report`] carries the terminal settlement,
-    /// also retained in [`Self::stats`].
+    /// Returns an [`AppendDeliveryReport`] covering activity since the previous
+    /// completed barrier while keeping the stream open. Under
+    /// [`AppendFailurePolicy::Stop`], a batch failure transitions the stream to
+    /// [`AppendStreamState::Failed`], settles all in-flight batches, and
+    /// returns [`Error`] with the terminal [`Error::append_delivery_report`]
+    /// (shared with any concurrent `flush` or [`Self::shutdown`] callers).
+    /// Under [`AppendFailurePolicy::Continue`], `flush` returns `Ok(report)`
+    /// and records any batch losses in `report.outcome`.
     ///
-    /// Committed rows have at least one successful acknowledgement; earlier
-    /// unknown attempts may also have committed. A failed barrier may include
-    /// successful batches, so replaying its entire input can duplicate rows.
-    ///
-    /// Once enqueued, dropping this future does not cancel remote settlement.
-    /// Keep the future alive to receive its interval report; the latest completed
-    /// report also remains observable through [`Self::stats`].
+    /// Once the barrier is enqueued, dropping this future stops waiting without
+    /// cancelling settlement in the background worker.
     pub async fn flush(&self) -> Result<AppendDeliveryReport, Error> {
         loop {
             let notified = self.inner.shutdown_notify.notified();
@@ -872,12 +881,14 @@ impl AppendStream {
         }
     }
 
-    /// Permanently closes the stream after settling every admitted row.
+    /// Closes row admission, settles all admitted rows, and returns the final
+    /// [`AppendDeliveryReport`].
     ///
-    /// This method is idempotent across cloned producer handles. Once polled,
-    /// dropping its future stops waiting but settlement continues in the worker.
-    /// Call shutdown again to observe completion. Failure reports are returned
-    /// through [`Error::append_delivery_report`] and remain available in stats().
+    /// Idempotent across cloned handles: concurrent and subsequent calls
+    /// observe the same terminal result (or [`Error::append_delivery_report`]
+    /// on a [`AppendFailurePolicy::Stop`] failure). Dropping the future stops
+    /// local waiting while background settlement continues; call `shutdown`
+    /// again to await completion.
     pub async fn shutdown(&self) -> Result<AppendDeliveryReport, Error> {
         let should_start = {
             let mut shared = lock(&self.inner.shared);
@@ -905,7 +916,8 @@ impl AppendStream {
         self.wait_for_terminal(ErrorOperation::Shutdown).await
     }
 
-    /// Returns a synchronous snapshot suitable for metrics and shutdown diagnostics.
+    /// Returns a point-in-time snapshot of cumulative stream counters, state, and the latest
+    /// report.
     pub fn stats(&self) -> AppendStreamStats {
         let shared = lock(&self.inner.shared);
         AppendStreamStats {
