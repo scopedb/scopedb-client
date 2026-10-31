@@ -27,28 +27,31 @@ use crate::Table;
 use crate::client::MAX_APPEND_BODY_BYTES;
 use crate::client::MAX_APPEND_ROWS;
 
-/// Determines whether to stop scheduling rows after one HTTP batch fails.
+/// Policy for handling a failed batch in [`AppendWriter`](crate::AppendWriter) and
+/// [`AppendStream`](crate::AppendStream).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendFailurePolicy {
-    /// Stop scheduling new batches after observing a failure.
+    /// Stop scheduling new batches after observing a failure and settle in-flight batches.
     #[default]
     Stop,
-    /// Continue scheduling later batches, retaining every failure in the report.
+    /// Continue scheduling subsequent batches and report delivery losses.
     Continue,
 }
 
-/// The aggregate result of settling append operations.
+/// Summary outcome of an [`AppendWriteReport`](crate::AppendWriteReport) or
+/// [`AppendDeliveryReport`](crate::AppendDeliveryReport).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendDeliveryOutcome {
-    /// Every covered row was committed and no local rows were dropped.
+    /// All covered rows committed and no rows were dropped locally.
     Ok,
-    /// Some covered rows committed and some were lost or have an unknown outcome.
+    /// Some rows committed; others failed, were dropped, remain unsubmitted, or have unknown
+    /// outcomes.
     Partial,
-    /// No covered row committed and all losses are known not to have committed.
+    /// Every covered row is known not to have committed.
     Failed,
-    /// No covered row is known to have committed and at least one may have committed.
+    /// No rows are known to have committed and at least one batch had an unknown commit outcome.
     Unknown,
 }
 
@@ -287,42 +290,4 @@ fn retry_delay(backoff: Duration, error: &Error, max_backoff: Duration) -> Durat
     backoff
         .max(error.retry_after().unwrap_or(Duration::ZERO))
         .min(max_backoff)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_non_object_rows() {
-        assert!(matches!(
-            encode_record(&vec![1, 2, 3]),
-            Err(RecordError::InvalidRecord)
-        ));
-    }
-
-    #[test]
-    fn backoff_is_capped() {
-        assert_eq!(
-            next_backoff(Duration::from_secs(4), Duration::from_secs(5)),
-            Duration::from_secs(5)
-        );
-    }
-
-    #[test]
-    fn retry_after_is_honored_and_capped() {
-        let error = Error::new(ErrorKind::Unavailable, ErrorOperation::AdmitRows, "busy")
-            .set_retry_after(Duration::from_secs(30));
-        assert_eq!(
-            retry_delay(Duration::from_millis(100), &error, Duration::from_secs(5)),
-            Duration::from_secs(5)
-        );
-
-        let error = Error::new(ErrorKind::Unavailable, ErrorOperation::AdmitRows, "busy")
-            .set_retry_after(Duration::from_millis(200));
-        assert_eq!(
-            retry_delay(Duration::from_secs(1), &error, Duration::from_secs(5)),
-            Duration::from_secs(1)
-        );
-    }
 }

@@ -49,14 +49,14 @@ Streams retry temporary rejections by default. They do not replay an unknown wri
 
 Replace paginated `list_*`, `fetch_*`, and `iterate_*` calls with a resource selector followed by `get()`. Each read returns a complete `definition` and an `etag` for conditional updates. In the table below, `catalog` is `client.catalog()`.
 
-| In 0.3                          | In 0.4                                      |
-| ------------------------------- | ------------------------------------------- |
-| List databases                  | `catalog.get()`                             |
-| List schemas in a database      | `catalog.database(db).get()`                |
-| List tables in a schema         | `catalog.schema(db, schema).get()`          |
-| `describe()` / `table_schema()` | `table.catalog().get()`                     |
-| `distinct_on`                   | `definition.distinct.on`                    |
-| `data_retention_days`           | `definition.retention_days`                 |
+| In 0.3                          | In 0.4                             |
+| ------------------------------- | ---------------------------------- |
+| List databases                  | `catalog.get()`                    |
+| List schemas in a database      | `catalog.database(db).get()`       |
+| List tables in a schema         | `catalog.schema(db, schema).get()` |
+| `describe()` / `table_schema()` | `table.catalog().get()`            |
+| `distinct_on`                   | `definition.distinct.on`           |
+| `data_retention_days`           | `definition.retention_days`        |
 
 For example, list the tables in a schema:
 
@@ -76,14 +76,14 @@ Typed definitions reject unsupported fields. Use `raw().get()` to keep them as J
 
 ## Update statements and timeouts
 
-| In 0.3                                         | In 0.4                                  |
-| ---------------------------------------------- | --------------------------------------- |
-| `with_exec_timeout(...)`                       | `with_max_elapsed(Duration)`            |
-| `with_max_parallelism(...)`                    | Removed                                 |
-| `handle.last_status()`                         | `handle.snapshot()`                     |
-| `handle.status().await` / `fetch_once().await` | `handle.refresh().await`                |
-| `handle.fetch().await`                         | `handle.wait().await`                   |
-| Handle progress/result accessors               | Inspect `snapshot()` or call `wait()`   |
+| In 0.3                                         | In 0.4                                |
+| ---------------------------------------------- | ------------------------------------- |
+| `with_exec_timeout(...)`                       | `with_max_elapsed(Duration)`          |
+| `with_max_parallelism(...)`                    | Removed                               |
+| `handle.last_status()`                         | `handle.snapshot()`                   |
+| `handle.status().await` / `fetch_once().await` | `handle.refresh().await`              |
+| `handle.fetch().await`                         | `handle.wait().await`                 |
+| Handle progress/result accessors               | Inspect `snapshot()` or call `wait()` |
 
 Use `std::time::Duration` in place of `jiff::SignedDuration`. `with_max_elapsed` includes queueing time. The separate `with_max_estimated` option rejects queries whose estimated duration exceeds a limit; it does not control parallelism. Both take positive durations. Omitted limits use service defaults.
 

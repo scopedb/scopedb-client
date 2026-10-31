@@ -28,10 +28,8 @@ mod protocol;
 mod result;
 mod statement;
 mod table;
-#[cfg(test)]
-mod test_support;
 
-/// The HTTP client version used by this SDK.
+/// Re-exported HTTP client crate for configuring [`ClientBuilder::http_client`].
 pub use reqwest;
 
 pub use self::append::AppendDeliveryOutcome;

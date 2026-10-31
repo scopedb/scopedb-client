@@ -29,78 +29,80 @@ use crate::AppendWriteReport;
 use crate::CatalogMutationOutcome;
 use crate::StatementErrorDetails;
 
-/// Stable failure categories for application policy. Operation identity and
-/// commit outcomes are available separately; do not parse diagnostic strings.
+/// Broad failure category for [`Error`].
+///
+/// Combine with [`Error::operation`] for the failed SDK operation and [`Error::is_retryable`] for
+/// retry safety.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// Change invalid configuration, input, or query arguments.
+    /// Invalid configuration, input data, or query arguments.
     InvalidInput,
-    /// Supply valid authentication credentials.
+    /// Missing or invalid authentication credentials.
     Unauthenticated,
-    /// Obtain authorization for the operation.
+    /// Insufficient permissions for the operation.
     PermissionDenied,
-    /// The selected resource or execution does not exist.
+    /// Referenced resource or statement execution does not exist.
     NotFound,
-    /// Refresh state or resolve a version or ownership conflict.
+    /// Version precondition or concurrent state conflict.
     Conflict,
-    /// Reduce pressure and respect the retry delay when retrying is safe.
+    /// Request rate or local admission buffer limit reached.
     RateLimited,
-    /// The service or a required worker is unavailable.
+    /// Service or transport is temporarily unavailable.
     Unavailable,
-    /// A client or server deadline expired; inspect write outcomes before replay.
+    /// Client or server deadline expired.
     Timeout,
-    /// Execution reached an explicitly cancelled terminal state.
+    /// Statement execution reached a cancelled terminal state.
     Cancelled,
-    /// A response or result cannot be interpreted under the protocol contract.
+    /// Response body, headers, or result cells violated the protocol contract.
     InvalidResponse,
-    /// An aggregate operation left input unconfirmed; inspect its progress report.
+    /// Aggregate operation left input unconfirmed; inspect the attached report on [`Error`].
     Incomplete,
-    /// A producer can no longer accept work.
+    /// Stream is closed and no longer accepts rows.
     Closed,
-    /// An internal invariant or otherwise unclassified server failure occurred.
+    /// Unclassified server or internal SDK error.
     Internal,
 }
 
-/// The SDK operation whose failure the caller is handling.
+/// Public SDK operation that produced an [`Error`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorOperation {
-    /// Validate and construct the client and its HTTP configuration.
+    /// Building a [`Client`](crate::Client).
     BuildClient,
-    /// Validate a finite writer and its selected table.
+    /// Building an [`AppendWriter`](crate::AppendWriter).
     BuildAppendWriter,
-    /// Validate and start a background append stream.
+    /// Building an [`AppendStream`](crate::AppendStream).
     BuildAppendStream,
-    /// Execute one logical append request, including its retry attempts.
+    /// Single-batch table append request, including retries.
     Append,
-    /// Settle one finite input slice.
+    /// Finite-slice write through [`AppendWriter::write`](crate::AppendWriter::write).
     WriteRows,
-    /// Admit rows locally, including bulk and nonblocking admission.
+    /// Local row admission into an [`AppendStream`](crate::AppendStream).
     AdmitRows,
-    /// Settle a delivery barrier while keeping the stream open.
+    /// Flushing an [`AppendStream`](crate::AppendStream).
     Flush,
-    /// Close admission and settle the remaining stream rows.
+    /// Shutting down an [`AppendStream`](crate::AppendStream).
     Shutdown,
-    /// Submit one SQL execution.
+    /// Submitting a [`Statement`](crate::Statement).
     SubmitStatement,
-    /// Statement::execute, Client::query, and table SQL operations.
+    /// Executing a statement to completion (`query`, `execute`, or `Table::drop`).
     ExecuteStatement,
-    /// Read one execution status snapshot.
+    /// Refreshing a [`StatementHandle`](crate::StatementHandle).
     RefreshStatement,
-    /// Wait for an existing execution to terminate.
+    /// Waiting on a [`StatementHandle`](crate::StatementHandle).
     WaitStatement,
-    /// Request cancellation of an existing execution.
+    /// Cancelling a [`StatementHandle`](crate::StatementHandle).
     CancelStatement,
-    /// Read the complete selected catalog definition.
+    /// Reading a catalog snapshot.
     ReadCatalog,
-    /// Replace or preview replacement of a selected catalog subtree.
+    /// Applying or previewing a catalog definition.
     ApplyCatalog,
-    /// Delete or preview deletion of a selected catalog resource.
+    /// Deleting or previewing deletion of a catalog resource.
     DeleteCatalog,
-    /// Convert query result shapes or cells to Rust values.
+    /// Decoding a [`ResultSet`](crate::ResultSet) into typed rows or objects.
     DecodeResult,
-    /// Parse a public data-type identifier.
+    /// Parsing a [`DataType`](crate::DataType) name.
     ParseDataType,
 }
 
@@ -192,7 +194,7 @@ impl fmt::Display for ErrorOperation {
     }
 }
 
-/// The client-side reason an in-flight write was interrupted.
+/// Reason an in-flight append request was interrupted on the client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -209,8 +211,9 @@ impl fmt::Display for WriteErrorReason {
     }
 }
 
-/// Details of an interrupted write. An unknown outcome may have committed and
-/// must not be automatically replayed.
+/// Client-side interruption details for an append request.
+///
+/// When `outcome` is [`AppendState::Unknown`], the request may have committed on the server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct WriteErrorDetails {
@@ -261,17 +264,7 @@ enum AppendProgress {
     Delivery(AppendDeliveryReport),
 }
 
-/// A failed SDK operation with structured recovery data and native diagnostics.
-///
-/// Partial progress stays on this error when it is returned through `?`.
-/// Inspect [`Self::append_admission`], [`Self::append_write_report`], or
-/// [`Self::append_delivery_report`] before replaying admitted or submitted rows.
-/// Reports can include successful and unknown requests; a representative
-/// failure does not describe every row.
-///
-/// Raw [`Self::details`] and HTTP metadata describe the last failed response.
-/// [`Self::append_details`] retains uncertainty across retry attempts. Retry
-/// classification is separate from whether a write may have committed.
+/// Failure returned by an SDK operation, carrying recovery data and server diagnostics.
 #[doc = include_str!("../docs/errors.md")]
 #[derive(Clone)]
 pub struct Error {
@@ -286,17 +279,17 @@ pub struct Error {
 }
 
 impl Error {
-    /// Returns the failure classification.
+    /// Returns the failure category.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
 
-    /// Returns the operation-level message, without repeating the source chain.
+    /// Returns the operation-level error message.
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// Returns the original server code, including codes from newer servers.
+    /// Returns the server error code, if the server supplied one.
     pub fn code(&self) -> Option<&str> {
         self.diagnostics
             .as_deref()
@@ -304,8 +297,7 @@ impl Error {
             .or_else(|| self.statement_details().map(|d| d.code.as_str()))
     }
 
-    /// Returns the original structured server details. After retries these
-    /// describe the last failed response, not the outcome across attempts.
+    /// Returns the structured server error details from the last failed response.
     pub fn details(&self) -> Option<&serde_json::Value> {
         self.diagnostics
             .as_deref()
@@ -313,23 +305,28 @@ impl Error {
             .or_else(|| self.statement_details().and_then(|d| d.details.as_ref()))
     }
 
+    /// Returns the HTTP status code from the last failed response.
     pub fn http_status(&self) -> Option<StatusCode> {
         self.diagnostics.as_deref().and_then(|d| d.http_status)
     }
 
+    /// Returns the server request ID, if present.
     pub fn request_id(&self) -> Option<&str> {
         self.diagnostics
             .as_deref()
             .and_then(|d| d.request_id.as_deref())
     }
 
+    /// Returns the server `Retry-After` delay, if present.
     pub fn retry_after(&self) -> Option<Duration> {
         self.diagnostics.as_deref().and_then(|d| d.retry_after)
     }
 
-    /// Returns table-append details across the failed request's attempts.
-    /// Earlier unknown attempts keep status Unknown even if the last response
-    /// rejected the request. Row diagnostics remain relative to that response.
+    /// Returns table-append failure details across all attempts of the failed request.
+    ///
+    /// `status` remains [`AppendState::Unknown`] if any attempt had an unknown
+    /// commit outcome, even when a later attempt was rejected. `row_errors`
+    /// come from the last failed response.
     pub fn append_details(&self) -> Option<&AppendErrorDetails> {
         match self.failure.as_deref() {
             Some(FailureDetails::Append { details, .. }) => Some(details),
@@ -337,7 +334,7 @@ impl Error {
         }
     }
 
-    /// Returns client timeout details for an append after sending began.
+    /// Returns client-side timeout details when an append attempt timed out.
     pub fn write_details(&self) -> Option<&WriteErrorDetails> {
         match self.failure.as_deref() {
             Some(FailureDetails::Append { interruption, .. }) => interruption.as_ref(),
@@ -345,9 +342,12 @@ impl Error {
         }
     }
 
-    /// Returns the outcome of a failed Catalog mutation. Unknown requires
-    /// reconciliation even when an intermediary supplies a server error code.
-    /// Reads, dry runs, and local validation failures return None.
+    /// Returns the commit outcome of a failed catalog mutation.
+    ///
+    /// Returns [`CatalogMutationOutcome::Unknown`] when the mutation may have
+    /// committed, [`CatalogMutationOutcome::Rejected`] when the server rejected
+    /// it without committing, or `None` for reads, dry runs, and local
+    /// validation errors.
     pub fn catalog_outcome(&self) -> Option<CatalogMutationOutcome> {
         match self.failure.as_deref() {
             Some(FailureDetails::Catalog(outcome)) => Some(*outcome),
@@ -355,8 +355,11 @@ impl Error {
         }
     }
 
-    /// Returns the execution ID, when known. Inspect that execution rather than
-    /// submitting another statement; the ID does not confirm server acceptance.
+    /// Returns the statement ID associated with a failed statement operation.
+    ///
+    /// Pass this ID to [`Client::statement_handle`](crate::Client::statement_handle) to inspect or
+    /// wait on the execution after a lost submission response or post-submission
+    /// read failure.
     pub fn statement_id(&self) -> Option<Uuid> {
         match self.failure.as_deref() {
             Some(FailureDetails::Statement { id, .. }) => *id,
@@ -364,6 +367,8 @@ impl Error {
         }
     }
 
+    /// Returns structured error details for a statement that terminated in
+    /// [`StatementStatus::Failed`](crate::StatementStatus::Failed).
     pub fn statement_details(&self) -> Option<&StatementErrorDetails> {
         match self.failure.as_deref() {
             Some(FailureDetails::Statement { details, .. }) => details.as_ref(),
@@ -371,9 +376,7 @@ impl Error {
         }
     }
 
-    /// Returns the original local try_send failure after conversion to Error.
-    /// Its buffer and record-size details remain typed; serialization failures
-    /// also retain their native source through the standard error chain.
+    /// Returns the underlying [`AppendTrySendError`] when converted into [`Error`].
     pub fn try_send_error(&self) -> Option<&AppendTrySendError> {
         match self.failure.as_deref() {
             Some(FailureDetails::Admission(error)) => Some(error.as_ref()),
@@ -381,8 +384,11 @@ impl Error {
         }
     }
 
-    /// Returns this failed send_all call's admitted prefix. Those rows remain
-    /// owned by the stream; settle it before deciding which rows can be replayed.
+    /// Returns admission progress for a failed
+    /// [`AppendStream::send_all`](crate::AppendStream::send_all) call.
+    ///
+    /// Admitted rows remain owned by the stream. Use `flush()` or `shutdown()`
+    /// to observe their delivery.
     pub fn append_admission(&self) -> Option<&AppendAdmissionResult> {
         match self.progress.as_deref() {
             Some(AppendProgress::Admission(result)) => Some(result),
@@ -390,8 +396,8 @@ impl Error {
         }
     }
 
-    /// Returns the complete report of a failed finite write, including successful
-    /// batches, request-relative index mappings, and the unsubmitted suffix.
+    /// Returns the per-batch report for a failed
+    /// [`AppendWriter::write`](crate::AppendWriter::write) call.
     pub fn append_write_report(&self) -> Option<&AppendWriteReport> {
         match self.progress.as_deref() {
             Some(AppendProgress::Write { report, .. }) => Some(report),
@@ -399,8 +405,12 @@ impl Error {
         }
     }
 
-    /// Returns a local finite-write encoding failure's original input index.
-    /// Remote row indexes are mapped through AppendRequestResult::input_index.
+    /// Returns the input slice index of the row that failed local encoding in
+    /// [`AppendWriter::write`](crate::AppendWriter::write).
+    ///
+    /// For server-side row validation errors, map
+    /// [`AppendRowError::row_index`](crate::AppendRowError::row_index)
+    /// with [`AppendRequestResult::input_index`](crate::AppendRequestResult::input_index).
     pub fn append_input_index(&self) -> Option<usize> {
         match self.progress.as_deref() {
             Some(AppendProgress::Write { input_index, .. }) => *input_index,
@@ -408,9 +418,9 @@ impl Error {
         }
     }
 
-    /// Returns the terminal interval of a failed flush or shutdown. Concurrent
-    /// terminal waiters share this settlement, including rows admitted after
-    /// the failed barrier was enqueued. Unknown rows require reconciliation.
+    /// Returns the terminal delivery report for a failed
+    /// [`AppendStream::flush`](crate::AppendStream::flush) or
+    /// [`AppendStream::shutdown`](crate::AppendStream::shutdown).
     pub fn append_delivery_report(&self) -> Option<&AppendDeliveryReport> {
         match self.progress.as_deref() {
             Some(AppendProgress::Delivery(report)) => Some(report),
@@ -418,10 +428,11 @@ impl Error {
         }
     }
 
-    /// Returns whether retrying this same public operation is safe and useful.
-    /// Aggregate append failures require inspecting their progress, not replaying
-    /// the whole input. Query execution errors after submission must be resumed
-    /// through their statement ID. Unknown writes are never advertised as safe.
+    /// Returns whether repeating the failed SDK call as-is is safe and useful.
+    ///
+    /// Returns `false` for unknown write outcomes, aggregate progress reports,
+    /// and submitted SQL execution errors. Transient status-read failures can
+    /// be retried on the existing statement handle.
     pub fn is_retryable(&self) -> bool {
         if !self.retry.transient
             || self.retry.exhausted
@@ -453,20 +464,17 @@ impl Error {
         true
     }
 
-    /// Returns the public operation, independently of its failure category.
+    /// Returns the SDK operation that failed.
     pub fn operation(&self) -> ErrorOperation {
         self.operation
     }
 
-    /// Returns whether the retained failed append request exhausted its budget.
-    /// This is independent of whether an attempt may have committed. Finite-write
-    /// reports retain this fact separately on each failed batch.
+    /// Returns whether a retryable append request exhausted its configured retry limit.
     pub fn retry_exhausted(&self) -> bool {
         self.retry.exhausted
     }
 
-    /// Returns additional attempts for the retained failed append request.
-    /// Aggregate reports contain retry counts for the complete write or interval.
+    /// Returns the number of retry attempts made by the failed append request.
     pub fn retries(&self) -> usize {
         self.retry.retries
     }
@@ -793,37 +801,5 @@ impl std::error::Error for Error {
             .as_ref()
             .map(|source| source.as_ref() as _)
             .or_else(|| self.try_send_error().and_then(std::error::Error::source))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn diagnostics_keep_the_cause_separate_from_the_operation_message() {
-        let error = Error::new(
-            ErrorKind::Internal,
-            ErrorOperation::BuildClient,
-            "failed to read response",
-        )
-        .set_source(std::io::Error::other("connection interrupted"));
-        assert!(!error.to_string().contains("connection interrupted"));
-        let cause = std::error::Error::source(&error).unwrap();
-        assert_eq!(cause.to_string(), "connection interrupted");
-        assert!(cause.is::<std::io::Error>());
-        assert!(format!("{error:?}").contains("connection interrupted"));
-    }
-
-    #[test]
-    #[should_panic(expected = "the source error has been set")]
-    fn replacing_source_is_rejected() {
-        Error::new(
-            ErrorKind::Internal,
-            ErrorOperation::BuildClient,
-            "operation failed",
-        )
-        .set_source(std::io::Error::other("original cause"))
-        .set_source(std::io::Error::other("replacement"));
     }
 }

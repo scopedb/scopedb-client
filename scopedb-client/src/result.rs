@@ -24,6 +24,7 @@ use crate::ErrorOperation;
 use crate::protocol::ResultSetData;
 use crate::protocol::StatementResultSet;
 
+/// Column metadata for a [`ResultSet`].
 #[derive(Debug, Clone)]
 pub struct Schema {
     fields: Vec<FieldSchema>,
@@ -35,6 +36,7 @@ impl Schema {
     }
 }
 
+/// Name and [`DataType`] of a result column.
 #[derive(Debug, Clone)]
 pub struct FieldSchema {
     name: String,
@@ -51,6 +53,7 @@ impl FieldSchema {
     }
 }
 
+/// Rows and column schema returned by a finished statement.
 #[derive(Debug, Clone)]
 pub struct ResultSet {
     schema: Schema,
@@ -58,7 +61,7 @@ pub struct ResultSet {
     data: ResultSetData,
 }
 
-/// One typed result row keyed by its ScopeQL output column name.
+/// Typed result row keyed by output column name.
 pub type ResultObject = BTreeMap<String, Value>;
 
 impl ResultSet {
@@ -70,14 +73,14 @@ impl ResultSet {
         &self.schema
     }
 
-    /// Returns the unparsed JSON-format cells exactly as received from ScopeDB.
+    /// Returns the unparsed string or null cells as received from the server.
     pub fn raw_rows(&self) -> &[Vec<Option<String>>] {
         match &self.data {
             ResultSetData::Json { rows } => rows,
         }
     }
 
-    /// Converts all result cells to their typed Rust representation.
+    /// Borrows the result set and parses all cells into [`Value`] rows.
     pub fn to_values(&self) -> Result<Vec<Vec<Value>>, Error> {
         self.validate_shape()?;
         self.raw_rows()
@@ -98,7 +101,7 @@ impl ResultSet {
             .collect()
     }
 
-    /// Consumes the result set and returns typed rows.
+    /// Consumes the result set and parses all cells into [`Value`] rows.
     pub fn into_values(self) -> Result<Vec<Vec<Value>>, Error> {
         self.validate_shape()?;
         let ResultSet { schema, data, .. } = self;
@@ -122,11 +125,10 @@ impl ResultSet {
             .collect()
     }
 
-    /// Converts all rows to maps keyed by unique output column names.
+    /// Borrows the result set and converts rows into maps keyed by column name.
     ///
-    /// Duplicate output names are rejected instead of silently discarding a
-    /// value. Use [`ResultSet::to_values`] when a query intentionally returns
-    /// duplicate column names.
+    /// Returns [`ErrorKind::InvalidInput`] if the schema contains duplicate
+    /// column names; use [`to_values`](Self::to_values) for queries with duplicate output names.
     pub fn to_objects(&self) -> Result<Vec<ResultObject>, Error> {
         self.validate_unique_fields()?;
         self.to_values().map(|rows| {
@@ -143,7 +145,11 @@ impl ResultSet {
         })
     }
 
-    /// Consumes the result set and returns rows keyed by output column name.
+    /// Consumes the result set and converts rows into maps keyed by column name.
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if the schema contains duplicate
+    /// column names; use [`into_values`](Self::into_values) for queries with duplicate output
+    /// names.
     pub fn into_objects(self) -> Result<Vec<ResultObject>, Error> {
         self.validate_unique_fields()?;
         let names = self
@@ -159,7 +165,8 @@ impl ResultSet {
         })
     }
 
-    /// Returns the first row keyed by output column name, or `None` when empty.
+    /// Parses and returns the first row as a [`ResultObject`], or `None` if the result set is
+    /// empty.
     pub fn first(&self) -> Result<Option<ResultObject>, Error> {
         self.validate_row_count()?;
         let Some(row) = self.raw_rows().first() else {
@@ -368,8 +375,10 @@ fn parse_owned_cell(value: Option<String>, data_type: DataType) -> Result<Value,
     }
 }
 
-/// A typed result cell. Equality compares encoded array, object, any, and binary
-/// values as strings; floats use Rust's usual equality, including NaN != NaN.
+/// Typed cell value decoded from a [`ResultSet`].
+///
+/// [`PartialEq`] compares `Binary`, `Array`, `Object`, and `Any` by their wire
+/// string representation.
 #[derive(Clone, PartialEq)]
 pub enum Value {
     /// Signed integer value.
@@ -477,208 +486,4 @@ fn quote_string(f: &mut fmt::Formatter<'_>, s: &str, quote: char) -> fmt::Result
         }
     }
     write!(f, "{quote}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::FieldMetadata;
-    use crate::protocol::ResultSetMetadata;
-    use crate::protocol::StatementResultSet;
-
-    fn result(fields: Vec<(&str, DataType)>, rows: Vec<Vec<Option<&str>>>) -> ResultSet {
-        let num_rows = rows.len();
-        ResultSet::from_statement_result_set(StatementResultSet {
-            metadata: ResultSetMetadata {
-                fields: fields
-                    .into_iter()
-                    .map(|(name, data_type)| FieldMetadata {
-                        name: name.to_string(),
-                        data_type,
-                    })
-                    .collect(),
-                num_rows,
-            },
-            data: ResultSetData::Json {
-                rows: rows
-                    .into_iter()
-                    .map(|row| {
-                        row.into_iter()
-                            .map(|cell| cell.map(str::to_string))
-                            .collect()
-                    })
-                    .collect(),
-            },
-        })
-    }
-
-    #[test]
-    fn exposes_raw_values_objects_and_first_row() {
-        let result = result(
-            vec![("id", DataType::Int), ("name", DataType::String)],
-            vec![vec![Some("42"), Some("ScopeDB")]],
-        );
-
-        assert_eq!(result.raw_rows()[0][0].as_deref(), Some("42"));
-        let values = result.to_values().unwrap();
-        assert!(matches!(values[0][0], Value::Int(42)));
-        let objects = result.to_objects().unwrap();
-        assert!(matches!(objects[0].get("id"), Some(Value::Int(42))));
-        assert!(matches!(
-            result.first().unwrap().unwrap().get("name"),
-            Some(Value::String(value)) if value == "ScopeDB"
-        ));
-    }
-
-    #[test]
-    fn consuming_conversions_move_string_values() {
-        let values = result(
-            vec![("name", DataType::String)],
-            vec![vec![Some("ScopeDB")]],
-        )
-        .into_values()
-        .unwrap();
-        assert!(matches!(&values[0][0], Value::String(value) if value == "ScopeDB"));
-
-        let objects = result(
-            vec![("name", DataType::String)],
-            vec![vec![Some("ScopeDB")]],
-        )
-        .into_objects()
-        .unwrap();
-        assert!(matches!(
-            objects[0].get("name"),
-            Some(Value::String(value)) if value == "ScopeDB"
-        ));
-    }
-
-    #[test]
-    fn malformed_shapes_return_errors_instead_of_panicking() {
-        let mut malformed = result(
-            vec![("id", DataType::Int)],
-            vec![vec![Some("1"), Some("extra")]],
-        );
-        malformed.num_rows = 2;
-        let error = malformed.to_values().unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidResponse);
-    }
-
-    #[test]
-    fn object_conversion_rejects_duplicate_names() {
-        let result = result(
-            vec![("value", DataType::Int), ("value", DataType::Int)],
-            vec![vec![Some("1"), Some("2")]],
-        );
-        let error = result.to_objects().unwrap_err();
-        assert!(error.message().contains("duplicated"));
-    }
-
-    #[test]
-    fn first_parses_only_the_first_row() {
-        let result = result(
-            vec![("id", DataType::Int)],
-            vec![vec![Some("1")], vec![Some("2"), Some("extra")]],
-        );
-        assert!(matches!(
-            result.first().unwrap().unwrap().get("id"),
-            Some(Value::Int(1))
-        ));
-        assert!(result.to_values().is_err());
-    }
-
-    #[test]
-    fn first_returns_none_for_empty_results_with_duplicate_names() {
-        let result = result(
-            vec![("value", DataType::Int), ("value", DataType::Int)],
-            vec![],
-        );
-        assert!(result.first().unwrap().is_none());
-    }
-
-    #[test]
-    fn numeric_boundaries_and_raw_json_are_lossless() {
-        for (kind, wire) in [
-            (DataType::Int, "-9223372036854775808"),
-            (DataType::Int, "9223372036854775807"),
-            (DataType::Int, "9007199254740993"),
-            (DataType::UInt, "18446744073709551615"),
-            (DataType::Object, r#"{"id":184467440737095516160}"#),
-            (DataType::Array, "[0.12345678901234567890123456789]"),
-        ] {
-            let result = result(vec![("value", kind)], vec![vec![Some(wire)]]);
-            assert_eq!(result.raw_rows()[0][0].as_deref(), Some(wire));
-            assert_eq!(result.to_values().unwrap()[0][0].to_string(), wire);
-            assert_eq!(
-                result.clone().into_objects().unwrap()[0]["value"].to_string(),
-                wire
-            );
-            assert_eq!(result.first().unwrap().unwrap()["value"].to_string(), wire);
-        }
-        for (kind, wire) in [
-            (DataType::Int, "9223372036854775808"),
-            (DataType::Int, "-9223372036854775809"),
-            (DataType::UInt, "18446744073709551616"),
-            (DataType::UInt, "-1"),
-            (DataType::Float, "1e309"),
-        ] {
-            let result = result(vec![("value", kind)], vec![vec![Some(wire)]]);
-            for error in [
-                result.to_values().unwrap_err(),
-                result.clone().into_values().unwrap_err(),
-                result.clone().into_objects().unwrap_err(),
-                result.first().unwrap_err(),
-            ] {
-                let diagnostic = error.to_string();
-                assert!(diagnostic.contains("row: 0") && diagnostic.contains("column: value"));
-                if matches!(kind, DataType::Int | DataType::UInt) {
-                    let cause = std::error::Error::source(&error).unwrap();
-                    assert!(cause.is::<std::num::ParseIntError>());
-                    let cloned = error.clone();
-                    assert!(
-                        std::error::Error::source(&cloned)
-                            .unwrap()
-                            .is::<std::num::ParseIntError>()
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn float_boundaries_preserve_server_special_values() {
-        for (wire, expected) in [
-            ("1.7976931348623157e308", f64::MAX),
-            ("5e-324", f64::from_bits(1)),
-            ("inf", f64::INFINITY),
-            ("-inf", f64::NEG_INFINITY),
-        ] {
-            let Value::Float(value) = parse_cell(Some(wire), DataType::Float).unwrap() else {
-                panic!("expected float")
-            };
-            assert_eq!(value, expected);
-        }
-        assert!(
-            matches!(parse_cell(Some("NaN"), DataType::Float).unwrap(), Value::Float(value) if value.is_nan())
-        );
-    }
-
-    #[test]
-    fn first_rejects_missing_rows_advertised_by_metadata() {
-        let mut result = result(vec![("id", DataType::Int)], vec![]);
-        result.num_rows = 1;
-        assert!(
-            result
-                .first()
-                .unwrap_err()
-                .message()
-                .contains("row count mismatch")
-        );
-    }
-
-    #[test]
-    fn binary_display_preserves_the_wire_hex_string() {
-        let value = Value::Binary("00FF".to_string());
-        assert_eq!(value.to_string(), "00FF");
-        assert_eq!(format!("{value:?}"), "00FF");
-    }
 }

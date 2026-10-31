@@ -30,7 +30,7 @@ Return the concrete SDK `Error` from asynchronous SDK operations so callers can 
 
 Keep public entry points and exported types deliberate. Re-export a dependency when callers must supply a compatible type from that dependency. Review compatibility against the latest release; unreleased APIs can be corrected before publication, while changes to released APIs need migration guidance and an appropriate release version.
 
-Document return values, failure conditions, and cancellation behavior on the relevant methods. Describe types with noun phrases and operations with present-tense verbs. Add Errors, Panics, and Examples sections only where they describe actual contracts. Keep examples focused on realistic callers and use repository-relative links for repository content.
+Document return values, failure conditions, and cancellation behavior on the relevant methods. Describe types with noun phrases and operations with present-tense verbs. Add Errors, Panics, and Examples sections only where they describe actual contracts. Keep examples focused on realistic callers and use repository-relative links for repository content. Use public API names as intra-doc link labels and put crate-relative resolution paths in explicit targets; keep internal path prefixes out of rendered prose.
 
 ## Tests and validation
 

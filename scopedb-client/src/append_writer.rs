@@ -32,11 +32,11 @@ use crate::append::AppendOptions;
 use crate::append::append_batch;
 use crate::append::encode_record;
 
-/// Configures a reusable writer for finite slices of rows.
+/// Builder for an [`AppendWriter`].
 ///
-/// Defaults match [`crate::AppendStreamBuilder`]: 4 MiB target batches, at most
-/// 200,000 rows per request, four concurrent batches and eight retries of
-/// temporary rejections. Unknown outcomes are not replayed by default.
+/// Defaults match [`AppendStreamBuilder`](crate::AppendStreamBuilder): 4 MiB target batches, up to
+/// 200,000 rows per batch, 4 concurrent batches, [`AppendFailurePolicy::Stop`],
+/// and up to 8 retries of temporary [`AppendState::Rejected`] responses.
 #[derive(Debug, Clone)]
 pub struct AppendWriterBuilder {
     table: Table,
@@ -45,65 +45,71 @@ pub struct AppendWriterBuilder {
 }
 
 impl AppendWriterBuilder {
-    /// Sets the target uncompressed NDJSON size (default 4 MiB, maximum 8 MiB).
-    /// A single row may exceed this target up to the 8 MiB protocol limit.
+    /// Sets the target uncompressed NDJSON batch size (default 4 MiB, maximum 8 MiB).
+    ///
+    /// A single row larger than this target is sent in its own batch up to the
+    /// 8 MiB protocol limit.
     pub fn target_batch_bytes(mut self, bytes: usize) -> Self {
         self.options.batch_bytes = bytes;
         self
     }
 
-    /// Sets the maximum rows per HTTP request, up to 200,000.
+    /// Sets the maximum rows per HTTP batch (default and maximum 200,000).
     pub fn max_batch_rows(mut self, rows: usize) -> Self {
         self.options.max_batch_rows = rows;
         self
     }
 
-    /// Sets concurrency per write call (default four). Use one for ordered submission.
+    /// Sets the maximum in-flight batches per [`AppendWriter::write`] call (default 4). Use `1` for
+    /// sequential submission.
     pub fn max_concurrent_batches(mut self, batches: usize) -> Self {
         self.options.max_in_flight_requests = batches;
         self
     }
 
-    /// Sets the number of additional attempts after an initial failure (default eight).
+    /// Sets the maximum retry attempts after an initial batch failure (default 8).
     pub fn max_retries(mut self, retries: usize) -> Self {
         self.options.retry.max_retries = retries;
         self
     }
 
-    /// Opts into replaying transient unknown outcomes, which can duplicate rows.
-    /// Client timeouts are never replayed automatically, even when enabled.
+    /// Enables retrying transient [`AppendState::Unknown`] responses (default `false`).
+    ///
+    /// Retrying an unknown outcome can insert duplicate rows. Client timeouts
+    /// are never replayed automatically.
     pub fn retry_unknown(mut self, enabled: bool) -> Self {
         self.options.retry.retry_unknown = enabled;
         self
     }
 
-    /// Sets the initial exponential retry delay (default 100 ms).
+    /// Sets the initial retry backoff delay (default 100 ms).
     pub fn initial_backoff(mut self, delay: Duration) -> Self {
         self.options.retry.initial_backoff = delay;
         self
     }
 
-    /// Caps retry delays, including Retry-After (default five seconds).
+    /// Sets the maximum retry delay, capping exponential backoff and `Retry-After` headers (default
+    /// 5 s).
     pub fn max_backoff(mut self, delay: Duration) -> Self {
         self.options.retry.max_backoff = delay;
         self
     }
 
-    /// Overrides the client's timeout per HTTP attempt. Must be finite and positive.
+    /// Overrides the client's [`ClientBuilder::write_timeout`](crate::ClientBuilder::write_timeout)
+    /// with a positive per-attempt timeout.
     pub fn attempt_timeout(mut self, timeout: Duration) -> Self {
         self.options.attempt_timeout = Some(timeout);
         self
     }
 
-    /// Chooses whether a remote failure stops scheduling later batches (default Stop).
-    /// Continue still returns an error if any batch fails. Local encoding failures
-    /// stop reading input under either policy.
+    /// Sets whether a batch failure stops scheduling subsequent batches (default
+    /// [`AppendFailurePolicy::Stop`]).
     pub fn failure_policy(mut self, policy: AppendFailurePolicy) -> Self {
         self.failure_policy = policy;
         self
     }
 
-    /// Validates configuration without starting background tasks or making requests.
+    /// Validates the configuration and returns a reusable [`AppendWriter`].
     pub fn build(self) -> Result<AppendWriter, Error> {
         self.options
             .validate()
@@ -127,9 +133,10 @@ impl AppendWriterBuilder {
     }
 }
 
-/// A reusable writer whose calls batch and settle independently.
+/// Reusable batch writer for finite slices of rows.
 ///
-/// Clones share the HTTP connection pool, not buffers, concurrency limits or reports.
+/// Each [`write`](Self::write) call batches and settles its input slice independently.
+/// Clones share the underlying HTTP connection pool.
 #[derive(Debug, Clone)]
 pub struct AppendWriter {
     table: Table,
@@ -137,10 +144,11 @@ pub struct AppendWriter {
     failure_policy: AppendFailurePolicy,
 }
 
-/// Complete settlement information for one finite input slice.
+/// Settlement report for one [`AppendWriter::write`] call.
 ///
-/// Results are ordered by input range, regardless of completion order. Their
-/// ranges cover a contiguous input prefix; [`Self::unsubmitted`] covers the rest.
+/// [`batches`](Self::batches) are ordered by their [`AppendRequestResult::input_range`]
+/// and cover a contiguous prefix of the input slice; [`unsubmitted`](Self::unsubmitted)
+/// covers the remaining suffix.
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct AppendWriteReport {
@@ -150,22 +158,22 @@ pub struct AppendWriteReport {
 }
 
 impl AppendWriteReport {
+    /// Returns the total number of rows in the input slice.
     pub fn input_rows(&self) -> usize {
         self.input_rows
     }
 
+    /// Returns the scheduled batches in input order.
     pub fn batches(&self) -> &[AppendRequestResult] {
         &self.batches
     }
 
-    /// Returns the suffix that never entered single-batch execution.
-    /// Its rows are known not to have been committed by this call.
+    /// Returns the input index range that was never sent and is known not to have committed.
     pub fn unsubmitted(&self) -> Range<usize> {
         self.unsubmitted.clone()
     }
 
-    /// Counts logical input rows acknowledged at least once. Unknown retries
-    /// may have inserted additional copies that this count cannot measure.
+    /// Returns the number of input rows in batches acknowledged as committed.
     pub fn committed_rows(&self) -> usize {
         self.batches
             .iter()
@@ -174,9 +182,11 @@ impl AppendWriteReport {
             .sum()
     }
 
-    /// Summarizes committed, failed, unknown and unsubmitted input rows.
-    /// Partial can include unknown outcomes. Inspect each batch before deciding
-    /// which input can be replayed; the summary alone cannot establish that.
+    /// Returns the aggregate [`AppendDeliveryOutcome`] for this write call.
+    ///
+    /// [`AppendDeliveryOutcome::Partial`] may include batches with
+    /// [`AppendState::Unknown`]; inspect [`batches`](Self::batches) before replaying
+    /// failed ranges.
     pub fn outcome(&self) -> AppendDeliveryOutcome {
         if self.unsubmitted.is_empty() && self.batches.iter().all(|batch| batch.result.is_ok()) {
             AppendDeliveryOutcome::Ok
@@ -196,7 +206,7 @@ impl AppendWriteReport {
     }
 }
 
-/// One logical HTTP batch, including all of its retries.
+/// Outcome of one batch within an [`AppendWriteReport`], including any retry attempts.
 #[derive(Debug, Clone)]
 pub struct AppendRequestResult {
     input_range: Range<usize>,
@@ -205,21 +215,24 @@ pub struct AppendRequestResult {
 }
 
 impl AppendRequestResult {
+    /// Returns the input slice range covered by this batch.
     pub fn input_range(&self) -> Range<usize> {
         self.input_range.clone()
     }
 
-    /// Returns the final result without changing server-relative row-error indexes.
+    /// Returns the final outcome of the batch.
     pub fn result(&self) -> &Result<AppendRowsResult, Error> {
         &self.result
     }
 
+    /// Returns the number of retry attempts made for this batch.
     pub fn retries(&self) -> usize {
         self.retries
     }
 
-    /// Maps a zero-based request row index to the original input slice.
-    /// Out-of-range indexes, including malformed server indexes, return None.
+    /// Maps a zero-based [`AppendRowError::row_index`](crate::AppendRowError::row_index) from this
+    /// batch to its index in the original input slice. Returns `None` for indexes outside this
+    /// batch.
     pub fn input_index(&self, row_index: u64) -> Option<usize> {
         let index = self
             .input_range
@@ -247,21 +260,7 @@ async fn next_batch(pending: &mut Vec<PendingBatch>) -> AppendRequestResult {
 }
 
 impl AppendWriter {
-    /// Writes a finite slice, returning Ok only when every row is acknowledged.
-    ///
-    /// Serializes incrementally, using the same row validation, batch limits and
-    /// retries as AppendStream. A local encoding failure stops input processing
-    /// and leaves any buffered rows in the unsubmitted suffix.
-    ///
-    /// Stop mode stops scheduling after observing a remote failure; already
-    /// scheduled requests are always settled before return. Continue mode
-    /// attempts later batches but still returns Err if any batch fails.
-    /// Requests may finish out of order; use concurrency one for sequential submission.
-    ///
-    /// Dropping this future stops scheduling and retrying. Requests already sent
-    /// may still commit; cancellation does not roll back writes or return a report.
-    /// Memory for encoded rows is bounded by concurrency and batch sizes rather
-    /// than the total input size; result metadata grows with the number of batches.
+    /// Batches and writes `rows`, returning `Ok` when every row is committed.
     ///
     /// ```no_run
     /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
@@ -272,6 +271,18 @@ impl AppendWriter {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// If any row fails local encoding or any batch fails after retries, returns
+    /// [`Error`] with [`Error::append_write_report`] recording every scheduled
+    /// batch and the [`AppendWriteReport::unsubmitted`] suffix. Local encoding
+    /// errors also set [`Error::append_input_index`], stop input processing under
+    /// either failure policy, and leave the partially built batch unsubmitted.
+    ///
+    /// Under [`AppendFailurePolicy::Stop`], no new batches are scheduled after
+    /// a batch failure is observed, while in-flight batches are settled before returning.
+    /// Under [`AppendFailurePolicy::Continue`], remaining batches are still
+    /// attempted before returning the error. Dropping this future stops
+    /// scheduling and retrying, though requests already sent may still commit.
     pub async fn write<T: Serialize>(&self, rows: &[T]) -> Result<AppendWriteReport, Error> {
         let mut report = AppendWriteReport {
             input_rows: rows.len(),
@@ -374,641 +385,6 @@ impl AppendWriter {
         match cause {
             Some(cause) => Err(cause.with_append_write(report, None)),
             None => Ok(report),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::Condvar;
-    use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-
-    use serde::Serializer;
-    use serde_json::json;
-
-    use super::*;
-    use crate::Client;
-    use crate::ErrorKind;
-    use crate::test_support::MockResponse;
-    use crate::test_support::MockServer;
-
-    fn rejected() -> MockResponse {
-        MockResponse::json(
-            422,
-            r#"{"message":"bad id","code":"invalid_schema","details":{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"invalid integer"}],"row_errors_truncated":true}}"#,
-        )
-    }
-
-    #[tokio::test]
-    async fn aggregate_write_keeps_unknown_delivery_beside_a_local_input_failure() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request).without_ack());
-        let writer = server
-            .client()
-            .table("events")
-            .append_writer()
-            .max_batch_rows(1)
-            .max_concurrent_batches(2)
-            .max_retries(0)
-            .build()
-            .unwrap();
-        async fn write(writer: &AppendWriter) -> Result<(), Error> {
-            let _report = writer.write(&[json!({"id": 0}), json!([1])]).await?;
-            Ok(())
-        }
-        let error = write(&writer).await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Incomplete);
-        assert_eq!(error.operation(), ErrorOperation::WriteRows);
-        assert_eq!(error.append_input_index(), Some(1));
-        assert!(!error.is_retryable());
-        let report = error.append_write_report().unwrap();
-        assert_eq!(report.outcome(), AppendDeliveryOutcome::Unknown);
-        assert_eq!(report.unsubmitted(), 1..2);
-        assert_eq!(report.batches().len(), 1);
-        assert_eq!(
-            report.batches()[0]
-                .result()
-                .as_ref()
-                .unwrap_err()
-                .append_details()
-                .unwrap()
-                .status,
-            AppendState::Unknown
-        );
-        assert_eq!(server.requests().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn continue_preserves_partial_success_and_indexes_after_out_of_order_completion() {
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
-        let server = MockServer::start({
-            let gate = gate.clone();
-            move |_, request| {
-                let first: serde_json::Value =
-                    serde_json::from_str(request.body.lines().next().unwrap()).unwrap();
-                match first["id"].as_u64().unwrap() {
-                    0 => {
-                        // The third batch can only start after the second one settles.
-                        // Hold the first response until then to force completion out of order.
-                        let (lock, wake) = &*gate;
-                        let (open, _) = wake
-                            .wait_timeout_while(
-                                lock.lock().unwrap(),
-                                Duration::from_secs(5),
-                                |open| !*open,
-                            )
-                            .unwrap();
-                        assert!(*open, "later batches did not make progress concurrently");
-                    }
-                    2 => return rejected(),
-                    4 => {
-                        let (lock, wake) = &*gate;
-                        *lock.lock().unwrap() = true;
-                        wake.notify_all();
-                    }
-                    _ => unreachable!(),
-                }
-                MockResponse::committed(request)
-            }
-        });
-        let writer = server
-            .client()
-            .table("events")
-            .append_writer()
-            .max_batch_rows(2)
-            .max_concurrent_batches(2)
-            .failure_policy(AppendFailurePolicy::Continue)
-            .build()
-            .unwrap();
-        let rows: Vec<_> = (0..6).map(|id| json!({"id": id})).collect();
-        let error = writer.write(&rows).await.unwrap_err();
-        let report = error.append_write_report().unwrap();
-        assert_eq!(report.input_rows(), 6);
-        assert_eq!(report.committed_rows(), 4);
-        assert_eq!(report.outcome(), AppendDeliveryOutcome::Partial);
-        assert_eq!(report.unsubmitted(), 6..6);
-        assert_eq!(
-            report
-                .batches()
-                .iter()
-                .map(AppendRequestResult::input_range)
-                .collect::<Vec<_>>(),
-            vec![0..2, 2..4, 4..6]
-        );
-        assert!(report.batches()[0].result().is_ok());
-        assert!(report.batches()[2].result().is_ok());
-        let failed = &report.batches()[1];
-        let details = failed
-            .result()
-            .as_ref()
-            .unwrap_err()
-            .append_details()
-            .unwrap();
-        assert_eq!(details.status, AppendState::Rejected);
-        assert!(details.row_errors_truncated);
-        assert_eq!(details.row_errors[0].row_index, 1);
-        assert_eq!(failed.input_index(details.row_errors[0].row_index), Some(3));
-        assert_eq!(rows[failed.input_index(1).unwrap()]["id"], 3);
-        assert_eq!(failed.input_index(2), None);
-        assert_eq!(failed.input_index(u64::MAX), None);
-        assert_eq!(server.requests().len(), 3);
-        assert_eq!(server.max_active(), 2);
-    }
-
-    #[tokio::test]
-    async fn stop_retains_committed_prefix_and_exact_unsubmitted_suffix() {
-        let server = MockServer::start(|index, request| {
-            if index == 1 {
-                rejected()
-            } else {
-                MockResponse::committed(request)
-            }
-        });
-        let writer = server
-            .client()
-            .table("events")
-            .append_writer()
-            .max_batch_rows(2)
-            .max_concurrent_batches(1)
-            .build()
-            .unwrap();
-        let rows: Vec<_> = (0..7).map(|id| json!({"id": id})).collect();
-        let error = writer.write(&rows).await.unwrap_err();
-        assert_eq!(error.append_input_index(), None);
-        assert_eq!(error.code(), Some("invalid_schema"));
-        let report = error.append_write_report().unwrap();
-        assert_eq!(report.committed_rows(), 2);
-        assert_eq!(report.outcome(), AppendDeliveryOutcome::Partial);
-        assert_eq!(report.batches().len(), 2);
-        assert_eq!(report.batches()[0].input_range(), 0..2);
-        assert_eq!(report.batches()[1].input_range(), 2..4);
-        assert_eq!(report.unsubmitted(), 4..7);
-        assert_eq!(server.requests().len(), 2);
-    }
-
-    struct CountedRow {
-        id: usize,
-        fail: bool,
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl Serialize for CountedRow {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            if self.fail {
-                return Err(serde::ser::Error::custom("cannot encode input row"));
-            }
-            json!({"id": self.id}).serialize(serializer)
-        }
-    }
-
-    #[tokio::test]
-    async fn local_encoding_failure_keeps_buffered_rows_in_unsubmitted_suffix() {
-        for policy in [AppendFailurePolicy::Stop, AppendFailurePolicy::Continue] {
-            let server = MockServer::start(|_, request| MockResponse::committed(request));
-            let writer = server
-                .client()
-                .table("events")
-                .append_writer()
-                .max_batch_rows(2)
-                .max_concurrent_batches(2)
-                .failure_policy(policy)
-                .build()
-                .unwrap();
-            let rows: Vec<_> = (0..5)
-                .map(|id| CountedRow {
-                    id,
-                    fail: id == 3,
-                    calls: Arc::new(AtomicUsize::new(0)),
-                })
-                .collect();
-            let error = writer.write(&rows).await.unwrap_err();
-            assert_eq!(error.append_input_index(), Some(3));
-            assert!(error.message().contains("serialize"));
-            let report = error.append_write_report().unwrap();
-            assert_eq!(report.committed_rows(), 2);
-            assert_eq!(report.batches().len(), 1);
-            assert_eq!(report.batches()[0].input_range(), 0..2);
-            assert_eq!(report.unsubmitted(), 2..5);
-            assert_eq!(server.requests().len(), 1);
-            assert_eq!(rows[4].calls.load(Ordering::Relaxed), 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn invalid_or_oversized_first_row_is_never_submitted() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let writer = server
-            .client()
-            .table("events")
-            .append_writer()
-            .build()
-            .unwrap();
-        for row in [
-            json!([1, 2]),
-            json!({"data": "x".repeat(crate::client::MAX_APPEND_BODY_BYTES)}),
-        ] {
-            let error = writer.write(&[row, json!({"id": 2})]).await.unwrap_err();
-            assert_eq!(error.append_input_index(), Some(0));
-            assert!(error.append_write_report().unwrap().batches().is_empty());
-            assert_eq!(error.append_write_report().unwrap().unsubmitted(), 0..2);
-            assert_eq!(
-                error.append_write_report().unwrap().outcome(),
-                AppendDeliveryOutcome::Failed
-            );
-        }
-        assert!(server.requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn byte_splitting_serializes_lookahead_once_and_matches_stream_boundaries() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let rows: Vec<_> = (0..3)
-            .map(|id| CountedRow {
-                id,
-                fail: false,
-                calls: Arc::new(AtomicUsize::new(0)),
-            })
-            .collect();
-        let table = server
-            .client()
-            .table("events/archive")
-            .with_database("analytics 2026");
-        // Two eight-byte rows need one more byte for their NDJSON separator.
-        let writer = table
-            .append_writer()
-            .target_batch_bytes(16)
-            .max_concurrent_batches(1)
-            .build()
-            .unwrap();
-        let report = writer.write(&rows).await.unwrap();
-        assert_eq!(
-            report
-                .batches()
-                .iter()
-                .map(AppendRequestResult::input_range)
-                .collect::<Vec<_>>(),
-            vec![0..1, 1..2, 2..3]
-        );
-        assert!(
-            rows.iter()
-                .all(|row| row.calls.load(Ordering::Relaxed) == 1)
-        );
-        let finite = server.requests();
-        let stream = table
-            .append_stream()
-            .target_batch_bytes(16)
-            .max_concurrent_batches(1)
-            .build()
-            .unwrap();
-        stream
-            .send_all((0..3).map(|id| json!({"id": id})))
-            .await
-            .unwrap();
-        stream.shutdown().await.unwrap();
-        let requests = server.requests();
-        for (batch, streamed) in finite.iter().zip(&requests[finite.len()..]) {
-            assert_eq!(batch.body, streamed.body);
-            assert_eq!(batch.target, streamed.target);
-            assert_eq!(batch.headers["content-encoding"], "zstd");
-        }
-        assert_eq!(requests.len(), finite.len() * 2);
-    }
-
-    #[tokio::test]
-    async fn shared_retries_keep_one_logical_batch_and_original_indexes() {
-        let server = MockServer::start(|index, request| {
-            if index == 0 {
-                MockResponse::json(
-                    503,
-                    r#"{"message":"busy","retryable":true,"details":{"status":"rejected"}}"#,
-                )
-            } else {
-                MockResponse::committed(request)
-            }
-        });
-        let writer = server
-            .client()
-            .table("events")
-            .append_writer()
-            .max_retries(1)
-            .initial_backoff(Duration::ZERO)
-            .build()
-            .unwrap();
-        let report = writer
-            .write(&[json!({"id": 0}), json!({"id": 1})])
-            .await
-            .unwrap();
-        assert_eq!(report.batches().len(), 1);
-        assert_eq!(report.batches()[0].retries(), 1);
-        assert_eq!(report.batches()[0].input_range(), 0..2);
-        assert_eq!(report.committed_rows(), 2);
-        let requests = server.requests();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].body, requests[1].body);
-    }
-
-    #[tokio::test]
-    async fn unknown_outcomes_are_preserved_across_replay_and_rejection() {
-        for replay in [false, true] {
-            let server = MockServer::start(|index, _| {
-                if index == 0 {
-                    MockResponse::json(200, "").without_ack()
-                } else {
-                    rejected()
-                }
-            });
-            let writer = server
-                .client()
-                .table("events")
-                .append_writer()
-                .retry_unknown(replay)
-                .max_retries(1)
-                .initial_backoff(Duration::ZERO)
-                .build()
-                .unwrap();
-            let error = writer
-                .write(&[json!({"id": 0}), json!({"id": 1})])
-                .await
-                .unwrap_err();
-            assert_eq!(
-                error.append_write_report().unwrap().outcome(),
-                AppendDeliveryOutcome::Unknown
-            );
-            assert_eq!(error.append_write_report().unwrap().unsubmitted(), 2..2);
-            assert_eq!(
-                error.append_write_report().unwrap().batches()[0].input_range(),
-                0..2
-            );
-            assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-            assert_eq!(
-                error.append_write_report().unwrap().batches()[0].retries(),
-                usize::from(replay)
-            );
-            assert_eq!(server.requests().len(), if replay { 2 } else { 1 });
-        }
-    }
-
-    #[tokio::test]
-    async fn reusable_writer_resets_indexes_and_empty_writes_make_no_requests() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let writer = server
-            .client()
-            .table("events")
-            .append_writer()
-            .build()
-            .unwrap();
-        let empty = writer.write::<serde_json::Value>(&[]).await.unwrap();
-        assert_eq!(empty.outcome(), AppendDeliveryOutcome::Ok);
-        assert_eq!(empty.input_rows(), 0);
-        assert!(empty.batches().is_empty());
-        assert_eq!(empty.unsubmitted(), 0..0);
-        assert!(server.requests().is_empty());
-        let rows = [json!({"id": 0}), json!({"id": 1})];
-        let (first, second) = tokio::join!(writer.write(&rows), writer.write(&rows[1..]));
-        assert_eq!(first.unwrap().batches()[0].input_range(), 0..2);
-        assert_eq!(second.unwrap().batches()[0].input_range(), 0..1);
-        assert_eq!(server.requests().len(), 2);
-    }
-
-    #[test]
-    fn build_validates_shared_limits_without_a_runtime() {
-        let table = Client::builder("http://127.0.0.1:1")
-            .build()
-            .unwrap()
-            .table("events");
-        assert!(table.append_writer().build().is_ok());
-        for builder in [
-            table.append_writer().target_batch_bytes(0),
-            table
-                .append_writer()
-                .target_batch_bytes(crate::client::MAX_APPEND_BODY_BYTES + 1),
-            table.append_writer().max_batch_rows(0),
-            table
-                .append_writer()
-                .max_batch_rows(crate::client::MAX_APPEND_ROWS + 1),
-            table.append_writer().max_concurrent_batches(0),
-            table.append_writer().attempt_timeout(Duration::ZERO),
-            table.append_writer().attempt_timeout(Duration::MAX),
-            table.append_writer().initial_backoff(Duration::MAX),
-            table.append_writer().max_backoff(Duration::MAX),
-        ] {
-            assert_eq!(
-                builder.build().unwrap_err().kind(),
-                crate::ErrorKind::InvalidInput
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod lifecycle_tests {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-
-    use serde_json::json;
-    use tokio::sync::Notify;
-
-    use super::*;
-    use crate::test_support::MockResponse;
-    use crate::test_support::MockServer;
-    use crate::test_support::ResponseGate;
-
-    fn retryable_response() -> MockResponse {
-        MockResponse::json(
-            503,
-            r#"{"message":"busy","retryable":true,"details":{"status":"rejected"}}"#,
-        )
-    }
-
-    #[tokio::test]
-    async fn stop_settles_concurrent_batches_including_their_retries() {
-        for retry_in_flight in [false, true] {
-            let gate = Arc::new(ResponseGate::default());
-            let rejected = Arc::new(Notify::new());
-            let attempts = Arc::new(AtomicUsize::new(0));
-            let server = MockServer::start({
-                let gate = gate.clone();
-                let rejected = rejected.clone();
-                let attempts = attempts.clone();
-                move |_, request| {
-                    let row: serde_json::Value = serde_json::from_str(&request.body).unwrap();
-                    match row["id"].as_u64().unwrap() {
-                        0 => MockResponse::json(
-                            422,
-                            r#"{"message":"bad row","details":{"status":"rejected"}}"#,
-                        )
-                        .notify_when_sent(rejected.clone()),
-                        1 => {
-                            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                                gate.block();
-                                if retry_in_flight {
-                                    return retryable_response();
-                                }
-                            }
-                            MockResponse::committed(request)
-                        }
-                        _ => panic!("Stop submitted a row from the unsubmitted suffix"),
-                    }
-                }
-            });
-            let writer = server
-                .client()
-                .table("events")
-                .append_writer()
-                .max_batch_rows(1)
-                .max_concurrent_batches(2)
-                .max_retries(1)
-                .initial_backoff(Duration::ZERO)
-                .build()
-                .unwrap();
-            let rows = [json!({"id": 0}), json!({"id": 1}), json!({"id": 2})];
-            let mut write = Box::pin(writer.write(&rows));
-            tokio::select! {
-                result = &mut write => panic!("write returned with an unsettled batch: {result:?}"),
-                _ = async {
-                    rejected.notified().await;
-                    gate.wait_until_blocked().await;
-                } => {}
-            }
-            // Keep the in-flight response gated while the rejection is processed.
-            // Timing out this borrow leaves the write itself alive for settlement.
-            assert!(
-                tokio::time::timeout(Duration::from_millis(50), write.as_mut())
-                    .await
-                    .is_err()
-            );
-            gate.release();
-            let error = write.await.unwrap_err();
-            let report = error.append_write_report().unwrap();
-            assert_eq!(report.outcome(), AppendDeliveryOutcome::Partial);
-            assert_eq!(report.committed_rows(), 1);
-            assert_eq!(report.batches().len(), 2);
-            assert_eq!(report.batches()[0].input_range(), 0..1);
-            assert!(report.batches()[0].result().is_err());
-            assert_eq!(report.batches()[1].input_range(), 1..2);
-            assert!(report.batches()[1].result().is_ok());
-            assert_eq!(report.batches()[1].retries(), usize::from(retry_in_flight));
-            assert_eq!(report.unsubmitted(), 2..3);
-            assert_eq!(server.requests().len(), 2 + usize::from(retry_in_flight));
-        }
-    }
-
-    #[tokio::test]
-    async fn cancelling_during_retry_backoff_stops_retries_and_later_batches() {
-        let sent = Arc::new(Notify::new());
-        let server = MockServer::start({
-            let sent = sent.clone();
-            move |_, request| {
-                let row: serde_json::Value = serde_json::from_str(&request.body).unwrap();
-                if row["id"] == 0 {
-                    retryable_response().notify_when_sent(sent.clone())
-                } else {
-                    MockResponse::committed(request)
-                }
-            }
-        });
-        let writer = server
-            .client()
-            .table("events")
-            .append_writer()
-            .max_batch_rows(1)
-            .max_concurrent_batches(1)
-            .max_retries(3)
-            .attempt_timeout(Duration::from_millis(500))
-            .initial_backoff(Duration::from_secs(60))
-            .max_backoff(Duration::from_secs(60))
-            .build()
-            .unwrap();
-        let rows = [json!({"id": 0}), json!({"id": 1})];
-        let mut write = Box::pin(writer.write(&rows));
-        tokio::select! {
-            result = &mut write => panic!("write returned before retry backoff: {result:?}"),
-            _ = sent.notified() => {}
-        }
-        // The observation window exceeds the HTTP attempt budget but is shorter
-        // than the backoff. A pending write here must have received the rejection
-        // and entered backoff; an HTTP timeout would have completed with Err.
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), write.as_mut())
-                .await
-                .is_err()
-        );
-        assert_eq!(server.requests().len(), 1);
-        drop(write);
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(240)).await;
-        tokio::task::yield_now().await;
-        tokio::time::resume();
-        // Reusing the same writer also drives the transport after cancellation.
-        let report = writer.write(&rows[1..]).await.unwrap();
-        assert_eq!(report.batches()[0].input_range(), 0..1);
-        assert_eq!(report.committed_rows(), 1);
-        let requests = server.requests();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].body, r#"{"id":1}"#);
-    }
-
-    #[tokio::test]
-    async fn cancelling_while_waiting_for_response_headers_or_body_stops_delivery() {
-        for gate_body in [false, true] {
-            let gate = Arc::new(ResponseGate::default());
-            let sent = Arc::new(Notify::new());
-            let server = MockServer::start({
-                let gate = gate.clone();
-                let sent = sent.clone();
-                move |_, request| {
-                    let row: serde_json::Value = serde_json::from_str(&request.body).unwrap();
-                    if row["id"] != 0 {
-                        return MockResponse::committed(request);
-                    }
-                    let response = retryable_response().notify_when_sent(sent.clone());
-                    if gate_body {
-                        response.with_body_gate(gate.clone())
-                    } else {
-                        gate.block();
-                        response
-                    }
-                }
-            });
-            let writer = server
-                .client()
-                .table("events")
-                .append_writer()
-                .max_batch_rows(1)
-                .max_concurrent_batches(1)
-                .max_retries(3)
-                .initial_backoff(Duration::from_secs(60))
-                .max_backoff(Duration::from_secs(60))
-                .build()
-                .unwrap();
-            let rows = [json!({"id": 0}), json!({"id": 1})];
-            let mut write = Box::pin(writer.write(&rows));
-            tokio::select! {
-                result = &mut write => panic!("write returned before response was released: {result:?}"),
-                _ = gate.wait_until_blocked() => {}
-            }
-            assert_eq!(server.requests().len(), 1);
-            drop(write);
-            gate.release();
-            sent.notified().await;
-            // Drive the released response before advancing time; otherwise a
-            // leaked request could time out instead of reaching its retry delay.
-            let report = writer.write(&rows[1..]).await.unwrap();
-            assert_eq!(report.committed_rows(), 1);
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(240)).await;
-            tokio::task::yield_now().await;
-            tokio::time::resume();
-            let report = writer.write(&[json!({"id": 2})]).await.unwrap();
-            assert_eq!(report.committed_rows(), 1);
-            let requests = server.requests();
-            assert_eq!(requests.len(), 3);
-            assert_eq!(requests[1].body, r#"{"id":1}"#);
-            assert_eq!(requests[2].body, r#"{"id":2}"#);
         }
     }
 }

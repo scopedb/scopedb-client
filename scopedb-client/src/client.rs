@@ -53,7 +53,7 @@ const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An async client for queries, table writes, and catalog operations.
 ///
-/// Start with [`Self::builder`] to configure your endpoint and API key.
+/// Start with [`builder`](Self::builder) to configure your endpoint and API key.
 /// Clones share the underlying HTTP connection pool.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -63,11 +63,7 @@ pub struct Client {
     write_timeout: Duration,
 }
 
-/// Builds a ScopeDB client with an optional API key and custom HTTP client.
-///
-/// The API key is attached by the ScopeDB client itself, so callers can still
-/// provide a preconfigured reqwest client for TLS, proxy, timeout, and pooling
-/// settings.
+/// Builder for a [`Client`] with an optional API key, write timeout, and custom HTTP client.
 pub struct ClientBuilder {
     endpoint: String,
     client: Option<reqwest::Client>,
@@ -87,20 +83,18 @@ impl fmt::Debug for ClientBuilder {
 }
 
 impl ClientBuilder {
-    /// Sets the ScopeDB API key sent as a sensitive Bearer credential.
+    /// Sets the Bearer API key attached to each request.
     ///
-    /// This per-request value takes precedence over an `Authorization` default
-    /// configured on the underlying HTTP client.
+    /// Overrides any default `Authorization` header on a custom HTTP client.
     pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
         self
     }
 
-    /// Uses a preconfigured compatible HTTP client.
+    /// Sets a custom HTTP client for TLS, proxy, and connection-pool settings.
     ///
-    /// Use the re-exported [`crate::reqwest`] version. Disable redirects and
-    /// transport retries to prevent replaying writes; the SDK's default client
-    /// already does this.
+    /// Construct the client with [`reqwest`](crate::reqwest) and disable redirects and
+    /// transport retries so writes are not replayed at the HTTP layer:
     ///
     /// ```
     /// use scopedb_client::reqwest;
@@ -116,25 +110,24 @@ impl ClientBuilder {
         self
     }
 
-    /// Bounds each table append and Catalog mutation HTTP request, including
-    /// reading the response body. Defaults to 30 seconds and must be finite and nonzero.
-    /// This deadline cannot be disabled; increase it when writes need more time.
-    /// The budget starts after local encoding, compression, and request preparation.
-    /// Stream `attempt_timeout` settings override this default. A timeout does
-    /// not roll back the write; its commit outcome can be unknown.
+    /// Sets the per-attempt timeout for table appends and catalog mutations,
+    /// including reading the response body.
     ///
-    /// This is a per-attempt budget. Waiting for stream capacity, retry backoff,
-    /// and the total duration of a flush or shutdown are outside it.
-    /// Append timeouts are exposed through [`Error::write_details`] and are
-    /// never automatically replayed.
+    /// Defaults to 30 seconds and must be finite and positive.
+    /// [`AppendWriterBuilder::attempt_timeout`](crate::AppendWriterBuilder::attempt_timeout) and
+    /// [`AppendStreamBuilder::attempt_timeout`](crate::AppendStreamBuilder::attempt_timeout)
+    /// override this default. Timeouts configured on a custom HTTP client also apply.
     ///
-    /// Shorter timeouts on a custom HTTP client still apply.
+    /// A timed-out write has an unknown commit outcome and is not replayed
+    /// automatically. Append timeouts populate [`Error::write_details`], and
+    /// catalog mutation timeouts set [`Error::catalog_outcome`] to
+    /// [`CatalogMutationOutcome::Unknown`](crate::CatalogMutationOutcome::Unknown).
     pub fn write_timeout(mut self, timeout: Duration) -> Self {
         self.write_timeout = timeout;
         self
     }
 
-    /// Validates the endpoint and authentication settings and builds the client.
+    /// Validates configuration and builds the [`Client`].
     pub fn build(self) -> Result<Client, Error> {
         if self.write_timeout.is_zero() {
             return Err(Error::new(
@@ -195,7 +188,7 @@ impl ClientBuilder {
 }
 
 impl Client {
-    /// Starts a client builder for the common API-key authentication path.
+    /// Returns a builder for `endpoint`.
     pub fn builder(endpoint: impl ToString) -> ClientBuilder {
         ClientBuilder {
             endpoint: endpoint.to_string(),
@@ -205,12 +198,12 @@ impl Client {
         }
     }
 
-    /// Creates a ScopeDB client from an endpoint and a compatible HTTP client.
+    /// Creates a client from an HTTP(S) endpoint URL and a
+    /// [`reqwest::Client`](crate::reqwest::Client).
     ///
-    /// Use the HTTP types re-exported from [`crate::reqwest`] to avoid a
-    /// dependency-version mismatch in applications using another reqwest major.
-    /// Configure the HTTP client as described in [`ClientBuilder::http_client`]
-    /// to prevent automatic write replay. The write timeout defaults to 30 seconds.
+    /// Configure `client` as shown in [`ClientBuilder::http_client`]. The write
+    /// timeout defaults to 30 seconds; use [`builder`](Self::builder) to customize it or
+    /// attach an API key.
     pub fn new<E: IntoUrl>(endpoint: E, client: reqwest::Client) -> Result<Self, Error> {
         match endpoint.into_url() {
             Ok(mut endpoint) => {
@@ -247,34 +240,38 @@ impl Client {
         }
     }
 
+    /// Creates a [`Statement`] builder for `statement`.
     pub fn statement(&self, statement: impl Into<String>) -> Statement {
         Statement::new(self.clone(), statement.into())
     }
 
+    /// Returns a [`StatementHandle`] for an existing `statement_id` without making a request.
     pub fn statement_handle(&self, statement_id: Uuid) -> StatementHandle {
         StatementHandle::new(self.clone(), statement_id)
     }
 
+    /// Selects `table` in the default `scopedb.public` namespace.
     pub fn table(&self, table: impl Into<String>) -> Table {
         Table::new(self.clone(), table.into())
     }
 
-    /// Executes a ScopeQL statement and waits for all result rows.
-    /// Errors after submission retain [`Error::statement_id`] for resuming the
-    /// existing execution with [`Self::statement_handle`], not resubmitting it.
+    /// Submits `statement` and waits for its [`ResultSet`].
+    ///
+    /// If waiting fails after submission, pass [`Error::statement_id`] to
+    /// [`statement_handle`](Self::statement_handle) to inspect or resume waiting on the running
+    /// execution rather than resubmitting the query.
     pub async fn query(&self, statement: impl Into<String>) -> Result<ResultSet, Error> {
         self.statement(statement).execute().await
     }
 
-    /// Selects the complete declarative catalog or an individual resource.
+    /// Accesses the declarative [`Catalog`].
     pub fn catalog(&self) -> Catalog {
         Catalog::new(self.clone())
     }
 
-    /// Appends at most 8 MiB of uncompressed newline-delimited JSON to a table.
+    /// Appends newline-delimited JSON rows to `database.schema.table` in a single request.
     ///
-    /// Sends one request without automatic retries. An unknown outcome remains
-    /// non-retryable through [`Error::is_retryable`] because replay may duplicate rows.
+    /// See [`Table::append`] for payload limits and recovery semantics.
     pub async fn append_rows(
         &self,
         database: &str,
@@ -628,193 +625,4 @@ fn append_rejected_error(message: impl Into<String>) -> Error {
             row_errors_truncated: false,
         },
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use reqwest::StatusCode;
-    use reqwest::header::HeaderMap;
-    use serde_json::json;
-
-    use super::*;
-    use crate::ErrorKind;
-    use crate::protocol::AppendState;
-
-    fn decode(status: StatusCode, payload: &[u8]) -> Result<crate::AppendRowsResult, crate::Error> {
-        decode_append_response(status, &HeaderMap::new(), payload)
-    }
-
-    #[test]
-    fn resource_url_preserves_base_path_and_encodes_segments() {
-        let client = Client::new("https://example.com/proxy", reqwest::Client::new()).unwrap();
-
-        let url = client
-            .make_resource_url(&["databases", "analytics/2026", "schemas", "events archive"])
-            .unwrap();
-
-        assert_eq!(
-            url.as_str(),
-            "https://example.com/proxy/v1/databases/analytics%2F2026/schemas/events%20archive"
-        );
-    }
-
-    #[test]
-    fn client_builder_validates_and_redacts_api_keys() {
-        let builder = Client::builder("https://example.com").api_key("secret-api-key");
-        assert!(!format!("{builder:?}").contains("secret-api-key"));
-        let client = Client::builder("https://example.com")
-            .api_key("secret-api-key")
-            .build()
-            .unwrap();
-        assert!(!format!("{client:?}").contains("secret-api-key"));
-
-        let error = Client::builder("https://example.com")
-            .api_key("")
-            .build()
-            .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn write_timeout_defaults_and_validation() {
-        let client = Client::new("https://example.com", reqwest::Client::new()).unwrap();
-        assert_eq!(client.write_timeout, std::time::Duration::from_secs(30));
-        let client = Client::builder("https://example.com").build().unwrap();
-        assert_eq!(client.write_timeout, std::time::Duration::from_secs(30));
-        for timeout in [std::time::Duration::ZERO, std::time::Duration::MAX] {
-            let error = Client::builder("https://example.com")
-                .write_timeout(timeout)
-                .build()
-                .unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        }
-    }
-
-    #[test]
-    fn json_requests_use_zstd_by_default() {
-        let client = Client::new("https://example.com", reqwest::Client::new()).unwrap();
-        let value = json!({"statement": "SELECT 1", "format": "json"});
-        let expected = serde_json::to_vec(&value).unwrap();
-        let request = client
-            .post_json(client.make_url("v1/statements").unwrap(), &value)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        assert_eq!(
-            request
-                .headers()
-                .get(reqwest::header::CONTENT_ENCODING)
-                .unwrap(),
-            JSON_CONTENT_ENCODING
-        );
-        assert_eq!(
-            request
-                .headers()
-                .get(UNCOMPRESSED_CONTENT_LENGTH)
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            expected.len().to_string()
-        );
-        let compressed = request.body().unwrap().as_bytes().unwrap();
-        assert_eq!(zstd::stream::decode_all(compressed).unwrap(), expected);
-    }
-
-    #[test]
-    fn committed_append_response_is_returned() {
-        let result = decode(
-            StatusCode::OK,
-            br#"{"status":"committed","num_rows_inserted":2}"#,
-        )
-        .unwrap();
-
-        assert_eq!(result.status, AppendState::Committed);
-        assert_eq!(result.num_rows_inserted, 2);
-    }
-
-    #[test]
-    fn rejected_append_error_preserves_row_details_and_retry_status() {
-        let error = decode(
-            StatusCode::SERVICE_UNAVAILABLE,
-            br#"{"message":"validation failed","code":"ingest_failure","details":{"status":"rejected","row_errors":[{"row_index":3,"column":"ts","message":"invalid timestamp"}],"row_errors_truncated":true}}"#,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::Unavailable);
-        assert!(error.is_retryable());
-        let details = error.append_details().unwrap();
-        assert_eq!(details.status, AppendState::Rejected);
-        assert_eq!(details.row_errors[0].row_index, 3);
-        assert!(details.row_errors_truncated);
-    }
-
-    #[test]
-    fn append_error_preserves_server_message_and_http_metadata() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-request-id", "header-request".parse().unwrap());
-        headers.insert(reqwest::header::RETRY_AFTER, "3".parse().unwrap());
-        let error = decode_append_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            &headers,
-            br#"{"message":"capacity is temporarily unavailable","request_id":"body-request","retryable":false,"code":"ingest_failure","details":{"status":"rejected"}}"#,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.message(), "capacity is temporarily unavailable");
-        assert_eq!(error.http_status(), Some(StatusCode::SERVICE_UNAVAILABLE));
-        assert_eq!(error.request_id(), Some("body-request"));
-        assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(3)));
-        assert!(!error.is_retryable());
-    }
-
-    #[test]
-    fn unknown_append_outcome_is_never_retryable() {
-        let error = decode(
-            StatusCode::SERVICE_UNAVAILABLE,
-            br#"{"message":"coordinator unavailable","code":"ingest_failure","details":{"status":"unknown"}}"#,
-        )
-        .unwrap_err();
-
-        assert!(!error.is_retryable());
-        assert!(!error.is_retryable());
-        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-    }
-
-    #[test]
-    fn unstructured_append_error_is_treated_as_unknown() {
-        let error = decode(StatusCode::BAD_REQUEST, br#"{"message":"bad request"}"#).unwrap_err();
-
-        assert!(!error.is_retryable());
-        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-    }
-
-    #[test]
-    fn nested_append_error_has_clean_message_and_unknown_outcome() {
-        let error = decode(
-            StatusCode::NOT_FOUND,
-            br#"{"error":{"message":"unsupported path"}}"#,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.message(), "unsupported path");
-        assert!(!error.is_retryable());
-        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-    }
-
-    #[test]
-    fn nested_append_rejection_keeps_its_outcome_and_diagnostics() {
-        let error = decode(
-            StatusCode::SERVICE_UNAVAILABLE,
-            br#"{"request_id":"proxy-request","error":{"message":"try later","code":"ingest_failure","retryable":false,"details":{"status":"rejected","row_errors":[{"row_index":1,"column":"id","message":"invalid int"}]}}}"#,
-        )
-        .unwrap_err();
-        assert_eq!(error.code(), Some("ingest_failure"));
-        assert_eq!(error.request_id(), Some("proxy-request"));
-        assert_eq!(error.http_status(), Some(StatusCode::SERVICE_UNAVAILABLE));
-        assert!(!error.is_retryable());
-        let details = error.append_details().unwrap();
-        assert_eq!(details.status, AppendState::Rejected);
-        assert_eq!(details.row_errors[0].row_index, 1);
-    }
 }

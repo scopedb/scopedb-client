@@ -29,10 +29,9 @@ fn track(stream: &AppendStream, request: u64) -> bool {
         "name": "request.completed",
         "attributes": {"request": request, "status": 200},
     })) {
-        // This means local admission only, not a remote commit.
         Ok(()) => true,
         Err(error) => {
-            // Route this diagnostic to another sink, never back into `stream`.
+            // Log to a separate sink to avoid recursive telemetry writes.
             eprintln!("telemetry row dropped locally: {error}");
             false
         }
@@ -44,8 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = common::client()?;
     let table = common::write_table(&client)?;
 
-    // Continue mode is explicitly best effort: failed or ambiguous batches are
-    // accounted for, released, and do not stop later telemetry batches.
+    // Continue mode keeps the stream open when a batch fails.
     let telemetry = table
         .append_stream()
         .failure_policy(AppendFailurePolicy::Continue)
@@ -54,11 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_batch_rows(10_000)
         .flush_interval(Duration::from_secs(1))
         .max_buffered_bytes(32 * 1024 * 1024)
-        // This limit applies to each stream; include every application replica.
         .max_concurrent_batches(1)
         .attempt_timeout(Duration::from_secs(10))
         .on_batch_failure(|event| {
-            // A synchronous observer; use a separate diagnostics sink.
             eprintln!("telemetry append failure: {event:?}");
         })
         .build()?;
@@ -71,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("locally dropped: {dropped_locally}");
 
-    // In a service, stop and join producer tasks before this settlement barrier.
+    // Stop producers before calling shutdown() to settle all admitted rows.
     let report = telemetry.shutdown().await?;
     if report.outcome != AppendDeliveryOutcome::Ok {
         eprintln!("telemetry loss or ambiguity: {report:?}");

@@ -52,13 +52,7 @@ A rejected request can include row-level errors:
 
 `committed` means all request rows committed, `rejected` means none committed, and `unknown` means the outcome cannot be determined. Row indexes are zero-based within the request. Missing or malformed outcome details are treated as unknown. Both `AppendRowsResult::status` and `AppendErrorDetails::status` match the native wire fields.
 
-Direct `Table::append` makes one attempt. `Table::append_stream` batches values and retries temporary rejections. Replaying transient unknown outcomes requires `.retry_unknown(true)` and can duplicate rows. Client timeouts are never automatically replayed. Use `flush` or `shutdown` to observe completion and delivery reports. See the [writing guide](../README.md#writing-rows) for batching, concurrency, and failure policies.
-
-Failed `flush()` and `shutdown()` calls return `Error`: `append_delivery_report()` carries the terminal settlement since the previous completed barrier alongside SDK diagnostics. Concurrent terminal waiters share that report, which can include later admitted rows settled during termination. Worker interruption leaves unresolved rows unknown and reports zero duration when the barrier wait time is unavailable. Continue mode can return a successful barrier with a non-Ok delivery outcome; inspect its counts before replaying any rows.
-
-If `AppendStream::send_all()` fails partway, `Error::append_admission()` reports the prefix admitted by that call, independently of other producers. Those rows remain owned by the stream; settle them with `flush()` or `shutdown()` before deciding what to replay.
-
-`Table::append_writer().build()` creates a reusable writer for finite slices. `write(&rows)` uses the same batching limits, row encoding, timeouts and retries as AppendStream, and returns `Ok` only when every input row is acknowledged. On failure, `Error::append_write_report()` retains successful and failed batches in input order, plus an `unsubmitted()` suffix known not to have been committed by that call. Each batch's `input_index(row_index)` maps a request-relative row error back to the original input slice without changing the server error. Stop mode stops scheduling after observing a failure and settles already scheduled batches; Continue mode attempts later batches but still returns an error if any batch fails. A local encoding failure stops either policy and identifies its input index; any buffered rows remain unsubmitted. Dropping a finite write stops scheduling and retrying, but requests already sent can still commit.
+Direct `Table::append` makes one attempt. `Table::append_writer` and `Table::append_stream` batch rows up to the request limits and retry temporary `rejected` responses; opting into `.retry_unknown(true)` also retries transient `unknown` responses and can duplicate rows, while client timeouts are never replayed automatically. See [Write rows](../README.md#write-rows) and [errors.md](errors.md) for finite-write reports, stream admission, and barrier settlement.
 
 NDJSON input is limited to signed 64-bit integers, even for `uint` columns and nested JSON values. This input restriction does not apply to query results, whose `uint` cells support the full unsigned 64-bit range.
 
@@ -75,26 +69,23 @@ A submission request is:
 ```json
 {
   "statement": "SELECT 1",
+  "statement_id": "019a3998-0000-7000-8000-000000000000",
   "max_elapsed_seconds": 30,
   "max_estimated_seconds": 5,
   "format": "json"
 }
 ```
 
-The HTTP API accepts an optional `statement_id`; the SDK always supplies one, allocating a UUID unless `with_statement_id()` overrides it. Submission errors retain this identifier through `Error::statement_id()` so callers can inspect the execution with `Client::statement_handle()` after losing a response. An identifier does not confirm acceptance or authorize resubmission. Duration limits must be positive and finite; omitted values use server defaults. `with_max_elapsed(Duration)` includes queueing time, while `with_max_estimated(Duration)` limits estimated execution duration.
+The HTTP API accepts a `statement_id`; the SDK always supplies one, allocating a UUIDv7 unless `with_statement_id()` overrides it. Submission and execution errors retain this identifier through `Error::statement_id()` so callers can inspect or resume waiting on the execution with `Client::statement_handle()`. Duration limits must be positive and finite; omitted values use server defaults. `with_max_elapsed(Duration)` includes queueing time, while `with_max_estimated(Duration)` limits estimated execution duration.
 
-All three endpoints return the same complete status family: pending, running, finished, failed, or cancelled. Each includes `statement_id`, `created_at`, and progress with `compute_seconds`. Finished responses contain `result_set`; failed responses contain required `error: { code, message, details? }`. Neither failed nor cancelled responses require a top-level message. HTTP success alone does not mean execution succeeded.
+All three endpoints return the same status family: `pending`, `running`, `finished`, `failed`, or `cancelled`. Each includes `statement_id`, `created_at`, and `progress` with `compute_seconds`. Finished responses contain `result_set`; failed responses contain `error: { code, message, details? }`.
 
-`snapshot` returns the cached snapshot, `refresh` fetches an active statement once, and `wait` polls to a terminal state. `cancel` returns and caches the complete response; when execution finishes before cancellation, its result or original failure remains available. Pending or running cancellation responses are observations, not cancellation acknowledgements; continue waiting for a terminal state. `wait()` returns `ErrorKind::Cancelled` for cancellation and normalizes execution failures from their server codes, retaining `statement_details()`. `Error::operation()` distinguishes waiting from submitting or executing SQL. Terminal cached states do not trigger another request. Dropping a waiting future does not cancel server execution. Upgrading from 0.5 clears saved statement history and results.
+`snapshot()` returns the cached status, `refresh()` fetches an active statement once, and `wait()` polls to a terminal state. `cancel()` requests cancellation and caches the returned status; if the status is still `pending` or `running`, call `wait()` to observe termination (`ErrorKind::Cancelled`, or the finished result / execution failure if the statement completed first). Terminal states are cached locally and do not trigger another request. Dropping a waiting future stops local polling without cancelling server execution.
 
-The JSON result format encodes cells as strings or null, with field metadata providing their types. `raw_rows` preserves those wire cells. Use value or object conversions for typed values; duplicate field names are rejected by object conversion.
+The JSON result format encodes cells as strings or null, with field metadata providing their types. `raw_rows()` preserves those wire cells. Use value or object conversions for typed values; duplicate field names are rejected by object conversion.
 
 ## Errors and migration
 
-All asynchronous SDK operations return the concrete `Error` type. Its `kind()` classifies the failure and `operation()` identifies the public operation. HTTP errors use `{ "code": "...", "message": "...", "details": ... }`. `Error::code()` and `details()` preserve unknown codes and structured details. `http_status()`, `request_id()`, and `retry_after()` expose transport diagnostics. Failed statements additionally expose `statement_details()`; append failures expose `append_details()`.
+All asynchronous SDK operations return the concrete `Error` type. Its `kind()` classifies the failure and `operation()` identifies the public operation. HTTP errors use `{ "code": "...", "message": "...", "details": ... }` (direct or nested under `"error"`). `Error::code()` and `details()` preserve server codes and structured details, while `http_status()`, `request_id()`, and `retry_after()` expose transport diagnostics. Failed statements additionally expose `statement_details()`; append failures expose `append_details()`.
 
-After append retries, raw server details and HTTP diagnostics describe the last failed attempt, while `append_details().status` retains uncertainty across every attempt. An unknown attempt followed by a rejection still has an unknown overall outcome, even though `details()["status"]` can be `"rejected"`. `is_retryable()` expresses the current operation's retry policy; it does not establish whether rows committed. A finite write's headline cause represents one failure: always inspect its report to distinguish successful batches, known rejections, unknown outcomes, and unsubmitted input. A `Partial` aggregate can include unknown outcomes.
-
-See the [error-handling guide](errors.md) for typed progress, retry advice, and the diagnostic source chain.
-
-The legacy transform Ingest API is removed. Shape events before appending, or append raw events and execute a separate ScopeQL transformation. See [Upgrade from 0.3 to 0.4](migration-0.4.md#replace-ingest-with-append).
+After append retries, raw server details and HTTP diagnostics describe the last failed attempt, while `append_details().status` retains `AppendState::Unknown` if any attempt had an unknown commit outcome. See the [error-handling guide](errors.md) for partial-progress accessors, `is_retryable()`, and the diagnostic source chain, and [Upgrade from 0.4 to 0.5](migration-0.5.md) or [Upgrade from 0.3 to 0.4](migration-0.4.md) for version upgrades.

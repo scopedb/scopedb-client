@@ -29,8 +29,10 @@ use crate::ErrorOperation;
 use crate::protocol::apply_response_metadata;
 use crate::protocol::decode_http_error;
 
-/// Complete tenant catalog. Apply replaces the entire selected subtree.
-/// Typed definitions reject unknown fields; use [`Catalog::raw`] for newer definitions.
+/// Complete tenant catalog definition.
+///
+/// [`Catalog::apply`] replaces the entire catalog. Typed definitions reject
+/// unknown fields; use [`Catalog::raw`] to preserve fields from newer server versions.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogDocument {
@@ -38,6 +40,7 @@ pub struct CatalogDocument {
     pub databases: Vec<CatalogDatabase>,
 }
 
+/// Database definition within a [`CatalogDocument`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogDatabase {
@@ -48,6 +51,7 @@ pub struct CatalogDatabase {
     pub schemas: Vec<CatalogSchema>,
 }
 
+/// Schema definition containing tables and views.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSchema {
@@ -60,8 +64,11 @@ pub struct CatalogSchema {
     pub views: Vec<CatalogView>,
 }
 
-/// A complete table definition. Omitted collections are empty and omitted
-/// optional fields are cleared. Storage is accepted only at creation.
+/// Complete table definition.
+///
+/// [`CatalogResource::apply`] replaces the entire table definition; omitted
+/// collections become empty and omitted optional fields are cleared. `storage`
+/// is accepted only when creating a table and is omitted from exports.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogTable {
@@ -82,6 +89,7 @@ pub struct CatalogTable {
     pub storage: Option<serde_json::Value>,
 }
 
+/// Table column definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogColumn {
@@ -95,7 +103,7 @@ pub struct CatalogColumn {
     pub indexes: Vec<CatalogColumnIndex>,
 }
 
-/// Additional column index. Supports type "search" and analyzer "log".
+/// Secondary column index definition (such as `index_type: "search"` with `analyzer: Some("log")`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogColumnIndex {
@@ -105,6 +113,7 @@ pub struct CatalogColumnIndex {
     pub analyzer: Option<String>,
 }
 
+/// Table deduplication key (`on`) and ordering (`by`) configuration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogDistinct {
@@ -114,6 +123,7 @@ pub struct CatalogDistinct {
     pub by: Vec<String>,
 }
 
+/// View definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogView {
@@ -123,43 +133,51 @@ pub struct CatalogView {
     pub comment: Option<String>,
 }
 
-/// Preview, concurrency preconditions, and explicit data-loss authorization.
+/// Options for [`CatalogResource::apply`] and [`CatalogResource::delete`].
 #[derive(Debug, Clone, Default)]
 pub struct CatalogOptions {
+    /// Validate and preview the change without committing it.
     pub dry_run: bool,
+    /// Authorize changes that drop data or columns (`destructive == true`).
     pub allow_destructive: bool,
-    /// Opaque ETag returned by Get or a dry-run result, including its quotes.
+    /// ETag precondition from a prior [`CatalogResource::get`] or dry-run [`CatalogResult`],
+    /// including quotes.
     pub if_match: Option<String>,
 }
 
-/// What a failed Catalog mutation establishes about its commit.
+/// Commit status of a failed catalog mutation, exposed via [`Error::catalog_outcome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CatalogMutationOutcome {
     /// The server rejected the mutation without committing it.
     Rejected,
-    /// The mutation may have committed; read the resource before replaying it.
+    /// The mutation may have committed; read the resource with [`CatalogResource::get`] before
+    /// retrying.
     Unknown,
 }
 
+/// Resource definition and opaque ETag returned by [`CatalogResource::get`].
 #[derive(Debug, Clone)]
 pub struct CatalogSnapshot<T> {
     pub definition: T,
     pub etag: String,
 }
 
-/// Normalized states compared in one transaction; None means absent.
+/// Result of [`CatalogResource::apply`] or [`CatalogResource::delete`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatalogResult<T> {
+    /// Resource definition before the mutation, or `None` if it did not exist.
     pub before: Option<T>,
+    /// Resource definition after the mutation, or `None` if it was deleted.
     pub after: Option<T>,
+    /// Whether the change drops existing data or schema objects.
     pub destructive: bool,
-    /// The base version for dry-run, or the resulting version after a mutation.
+    /// Base ETag for a dry run, or the new resource ETag after a committed mutation.
     #[serde(skip)]
     pub etag: String,
 }
 
-/// Reads database, schema, table, and view definitions.
+/// Entry point for declarative catalog snapshots and updates.
 ///
 /// Select the smallest resource you need, then call [`CatalogResource::get`].
 /// Each read returns the complete definition and an ETag for conditional changes.
@@ -174,20 +192,21 @@ pub struct CatalogResult<T> {
 /// # }
 /// ```
 ///
-/// Use [`CatalogResource::apply`] to change a definition and
-/// [`CatalogResource::delete`] to remove a resource. Both support previews and
-/// ETag preconditions through [`CatalogOptions`].
+/// Use [`CatalogResource::apply`] to replace a definition and
+/// [`CatalogResource::delete`] to remove a resource. Both support dry-run
+/// previews and ETag preconditions through [`CatalogOptions`].
 #[derive(Debug, Clone)]
 pub struct Catalog {
     resource: CatalogResource<CatalogDocument>,
 }
 
 impl Catalog {
+    /// Reads the complete tenant catalog and its ETag.
     pub async fn get(&self) -> Result<CatalogSnapshot<CatalogDocument>, Error> {
         self.resource.get().await
     }
 
-    /// Replaces the complete tenant catalog. An empty document clears it.
+    /// Replaces the complete tenant catalog. An empty [`CatalogDocument`] removes all databases.
     pub async fn apply(
         &self,
         definition: &CatalogDocument,
@@ -196,11 +215,12 @@ impl Catalog {
         self.resource.apply(definition, options).await
     }
 
-    /// Retains fields unknown to this SDK when reading and applying definitions.
+    /// Returns a raw JSON selector that preserves unknown fields and arbitrary-precision numbers.
     pub fn raw(&self) -> CatalogResource<serde_json::Value> {
         self.resource.raw()
     }
 
+    /// Selects `database`.
     pub fn database(&self, database: &str) -> CatalogResource<CatalogDatabase> {
         CatalogResource::new(
             self.resource.client.clone(),
@@ -208,6 +228,7 @@ impl Catalog {
         )
     }
 
+    /// Selects `database.schema`.
     pub fn schema(&self, database: &str, schema: &str) -> CatalogResource<CatalogSchema> {
         CatalogResource::new(
             self.resource.client.clone(),
@@ -215,6 +236,7 @@ impl Catalog {
         )
     }
 
+    /// Selects `database.schema.table`.
     pub fn table(
         &self,
         database: &str,
@@ -235,6 +257,7 @@ impl Catalog {
         )
     }
 
+    /// Selects view `database.schema.view`.
     pub fn view(&self, database: &str, schema: &str, view: &str) -> CatalogResource<CatalogView> {
         CatalogResource::new(
             self.resource.client.clone(),
@@ -257,13 +280,19 @@ impl Catalog {
     }
 }
 
-/// A selected subtree. Names are unescaped identifiers. Apply replaces the whole
-/// definition; it is not a patch. Mutations never retry automatically.
+/// Selector for reading, replacing, or deleting a catalog subtree.
 ///
-/// An interrupted or malformed mutation response retains
-/// [`CatalogMutationOutcome::Unknown`]. Read the current state before deciding
-/// whether to retry. Typed definitions reject unsupported fields; [`Self::raw`]
-/// preserves them, including arbitrary-precision JSON numbers.
+/// [`apply`](Self::apply) replaces the entire selected subtree (`PUT`), including
+/// child resources; start from [`get`](Self::get) when modifying an existing
+/// resource. Typed definitions reject unknown fields;
+/// call [`raw`](Self::raw) to read and apply [`serde_json::Value`] definitions with
+/// forward-compatible fields and arbitrary-precision numbers.
+///
+/// Catalog mutations use [`ClientBuilder::write_timeout`](crate::ClientBuilder::write_timeout)
+/// and are never retried automatically. On failure, inspect
+/// [`Error::catalog_outcome`]: [`CatalogMutationOutcome::Unknown`] means the
+/// mutation may have committed (including on timeouts or gateway errors) and
+/// requires reading the resource before retrying.
 #[derive(Debug, Clone)]
 pub struct CatalogResource<T> {
     client: Client,
@@ -272,6 +301,8 @@ pub struct CatalogResource<T> {
 }
 
 impl<T> CatalogResource<T> {
+    /// Converts this selector to [`serde_json::Value`] to preserve unknown fields and
+    /// arbitrary-precision numbers.
     pub fn raw(&self) -> CatalogResource<serde_json::Value> {
         CatalogResource {
             client: self.client.clone(),
@@ -467,7 +498,7 @@ impl<T> CatalogResource<T> {
 }
 
 impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
-    /// Reads the complete definition and its ETag.
+    /// Reads the complete definition of the selected resource and its ETag.
     pub async fn get(&self) -> Result<CatalogSnapshot<T>, Error> {
         let (definition, etag) = self
             .request(Method::GET, None, CatalogOptions::default())
@@ -476,11 +507,12 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
         Ok(CatalogSnapshot { definition, etag })
     }
 
-    /// Replaces the selected definition, including its children. Omitted fields
-    /// are cleared. Start from a snapshot to retain fields you are not changing.
+    /// Replaces the selected resource definition (`PUT`), clearing any omitted optional fields or
+    /// child collections.
     ///
-    /// Preview with `dry_run` and use `if_match` to reject concurrent changes.
-    /// Set `allow_destructive` only after reviewing the potential data loss.
+    /// Use [`CatalogOptions`] to preview changes with `dry_run`, guard against
+    /// concurrent edits with `if_match`, and authorize destructive changes with
+    /// `allow_destructive`.
     ///
     /// ```no_run
     /// use scopedb_client::CatalogOptions;
@@ -535,8 +567,9 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
         Ok(result)
     }
 
-    /// Deletes the selected resource. Use `dry_run` to preview the change and
-    /// `if_match` to require the ETag from a prior read or preview.
+    /// Deletes the selected database, schema, table, or view.
+    ///
+    /// Deleting the root catalog is not supported; apply an empty [`CatalogDocument`] instead.
     pub async fn delete(&self, options: CatalogOptions) -> Result<CatalogResult<T>, Error> {
         if self.path.len() == 1 {
             return Err(Error::new(

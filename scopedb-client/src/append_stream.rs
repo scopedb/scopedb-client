@@ -54,7 +54,7 @@ const DEFAULT_MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD: usize = 5;
 const DEFAULT_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// The lifecycle state of an append stream.
+/// Lifecycle state of an [`AppendStream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendStreamState {
@@ -64,7 +64,7 @@ pub enum AppendStreamState {
     Failed,
 }
 
-/// The state of the continue-mode availability circuit breaker.
+/// State of the [`AppendFailurePolicy::Continue`] availability circuit breaker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendCircuitState {
@@ -73,21 +73,22 @@ pub enum AppendCircuitState {
     HalfOpen,
 }
 
-/// Rows accepted by a bulk local-admission operation.
+/// Number of rows admitted to an [`AppendStream`] by [`AppendStream::send_all`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppendAdmissionResult {
     pub accepted_rows: u64,
 }
 
-/// Aggregate settlement information since the previous delivery barrier.
-/// Counts do not identify individual input records. Use application-owned
-/// business keys to reconcile rows before replaying them.
+/// Settlement counts for an [`AppendStream`] interval since the previous completed barrier.
+///
+/// Counts aggregate across batches in the interval and do not identify
+/// individual rows; use application keys to reconcile rows when
+/// `unknown_rows > 0` or `outcome == AppendDeliveryOutcome::Partial`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendDeliveryReport {
     pub outcome: AppendDeliveryOutcome,
     pub accepted_rows: u64,
-    /// Logical input rows acknowledged as committed at least once. Retrying an
-    /// unknown outcome may insert additional copies that this count cannot measure.
+    /// Rows in batches acknowledged as committed.
     pub committed_rows: u64,
     pub failed_rows: u64,
     pub unknown_rows: u64,
@@ -96,13 +97,11 @@ pub struct AppendDeliveryReport {
     pub failed_batches: u64,
     pub unknown_batches: u64,
     pub retries: u64,
-    /// Wall time spent waiting for this barrier.
-    /// A shared terminal failure report starts at the earliest outstanding barrier.
-    /// Zero when the worker terminates unexpectedly and its wait time is unavailable.
+    /// Elapsed wall time waiting for this barrier.
     pub duration: Duration,
 }
 
-/// Local drop counters grouped by admission failure reason.
+/// Cumulative rows rejected at local [`AppendStream::try_send`] admission, by reason.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AppendDroppedRows {
     pub buffer_full: u64,
@@ -112,14 +111,14 @@ pub struct AppendDroppedRows {
     pub closed: u64,
 }
 
-/// The most recent remote append failure observed by the stream.
+/// Most recent remote batch failure observed by an [`AppendStream`].
 #[derive(Debug, Clone)]
 pub struct AppendLastFailure {
     pub at: SystemTime,
     pub error: Error,
 }
 
-/// A point-in-time snapshot of append stream counters and state.
+/// Point-in-time cumulative counters and state for an [`AppendStream`].
 #[derive(Debug, Clone)]
 pub struct AppendStreamStats {
     pub state: AppendStreamState,
@@ -138,7 +137,7 @@ pub struct AppendStreamStats {
     pub last_report: Option<AppendDeliveryReport>,
 }
 
-/// Action taken after a batch failure listener is invoked.
+/// Stream action taken after a batch failure in [`AppendBatchFailureEvent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendBatchFailureAction {
@@ -147,7 +146,7 @@ pub enum AppendBatchFailureAction {
     Stopped,
 }
 
-/// Diagnostic event emitted after a rejected or ambiguous append batch.
+/// Event passed to [`AppendStreamBuilder::on_batch_failure`] when a batch fails after retries.
 pub struct AppendBatchFailureEvent {
     pub error: Error,
     pub batch_rows: usize,
@@ -168,7 +167,7 @@ impl fmt::Debug for AppendBatchFailureEvent {
     }
 }
 
-/// Continue-mode circuit breaker settings.
+/// Availability circuit breaker settings for [`AppendFailurePolicy::Continue`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AppendCircuitBreakerOptions {
@@ -191,7 +190,7 @@ impl Default for AppendCircuitBreakerOptions {
     }
 }
 
-/// A synchronous local-admission failure from [`AppendStream::try_send`].
+/// Synchronous local-admission error returned by [`AppendStream::try_send`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AppendTrySendError {
@@ -242,17 +241,17 @@ impl std::error::Error for AppendTrySendError {
 
 type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 
-/// Configures a bounded, concurrent table append stream.
+/// Builder for an [`AppendStream`].
 ///
-/// Retries temporary rejections by default. Replaying unknown outcomes requires
-/// [`Self::retry_unknown`] because an unacknowledged attempt may have committed.
+/// Defaults to 4 MiB target batches, 4 concurrent requests, and
+/// [`AppendFailurePolicy::Stop`]. Transient rejections are retried; retrying
+/// unknown outcomes requires opting into [`retry_unknown`](Self::retry_unknown).
 ///
 /// # Telemetry
 ///
-/// For a log or telemetry sink that should keep running after batch failures,
-/// use [`AppendFailurePolicy::Continue`] and keep the circuit breaker enabled.
-/// Start with one concurrent batch per stream when producers run on multiple
-/// application replicas; tune the total concurrency across all producers.
+/// For log or telemetry sinks that should keep running after a batch fails, use
+/// [`AppendFailurePolicy::Continue`] with [`AppendStream::try_send`] and monitor
+/// [`AppendStream::stats`] or [`on_batch_failure`](Self::on_batch_failure):
 ///
 /// ```no_run
 /// use scopedb_client::AppendFailurePolicy;
@@ -271,11 +270,6 @@ type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 /// # Ok(())
 /// # }
 /// ```
-///
-/// Continue mode is best effort. Monitor reports and [`AppendStream::stats`]
-/// for failed, unknown, and locally dropped rows. Send failure diagnostics to
-/// a separate sink. [`AppendStream::try_send`] never waits for capacity;
-/// [`AppendStream::send`] provides backpressure instead.
 pub struct AppendStreamBuilder {
     table: Table,
     flush_interval: Duration,
@@ -288,87 +282,97 @@ pub struct AppendStreamBuilder {
 }
 
 impl AppendStreamBuilder {
-    /// Chooses whether to stop or continue after a batch fails. Defaults to Stop.
+    /// Sets whether the stream stops or continues after a batch fails (default
+    /// [`AppendFailurePolicy::Stop`]).
     pub fn failure_policy(mut self, failure_policy: AppendFailurePolicy) -> Self {
         self.failure_policy = failure_policy;
         self
     }
 
-    /// Sets the target NDJSON payload size (default 4 MiB, maximum 8 MiB).
-    /// One row may exceed this target up to 8 MiB.
+    /// Sets the target uncompressed NDJSON batch size (default 4 MiB, maximum 8 MiB).
+    ///
+    /// A single row larger than this target is sent in its own batch up to 8 MiB.
     pub fn target_batch_bytes(mut self, target_batch_bytes: usize) -> Self {
         self.options.batch_bytes = target_batch_bytes;
         self
     }
 
-    /// Sets the maximum rows in one HTTP batch, up to the 200,000-row protocol limit.
+    /// Sets the maximum rows per HTTP batch (default and maximum 200,000).
     pub fn max_batch_rows(mut self, max_batch_rows: usize) -> Self {
         self.options.max_batch_rows = max_batch_rows;
         self
     }
 
-    /// Sets the maximum delay between buffering the first row and dispatching its batch.
+    /// Sets the flush interval for partially filled batches (default 1 s).
     pub fn flush_interval(mut self, flush_interval: Duration) -> Self {
         self.flush_interval = flush_interval;
         self
     }
 
+    /// Sets the maximum number of queued commands in the local admission channel (default 1,024).
     pub fn channel_capacity(mut self, channel_capacity: usize) -> Self {
         self.channel_capacity = channel_capacity;
         self
     }
 
-    /// Sets the maximum bytes admitted locally but not yet settled remotely.
+    /// Sets the maximum uncompressed bytes admitted locally and awaiting remote settlement (default
+    /// 64 MiB).
     pub fn max_buffered_bytes(mut self, max_buffered_bytes: usize) -> Self {
         self.max_pending_bytes = max_buffered_bytes;
         self
     }
 
-    /// Sets the maximum number of append batches sent concurrently per stream (default 4).
+    /// Sets the maximum in-flight HTTP batches for this stream (default 4).
     pub fn max_concurrent_batches(mut self, max_concurrent_batches: usize) -> Self {
         self.options.max_in_flight_requests = max_concurrent_batches;
         self
     }
 
+    /// Sets the maximum retry attempts after an initial batch failure (default 8).
     pub fn max_retries(mut self, max_retries: usize) -> Self {
         self.options.retry.max_retries = max_retries;
         self
     }
 
-    /// Opts into replaying transient unknown outcomes. This can duplicate rows.
-    /// Client timeouts are never replayed automatically, even when enabled.
+    /// Enables retrying transient [`AppendState::Unknown`] responses (default `false`).
+    ///
+    /// Retrying an unknown outcome can insert duplicate rows. Client timeouts
+    /// are never replayed automatically.
     pub fn retry_unknown(mut self, enabled: bool) -> Self {
         self.options.retry.retry_unknown = enabled;
         self
     }
 
+    /// Sets the initial retry backoff delay (default 100 ms).
     pub fn initial_backoff(mut self, initial_backoff: Duration) -> Self {
         self.options.retry.initial_backoff = initial_backoff;
         self
     }
 
+    /// Sets the maximum retry delay, capping exponential backoff and `Retry-After` headers (default
+    /// 5 s).
     pub fn max_backoff(mut self, max_backoff: Duration) -> Self {
         self.options.retry.max_backoff = max_backoff;
         self
     }
 
-    /// Sets a timeout for each HTTP attempt, overriding the client's write timeout.
-    /// A timeout has an unknown commit outcome. By default the client uses 30 seconds.
-    /// The duration must be finite and nonzero; this deadline cannot be disabled.
+    /// Overrides the client's [`ClientBuilder::write_timeout`](crate::ClientBuilder::write_timeout)
+    /// with a positive per-attempt timeout.
     pub fn attempt_timeout(mut self, attempt_timeout: Duration) -> Self {
         self.options.attempt_timeout = Some(attempt_timeout);
         self
     }
 
-    /// Configures the continue-mode availability circuit, or disables it with `None`.
-    /// Enabled by default: five consecutive availability failures pause dispatch
-    /// for 30 seconds before probing recovery.
+    /// Configures the [`AppendFailurePolicy::Continue`] circuit breaker, or disables it with
+    /// `None`.
+    ///
+    /// Defaults to opening for 30 seconds after 5 consecutive availability failures.
     pub fn circuit_breaker(mut self, circuit_breaker: Option<AppendCircuitBreakerOptions>) -> Self {
         self.circuit_breaker = circuit_breaker;
         self
     }
 
-    /// Observes remote batch failures. Listener panics are isolated from the worker.
+    /// Registers a synchronous callback for a batch's final failure.
     pub fn on_batch_failure<F>(mut self, listener: F) -> Self
     where
         F: Fn(&AppendBatchFailureEvent) + Send + Sync + 'static,
@@ -377,6 +381,8 @@ impl AppendStreamBuilder {
         self
     }
 
+    /// Validates configuration and spawns the background stream worker on the current Tokio
+    /// runtime.
     pub fn build(self) -> Result<AppendStream, Error> {
         validate_builder(&self)
             .map_err(|error| error.with_operation(ErrorOperation::BuildAppendStream))?;
@@ -651,19 +657,23 @@ struct AppendStreamInner {
     shutdown_notify: Arc<Notify>,
 }
 
-/// A cloneable, bounded producer handle for asynchronous table appends.
-/// Dropping every handle drains admitted rows in the background while the Tokio
-/// runtime remains alive. Use shutdown() to observe settlement before exiting.
+/// Cloneable handle to a bounded background append stream.
+///
+/// Admitted rows belong to the stream rather than an individual producer call.
+/// Call [`flush`](Self::flush) to await an intermediate barrier or [`shutdown`](Self::shutdown)
+/// to close admission and await final settlement. If all handles are dropped
+/// without calling `shutdown`, the background worker drains already admitted
+/// rows while the Tokio runtime remains active.
 #[derive(Clone)]
 pub struct AppendStream {
     inner: Arc<AppendStreamInner>,
 }
 
 impl AppendStream {
-    /// Serializes and admits one row, waiting for bounded local capacity.
+    /// Serializes `row` and waits for local buffer capacity to admit it into the stream.
     ///
-    /// Success means local admission only. Use [`Self::flush`] or
-    /// [`Self::shutdown`] to wait for remote settlement.
+    /// Returning `Ok(())` confirms local admission; call [`flush`](Self::flush) or
+    /// [`shutdown`](Self::shutdown) to observe remote delivery outcomes.
     pub async fn send<T>(&self, row: &T) -> Result<(), Error>
     where
         T: Serialize + ?Sized,
@@ -703,8 +713,10 @@ impl AppendStream {
         Ok(())
     }
 
-    /// Attempts synchronous local admission without waiting for capacity.
-    /// Returns an error if the circuit is open or local capacity is full.
+    /// Attempts to serialize and admit `row` without waiting for local buffer capacity.
+    ///
+    /// Rejected rows increment [`AppendStreamStats::dropped_rows`] and
+    /// [`AppendStreamStats::dropped_by_reason`].
     pub fn try_send<T>(&self, row: &T) -> Result<(), AppendTrySendError>
     where
         T: Serialize + ?Sized,
@@ -793,18 +805,15 @@ impl AppendStream {
         Ok(())
     }
 
-    /// Admits an iterator of rows sequentially with bounded memory.
+    /// Serializes and admits an iterator of rows sequentially, awaiting local buffer capacity as
+    /// needed.
     ///
-    /// If admission fails partway, [`Error::append_admission`] identifies
-    /// the prefix admitted by this call, independently of other producers.
-    /// Call [`Self::shutdown`] to settle those rows; [`Self::stats`] retains
-    /// cumulative counts. Dropping this future can leave an admitted prefix
-    /// without returning a count; it does not cancel those rows.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error`] with admission progress when encoding, capacity, or
-    /// stream state prevents the next admission.
+    /// If an item fails encoding or the stream closes mid-iteration,
+    /// [`Error::append_admission`] reports how many rows from this call were
+    /// admitted. Those rows remain owned by the stream; call [`flush`](Self::flush) or
+    /// [`shutdown`](Self::shutdown) to observe their delivery.
+    /// Dropping this future stops admitting further rows while leaving already
+    /// admitted rows in the stream.
     pub async fn send_all<I>(&self, rows: I) -> Result<AppendAdmissionResult, Error>
     where
         I: IntoIterator,
@@ -820,19 +829,19 @@ impl AppendStream {
         Ok(AppendAdmissionResult { accepted_rows })
     }
 
-    /// Dispatches rows admitted before this barrier and waits for their outcomes.
+    /// Dispatches buffered rows and waits for all rows admitted before this call to settle.
     ///
-    /// The report covers activity since the previous barrier. On a Stop-mode
-    /// failure, [`Error::append_delivery_report`] carries the terminal settlement,
-    /// also retained in [`Self::stats`].
+    /// Returns an [`AppendDeliveryReport`] covering activity since the previous
+    /// completed barrier while keeping the stream open. Under
+    /// [`AppendFailurePolicy::Stop`], a batch failure transitions the stream to
+    /// [`AppendStreamState::Failed`], settles all in-flight batches, and
+    /// returns [`Error`] with the terminal [`Error::append_delivery_report`]
+    /// (shared with any concurrent `flush` or [`shutdown`](Self::shutdown) callers).
+    /// Under [`AppendFailurePolicy::Continue`], `flush` returns `Ok(report)`
+    /// and records any batch losses in `report.outcome`.
     ///
-    /// Committed rows have at least one successful acknowledgement; earlier
-    /// unknown attempts may also have committed. A failed barrier may include
-    /// successful batches, so replaying its entire input can duplicate rows.
-    ///
-    /// Once enqueued, dropping this future does not cancel remote settlement.
-    /// Keep the future alive to receive its interval report; the latest completed
-    /// report also remains observable through [`Self::stats`].
+    /// Once the barrier is enqueued, dropping this future stops waiting without
+    /// cancelling settlement in the background worker.
     pub async fn flush(&self) -> Result<AppendDeliveryReport, Error> {
         loop {
             let notified = self.inner.shutdown_notify.notified();
@@ -872,12 +881,14 @@ impl AppendStream {
         }
     }
 
-    /// Permanently closes the stream after settling every admitted row.
+    /// Closes row admission, settles all admitted rows, and returns the final
+    /// [`AppendDeliveryReport`].
     ///
-    /// This method is idempotent across cloned producer handles. Once polled,
-    /// dropping its future stops waiting but settlement continues in the worker.
-    /// Call shutdown again to observe completion. Failure reports are returned
-    /// through [`Error::append_delivery_report`] and remain available in stats().
+    /// Idempotent across cloned handles: concurrent and subsequent calls
+    /// observe the same terminal result (or [`Error::append_delivery_report`]
+    /// on a [`AppendFailurePolicy::Stop`] failure). Dropping the future stops
+    /// local waiting while background settlement continues; call `shutdown`
+    /// again to await completion.
     pub async fn shutdown(&self) -> Result<AppendDeliveryReport, Error> {
         let should_start = {
             let mut shared = lock(&self.inner.shared);
@@ -905,7 +916,8 @@ impl AppendStream {
         self.wait_for_terminal(ErrorOperation::Shutdown).await
     }
 
-    /// Returns a synchronous snapshot suitable for metrics and shutdown diagnostics.
+    /// Returns a point-in-time snapshot of cumulative stream counters, state, and the latest
+    /// report.
     pub fn stats(&self) -> AppendStreamStats {
         let shared = lock(&self.inner.shared);
         AppendStreamStats {
@@ -1752,1510 +1764,4 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-    use std::thread;
-
-    use super::*;
-    use crate::Client;
-    use crate::client::MAX_APPEND_BODY_BYTES;
-    use crate::client::MAX_APPEND_ROWS;
-    use crate::test_support::MockDisconnect;
-    use crate::test_support::MockResponse;
-    use crate::test_support::MockServer;
-    use crate::test_support::ResponseGate;
-
-    #[tokio::test]
-    async fn failed_concurrent_barriers_return_the_same_partial_interval() {
-        use std::future::Future;
-        use std::task::Poll;
-
-        for cancel_flush in [false, true] {
-            let gate = Arc::new(ResponseGate::default());
-            let server = MockServer::start({
-                let gate = gate.clone();
-                move |_, request| {
-                    let row: serde_json::Value = serde_json::from_str(&request.body).unwrap();
-                    if row["id"] == 2 {
-                        gate.block();
-                        MockResponse::json(422,
-                        r#"{"message":"invalid","code":"invalid_schema","details":{"status":"rejected"}}"#)
-                        .with_header("x-request-id", "rejected-request")
-                    } else {
-                        MockResponse::committed(request)
-                    }
-                }
-            });
-            let stream = server
-                .client()
-                .table("events")
-                .append_stream()
-                .max_batch_rows(1)
-                .max_concurrent_batches(2)
-                .max_retries(0)
-                .build()
-                .unwrap();
-            stream.send(&serde_json::json!({"id": 0})).await.unwrap();
-            let previous = stream.flush().await.unwrap();
-            assert_eq!(previous.committed_rows, 1);
-            stream
-                .send_all([serde_json::json!({"id": 1}), serde_json::json!({"id": 2})])
-                .await
-                .unwrap();
-            let mut flush = Box::pin(stream.flush());
-            tokio::select! {
-                biased;
-                result = &mut flush => panic!("barrier returned before rejection: {result:?}"),
-                _ = gate.wait_until_blocked() => {}
-            }
-            let producer = stream.clone();
-            let mut shutdown = Box::pin(producer.shutdown());
-            std::future::poll_fn(|cx| {
-                assert!(shutdown.as_mut().poll(cx).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-            let (failure, concurrent) = if cancel_flush {
-                drop(flush);
-                gate.release();
-                (shutdown.await.unwrap_err(), None)
-            } else {
-                gate.release();
-                let (flush, shutdown) = tokio::join!(flush, shutdown);
-                (flush.unwrap_err(), Some(shutdown.unwrap_err()))
-            };
-            let report = failure.append_delivery_report().unwrap();
-            assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
-            assert_eq!(report.accepted_rows, 2);
-            assert_eq!(report.committed_rows, 1);
-            assert_eq!(report.failed_rows, 1);
-            assert_eq!(report.unknown_rows, 0);
-            assert_eq!(failure.request_id(), Some("rejected-request"));
-            assert!(std::error::Error::source(&failure).is_none());
-            if let Some(concurrent) = concurrent {
-                assert_eq!(concurrent.append_delivery_report().unwrap(), report);
-            }
-            assert_eq!(
-                stream
-                    .shutdown()
-                    .await
-                    .unwrap_err()
-                    .append_delivery_report()
-                    .unwrap(),
-                report
-            );
-            assert_eq!(stream.stats().last_report.as_ref(), Some(report));
-            assert_eq!(server.requests().len(), 3);
-        }
-    }
-
-    #[tokio::test]
-    async fn worker_interruption_retains_unreported_settlement() {
-        for panic in [false, true] {
-            let shared = Arc::new(Mutex::new(SharedState {
-                accepted_rows: 6,
-                committed_rows: 4,
-                pending_rows: 2,
-                in_flight_batches: 1,
-                last_report: Some(AppendDeliveryReport {
-                    accepted_rows: 3,
-                    committed_rows: 3,
-                    ..empty_report()
-                }),
-                interval: DeliveryCounters {
-                    accepted_rows: 2,
-                    committed_rows: 1,
-                    committed_batches: 1,
-                    ..DeliveryCounters::default()
-                },
-                ..SharedState::default()
-            }));
-            let pending_bytes = Arc::new(PendingBytesBudget::new(1024));
-            let shutdown_notify = Arc::new(Notify::new());
-            let (tx, rx) = mpsc::channel(1);
-            drop(rx);
-            let stream = AppendStream {
-                inner: Arc::new(AppendStreamInner {
-                    tx,
-                    shared: shared.clone(),
-                    pending_bytes: pending_bytes.clone(),
-                    shutdown_notify: shutdown_notify.clone(),
-                }),
-            };
-            let worker = tokio::spawn(async move {
-                assert!(!panic, "worker panic");
-                std::future::pending::<()>().await;
-            });
-            if !panic {
-                worker.abort();
-            }
-            let monitor = tokio::spawn(monitor_append_worker(
-                worker,
-                shared,
-                pending_bytes,
-                shutdown_notify,
-            ));
-            let (flush, shutdown) = tokio::join!(stream.flush(), stream.shutdown());
-            monitor.await.unwrap();
-            let failure = flush.unwrap_err();
-            let report = failure.append_delivery_report().unwrap();
-            assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
-            assert_eq!(report.accepted_rows, 3);
-            assert_eq!(report.committed_rows, 1);
-            assert_eq!(report.unknown_rows, 2);
-            assert_eq!(report.duration, Duration::ZERO);
-            assert_eq!(
-                shutdown.unwrap_err().append_delivery_report().unwrap(),
-                report
-            );
-            assert_eq!(stream.stats().last_report.as_ref(), Some(report));
-            assert_eq!(stream.stats().pending_rows, 0);
-            assert!(
-                std::error::Error::source(&failure)
-                    .unwrap()
-                    .is::<tokio::task::JoinError>()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn bulk_admission_failure_preserves_its_own_prefix_and_leaves_the_stream_usable() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .build()
-            .unwrap();
-        stream.send(&serde_json::json!({"id":0})).await.unwrap();
-        let failure = stream
-            .send_all([
-                serde_json::json!({"id":1}),
-                serde_json::json!([2]),
-                serde_json::json!({"id":3}),
-            ])
-            .await
-            .unwrap_err();
-        assert_eq!(failure.append_admission().unwrap().accepted_rows, 1);
-        assert_eq!(failure.kind(), ErrorKind::Incomplete);
-        assert_eq!(stream.stats().accepted_rows, 2);
-        stream.send(&serde_json::json!({"id":4})).await.unwrap();
-        let report = stream.shutdown().await.unwrap();
-        assert_eq!(report.committed_rows, 3);
-        let requests = server.requests();
-        let mut rows: Vec<serde_json::Value> = requests
-            .iter()
-            .flat_map(|request| {
-                request
-                    .body
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-            })
-            .collect();
-        rows.sort_by_key(|row| row["id"].as_u64().unwrap());
-        assert_eq!(
-            rows,
-            vec![
-                serde_json::json!({"id":0}),
-                serde_json::json!({"id":1}),
-                serde_json::json!({"id":4})
-            ]
-        );
-        assert_eq!(failure.kind(), ErrorKind::Incomplete);
-    }
-
-    #[tokio::test]
-    async fn circuit_availability_is_independent_of_unknown_delivery() {
-        for (status, opens_circuit) in [(422, false), (503, true)] {
-            let server = MockServer::start(move |index, request| {
-                if index == 0 {
-                    MockResponse::json(
-                        status,
-                        r#"{"code":"failure","message":"unconfirmed","retryable":false,"details":{"status":"unknown"}}"#,
-                    )
-                } else {
-                    MockResponse::committed(request)
-                }
-            });
-            let stream = server
-                .client()
-                .table("events")
-                .append_stream()
-                .failure_policy(AppendFailurePolicy::Continue)
-                .circuit_breaker(Some(AppendCircuitBreakerOptions::new(
-                    1,
-                    Duration::from_secs(60),
-                )))
-                .max_batch_rows(1)
-                .max_retries(0)
-                .build()
-                .unwrap();
-            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-            let report = stream.flush().await.unwrap();
-            assert_eq!(report.unknown_rows, 1);
-            if opens_circuit {
-                assert_eq!(stream.stats().circuit_state, AppendCircuitState::Open);
-                assert!(matches!(
-                    stream.try_send(&serde_json::json!({"id": 2})),
-                    Err(AppendTrySendError::CircuitOpen)
-                ));
-            } else {
-                assert_eq!(stream.stats().circuit_state, AppendCircuitState::Closed);
-                stream.send(&serde_json::json!({"id": 2})).await.unwrap();
-                assert_eq!(stream.flush().await.unwrap().committed_rows, 1);
-            }
-            stream.shutdown().await.unwrap();
-        }
-    }
-
-    #[test]
-    fn report_outcomes_include_drops_and_unknown_rows() {
-        let mut shared = SharedState {
-            interval: DeliveryCounters {
-                accepted_rows: 2,
-                committed_rows: 1,
-                unknown_rows: 1,
-                ..DeliveryCounters::default()
-            },
-            ..SharedState::default()
-        };
-        let report = shared.take_report(1, Duration::ZERO);
-        assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
-        assert_eq!(report.dropped_rows, 1);
-    }
-
-    #[tokio::test]
-    async fn invalid_stream_limits_fail_before_spawning_a_worker() {
-        let client = Client::builder("https://example.invalid").build().unwrap();
-        for builder in [
-            client
-                .table("events")
-                .append_stream()
-                .channel_capacity(usize::MAX),
-            client
-                .table("events")
-                .append_stream()
-                .initial_backoff(Duration::MAX),
-            client
-                .table("events")
-                .append_stream()
-                .max_backoff(Duration::MAX),
-            client.table("..").append_stream(),
-        ] {
-            assert_eq!(
-                builder
-                    .build()
-                    .err()
-                    .expect("expected invalid configuration")
-                    .kind(),
-                ErrorKind::InvalidInput
-            );
-        }
-    }
-
-    #[test]
-    fn max_batch_rows_cannot_exceed_protocol_limit() {
-        let result = Client::new("https://example.com", reqwest::Client::new())
-            .unwrap()
-            .table("events")
-            .append_stream()
-            .max_batch_rows(MAX_APPEND_ROWS + 1)
-            .build();
-        let error = match result {
-            Ok(_) => panic!("invalid max_batch_rows was accepted"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn append_stream_enforces_eight_mibibyte_request_limit() {
-        let result = Client::new("https://example.com", reqwest::Client::new())
-            .unwrap()
-            .table("events")
-            .append_stream()
-            .target_batch_bytes(MAX_APPEND_BODY_BYTES + 1)
-            .build();
-        let error = match result {
-            Ok(_) => panic!("oversized target_batch_bytes was accepted"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-
-        let row = serde_json::json!({"payload": "x".repeat(MAX_APPEND_BODY_BYTES)});
-        assert!(matches!(
-            encode_record(&row).map_err(AppendTrySendError::from),
-            Err(AppendTrySendError::RecordTooLarge {
-                limit: MAX_APPEND_BODY_BYTES,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn error_snapshot_preserves_http_metadata() {
-        let error = Error::new(ErrorKind::Unavailable, ErrorOperation::AdmitRows, "busy")
-            .set_http_status(reqwest::StatusCode::SERVICE_UNAVAILABLE)
-            .set_request_id("request-123".to_string())
-            .set_retry_after(Duration::from_secs(2))
-            .with_retry_history(3, true)
-            .set_source(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                "lost response",
-            ))
-            .with_transient_failure(true);
-        let restored = error.clone();
-        assert_eq!(
-            restored.http_status(),
-            Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
-        );
-        assert_eq!(restored.request_id(), Some("request-123"));
-        assert_eq!(restored.retry_after(), Some(Duration::from_secs(2)));
-        assert!(restored.is_transient());
-        assert!(!restored.is_retryable());
-        let cause = std::error::Error::source(&restored)
-            .unwrap()
-            .downcast_ref::<std::io::Error>()
-            .unwrap();
-        assert_eq!(cause.kind(), std::io::ErrorKind::ConnectionReset);
-        assert_eq!(restored.retries(), 3);
-        assert!(restored.retry_exhausted());
-    }
-
-    #[tokio::test]
-    async fn owned_http_client_does_not_follow_redirected_writes() {
-        for status in [302, 307, 308] {
-            let server = MockServer::start(move |index, request| {
-                if index == 0 {
-                    MockResponse::json(status, "redirect").with_header("Location", "/replayed")
-                } else {
-                    MockResponse::committed(request)
-                }
-            });
-            let client = Client::builder(&server.endpoint).build().unwrap();
-            let error = client
-                .table("events")
-                .append(r#"{"id":1}"#)
-                .await
-                .unwrap_err();
-            assert_eq!(error.http_status().unwrap().as_u16(), status);
-            assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-            assert_eq!(server.requests().len(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn cancelled_admission_and_shutdown_wait_release_capacity_and_settle_rows() {
-        use std::future::Future;
-        use std::task::Poll;
-        let (arrived_tx, arrived_rx) = oneshot::channel();
-        let arrived_tx = Mutex::new(Some(arrived_tx));
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let release_rx = Mutex::new(release_rx);
-        let server = MockServer::start(move |_, request| {
-            if let Some(tx) = lock(&arrived_tx).take() {
-                let _ = tx.send(());
-            }
-            lock(&release_rx)
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap();
-            MockResponse::committed(request)
-        });
-        let row = serde_json::json!({"id":1});
-        let bytes = row.to_string().len() + 1;
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .max_batch_rows(1)
-            .max_buffered_bytes(bytes)
-            .build()
-            .unwrap();
-        stream.send(&row).await.unwrap();
-        arrived_rx.await.unwrap();
-        {
-            let mut blocked = Box::pin(stream.send(&row));
-            std::future::poll_fn(|cx| {
-                assert!(blocked.as_mut().poll(cx).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-        }
-        assert_eq!(stream.stats().accepted_rows, 1);
-        assert_eq!(stream.stats().pending_bytes, bytes);
-        let mut blocked = Box::pin(stream.send(&row));
-        std::future::poll_fn(|cx| {
-            assert!(blocked.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        {
-            let mut shutdown = Box::pin(stream.shutdown());
-            std::future::poll_fn(|cx| {
-                assert!(shutdown.as_mut().poll(cx).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-        }
-        assert_eq!(stream.stats().state, AppendStreamState::Closing);
-        assert!(stream.send(&row).await.is_err());
-        release_tx.send(()).unwrap();
-        let report = stream.shutdown().await.unwrap();
-        assert!(blocked.await.is_err());
-        assert_eq!(report.accepted_rows, 1);
-        assert_eq!(report.committed_rows, 1);
-        assert_eq!(stream.stats().pending_rows, 0);
-        assert_eq!(stream.stats().pending_bytes, 0);
-        assert_eq!(server.requests().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn direct_append_rejects_excess_rows_before_network_io() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let error = server
-            .client()
-            .table("events")
-            .append("{}\n".repeat(200_001))
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.append_details().unwrap().status,
-            AppendState::Rejected
-        );
-        assert!(server.requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn direct_append_uses_default_request_compression() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let ndjson = "{\"id\":1}\n{\"id\":2}\n";
-
-        let result = server
-            .client()
-            .table("events")
-            .append(ndjson)
-            .await
-            .unwrap();
-
-        assert_eq!(result.num_rows_inserted, 2);
-        let requests = server.requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0]
-                .headers
-                .get("content-encoding")
-                .map(String::as_str),
-            Some("zstd")
-        );
-        assert_eq!(requests[0].body, ndjson);
-    }
-
-    #[tokio::test]
-    async fn direct_append_rejects_a_body_over_eight_mibibytes_before_sending() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-
-        let error = server
-            .client()
-            .table("events")
-            .append("x".repeat(MAX_APPEND_BODY_BYTES + 1))
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert_eq!(
-            error.append_details().map(|details| details.status),
-            Some(AppendState::Rejected)
-        );
-        assert!(error.message().contains("8388608-byte append limit"));
-        assert!(server.requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn batches_ndjson_and_runs_requests_concurrently() {
-        let server = MockServer::start(|_, request| {
-            MockResponse::committed(request).with_delay(Duration::from_millis(30))
-        });
-        let stream = server
-            .client()
-            .table("events/archive")
-            .with_database("analytics 2026")
-            .with_schema("public")
-            .append_stream()
-            .target_batch_bytes(1)
-            .max_concurrent_batches(3)
-            .build()
-            .unwrap();
-
-        let admitted = stream
-            .send_all((0..6).map(|id| serde_json::json!({"id": id})))
-            .await
-            .unwrap();
-        let report = stream.shutdown().await.unwrap();
-
-        assert_eq!(admitted.accepted_rows, 6);
-        assert_eq!(report.outcome, AppendDeliveryOutcome::Ok);
-        assert_eq!(report.accepted_rows, 6);
-        assert_eq!(report.committed_rows, 6);
-        assert_eq!(report.committed_batches, 6);
-        assert!(server.max_active() >= 2);
-        let requests = server.requests();
-        assert_eq!(requests.len(), 6);
-        for request in requests {
-            assert_eq!(
-                request.target,
-                "/v1/catalog/databases/analytics%202026/schemas/public/tables/events%2Farchive/ingest"
-            );
-            assert_eq!(
-                request.headers.get("content-type").map(String::as_str),
-                Some("application/x-ndjson")
-            );
-            assert_eq!(
-                request.headers.get("content-encoding").map(String::as_str),
-                Some("zstd")
-            );
-            assert_eq!(request.body.lines().count(), 1);
-            assert!(request.body.starts_with('{'));
-        }
-    }
-
-    #[tokio::test]
-    async fn default_and_maximum_batch_targets() {
-        for target in [None, Some(8 * 1024 * 1024)] {
-            let server = MockServer::start(|_, request| MockResponse::committed(request));
-            let mut builder = server
-                .client()
-                .table("events")
-                .append_stream()
-                .flush_interval(Duration::from_secs(3600))
-                .max_concurrent_batches(1);
-            if let Some(target) = target {
-                builder = builder.target_batch_bytes(target);
-            }
-            let stream = builder.build().unwrap();
-            let row = serde_json::json!({"payload": "x".repeat(2 * 1024 * 1024)});
-            stream.send(&row).await.unwrap();
-            stream.send(&row).await.unwrap();
-            let report = stream.shutdown().await.unwrap();
-            assert_eq!(report.committed_rows, 2);
-            let row_counts = server
-                .requests()
-                .iter()
-                .map(|request| request.body.lines().count())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                row_counts,
-                if target.is_none() {
-                    vec![1, 1]
-                } else {
-                    vec![2]
-                }
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn semantic_builder_names_split_batches_by_row_count() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .target_batch_bytes(1024 * 1024)
-            .max_batch_rows(2)
-            .max_buffered_bytes(1024 * 1024)
-            .max_concurrent_batches(1)
-            .build()
-            .unwrap();
-
-        stream
-            .send_all((0..5).map(|id| serde_json::json!({"id": id})))
-            .await
-            .unwrap();
-        let report = stream.shutdown().await.unwrap();
-
-        assert_eq!(report.committed_rows, 5);
-        let row_counts = server
-            .requests()
-            .iter()
-            .map(|request| request.body.lines().count())
-            .collect::<Vec<_>>();
-        assert_eq!(row_counts, vec![2, 2, 1]);
-    }
-
-    #[tokio::test]
-    async fn client_builder_attaches_api_key_to_requests() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let http_client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let client = Client::builder(&server.endpoint)
-            .api_key("secret-api-key")
-            .http_client(http_client)
-            .build()
-            .unwrap();
-
-        client.table("events").append(r#"{"id":1}"#).await.unwrap();
-
-        let requests = server.requests();
-        assert_eq!(
-            requests[0].headers.get("authorization").map(String::as_str),
-            Some("Bearer secret-api-key")
-        );
-        assert_eq!(
-            requests[0]
-                .headers
-                .get("content-encoding")
-                .map(String::as_str),
-            Some("zstd")
-        );
-    }
-
-    #[tokio::test]
-    async fn lost_ack_requires_explicit_replay_and_counts_logical_rows() {
-        for replay in [false, true] {
-            for failure_policy in [AppendFailurePolicy::Stop, AppendFailurePolicy::Continue] {
-                let commits = Arc::new(AtomicUsize::new(0));
-                let server = MockServer::start({
-                    let commits = commits.clone();
-                    move |index, request| {
-                        commits.fetch_add(1, Ordering::AcqRel);
-                        let response = MockResponse::committed(request);
-                        if index == 0 {
-                            response.without_ack()
-                        } else {
-                            response
-                        }
-                    }
-                });
-                let mut builder = server
-                    .client()
-                    .table("events")
-                    .append_stream()
-                    .failure_policy(failure_policy)
-                    .initial_backoff(Duration::ZERO);
-                if replay {
-                    builder = builder.retry_unknown(true);
-                }
-                let stream = builder.build().unwrap();
-                stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-
-                let result = stream.shutdown().await;
-                if !replay {
-                    if failure_policy == AppendFailurePolicy::Stop {
-                        assert_eq!(
-                            result.unwrap_err().append_details().unwrap().status,
-                            AppendState::Unknown
-                        );
-                    } else {
-                        assert_eq!(result.unwrap().outcome, AppendDeliveryOutcome::Unknown);
-                    }
-                    let stats = stream.stats();
-                    assert_eq!(commits.load(Ordering::Acquire), 1);
-                    assert_eq!(stats.unknown_rows, 1);
-                    assert_eq!(stats.retries, 0);
-                    assert_eq!(stats.last_report.unwrap().unknown_rows, 1);
-                    continue;
-                }
-                let report = result.unwrap();
-
-                assert_eq!(commits.load(Ordering::Acquire), 2);
-                let requests = server.requests();
-                assert_eq!(requests.len(), 2);
-                assert_eq!(requests[0].body, requests[1].body);
-                assert_eq!(report.outcome, AppendDeliveryOutcome::Ok);
-                assert_eq!(report.accepted_rows, 1);
-                assert_eq!(report.committed_rows, 1);
-                assert_eq!(report.committed_batches, 1);
-                assert_eq!(report.unknown_rows, 0);
-                assert_eq!(report.retries, 1);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn unknown_replay_respects_explicit_server_retry_refusal() {
-        let server = MockServer::start(|_, _| {
-            MockResponse::json(
-                503,
-                r#"{"code":"future_failure","message":"do not replay","retryable":false,"details":{"status":"unknown"}}"#,
-            )
-        });
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .retry_unknown(true)
-            .initial_backoff(Duration::ZERO)
-            .build()
-            .unwrap();
-        stream.send(&serde_json::json!({"id":1})).await.unwrap();
-        let error = stream.shutdown().await.unwrap_err();
-        assert_eq!(error.code(), Some("future_failure"));
-        assert_eq!(stream.stats().unknown_rows, 1);
-        assert_eq!(server.requests().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn direct_append_does_not_retry_lost_ack() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request).without_ack());
-
-        let error = server
-            .client()
-            .table("events")
-            .append(r#"{"id":1}"#)
-            .await
-            .unwrap_err();
-
-        assert_eq!(server.requests().len(), 1);
-        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-        assert!(!error.is_retryable());
-        assert!(
-            std::error::Error::source(&error)
-                .unwrap()
-                .is::<reqwest::Error>()
-        );
-    }
-
-    #[tokio::test]
-    async fn zero_retry_budget_preserves_transport_cause_at_barrier() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request).without_ack());
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .max_retries(0)
-            .build()
-            .unwrap();
-        stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-
-        let error = stream.shutdown().await.unwrap_err();
-
-        assert_eq!(server.requests().len(), 1);
-        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-        assert!(
-            std::error::Error::source(&error)
-                .unwrap()
-                .is::<reqwest::Error>()
-        );
-        assert_eq!(stream.stats().retries, 0);
-    }
-
-    #[tokio::test]
-    async fn unknown_remains_unknown_after_terminal_rejection() {
-        for final_status in [422, 503] {
-            let server = MockServer::start(move |index, _| {
-                match index {
-                0 => MockResponse::json(503, r#"{"message":"ambiguous","code":"ingest_failure","details":{"status":"unknown"}}"#),
-                1 => MockResponse::json(
-                    final_status,
-                    r#"{"message":"last rejection","request_id":"last-attempt","code":"ingest_failure","details":{"status":"rejected","row_errors":[{"row_index":0,"column":"id","message":"invalid"}],"row_errors_truncated":true}}"#,
-                )
-                .with_header("Retry-After", "2"),
-                _ => panic!("unexpected retry request {index}"),
-            }
-            });
-            let stream = server
-                .client()
-                .table("events")
-                .append_stream()
-                .retry_unknown(true)
-                .max_retries(1)
-                .initial_backoff(Duration::ZERO)
-                .build()
-                .unwrap();
-            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-
-            let error = stream.shutdown().await.unwrap_err();
-
-            assert_eq!(server.requests().len(), 2);
-            assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-            assert!(format!("{error:?}").contains("earlier append attempt may have committed"));
-            assert_eq!(error.message(), "last rejection");
-            assert_eq!(error.code(), Some("ingest_failure"));
-            assert_eq!(error.details().unwrap()["status"], "rejected");
-            assert_eq!(error.append_details().unwrap().row_errors[0].column, "id");
-            assert!(error.append_details().unwrap().row_errors_truncated);
-            assert_eq!(error.http_status().unwrap().as_u16(), final_status);
-            assert_eq!(error.request_id(), Some("last-attempt"));
-            assert_eq!(error.retry_after(), Some(Duration::from_secs(2)));
-            if final_status == 503 {
-                assert_eq!(error.retries(), 1);
-                assert!(error.retry_exhausted());
-            }
-            let stats = stream.stats();
-            assert_eq!(stats.unknown_rows, 1);
-            assert_eq!(stats.failed_rows, 0);
-            assert_eq!(stats.retries, 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn unknown_retry_budget_preserves_one_unresolved_logical_batch() {
-        for max_retries in [0, 1] {
-            for disconnect in [false, true] {
-                let server = MockServer::start(move |index, request| {
-                    if disconnect {
-                        MockResponse::committed(request).without_ack()
-                    } else {
-                        MockResponse::json(
-                            503,
-                            format!(
-                                r#"{{
-                            "message":"still ambiguous",
-                            "status":"unknown",
-                            "request_id":"attempt-{index}"
-                        }}"#
-                            ),
-                        )
-                    }
-                });
-                let stream = server
-                    .client()
-                    .table("events")
-                    .append_stream()
-                    .retry_unknown(true)
-                    .max_retries(max_retries)
-                    .initial_backoff(Duration::ZERO)
-                    .build()
-                    .unwrap();
-                stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-
-                let error = stream.shutdown().await.unwrap_err();
-
-                assert_eq!(server.requests().len(), max_retries + 1);
-                assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-                assert_eq!(error.retries(), max_retries);
-                assert!(error.retry_exhausted());
-                if disconnect {
-                    assert!(
-                        std::error::Error::source(&error)
-                            .unwrap()
-                            .is::<reqwest::Error>()
-                    );
-                } else {
-                    assert_eq!(
-                        error.http_status(),
-                        Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
-                    );
-                    assert_eq!(
-                        error.request_id(),
-                        Some(format!("attempt-{max_retries}").as_str())
-                    );
-                }
-                let stats = stream.stats();
-                assert_eq!(stats.accepted_rows, 1);
-                assert_eq!(stats.unknown_rows, 1);
-                assert_eq!(stats.failed_rows, 0);
-                assert_eq!(stats.retries, max_retries as u64);
-                assert_eq!(stats.pending_rows, 0);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn explicit_replay_retries_transient_unknown_responses() {
-        for status in [200, 204, 408, 429, 500, 503] {
-            let server = MockServer::start(move |index, request| match index {
-                0 => MockResponse::json(status, "invalid response"),
-                1 => MockResponse::committed(request),
-                _ => panic!("unexpected retry request {index}"),
-            });
-            let stream = server
-                .client()
-                .table("events")
-                .append_stream()
-                .retry_unknown(true)
-                .initial_backoff(Duration::ZERO)
-                .build()
-                .unwrap();
-            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-
-            let report = stream.shutdown().await.unwrap();
-
-            assert_eq!(server.requests().len(), 2, "HTTP {status}");
-            assert_eq!(report.committed_rows, 1);
-            assert_eq!(report.retries, 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn default_delivery_does_not_retry_permanent_unknown_responses() {
-        for status in [400, 401, 403, 404, 413, 422] {
-            let server = MockServer::start(move |_, _| {
-                MockResponse::json(status, r#"{"message":"permanent failure"}"#)
-            });
-            let stream = server
-                .client()
-                .table("events")
-                .append_stream()
-                .build()
-                .unwrap();
-            stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-
-            let error = stream.shutdown().await.unwrap_err();
-
-            assert_eq!(server.requests().len(), 1, "HTTP {status}");
-            assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-            assert_eq!(error.http_status().unwrap().as_u16(), status);
-            assert_eq!(stream.stats().retries, 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn continue_barrier_settles_mixed_results_after_unknown_retry() {
-        let ambiguous_attempts = AtomicUsize::new(0);
-        let server = MockServer::start(move |_, request| {
-            let row: serde_json::Value = serde_json::from_str(&request.body).unwrap();
-            match row["id"].as_u64().unwrap() {
-                0 => MockResponse::committed(request),
-                1 if ambiguous_attempts.fetch_add(1, Ordering::AcqRel) == 0 => MockResponse::json(
-                    503,
-                    r#"{"message":"ambiguous","code":"ingest_failure","details":{"status":"unknown"}}"#,
-                ),
-                _ => MockResponse::json(
-                    422,
-                    r#"{"message":"invalid","code":"ingest_failure","details":{"status":"rejected"}}"#,
-                ),
-            }
-        });
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .retry_unknown(true)
-            .failure_policy(AppendFailurePolicy::Continue)
-            .circuit_breaker(None)
-            .max_batch_rows(1)
-            .initial_backoff(Duration::ZERO)
-            .build()
-            .unwrap();
-        stream
-            .send_all((0..3).map(|id| serde_json::json!({"id": id})))
-            .await
-            .unwrap();
-
-        let report = stream.flush().await.unwrap();
-
-        assert_eq!(server.requests().len(), 4);
-        assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
-        assert_eq!(report.accepted_rows, 3);
-        assert_eq!(report.committed_rows, 1);
-        assert_eq!(report.failed_rows, 1);
-        assert_eq!(report.unknown_rows, 1);
-        assert_eq!(report.retries, 1);
-        assert_eq!(
-            report.accepted_rows,
-            report.committed_rows + report.failed_rows + report.unknown_rows
-        );
-        assert_eq!(stream.stats().pending_rows, 0);
-        assert_eq!(stream.shutdown().await.unwrap().accepted_rows, 0);
-        assert_eq!(stream.stats().committed_rows, 1);
-    }
-
-    #[tokio::test]
-    async fn continue_mode_retries_temporary_rejections_and_unknown_outcomes() {
-        let server = MockServer::start(|index, request| match index {
-            0 => MockResponse::json(
-                503,
-                r#"{"message":"busy","code":"ingest_failure","details":{"status":"rejected"}}"#,
-            ),
-            1 => MockResponse::committed(request),
-            2 => MockResponse::json(
-                503,
-                r#"{"message":"ambiguous","code":"ingest_failure","details":{"status":"unknown"}}"#,
-            ),
-            3 | 4 => MockResponse::json(
-                422,
-                r#"{"message":"bad row","code":"ingest_failure","details":{"status":"rejected"}}"#,
-            ),
-            _ => panic!("unexpected retry request {index}"),
-        });
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .retry_unknown(true)
-            .failure_policy(AppendFailurePolicy::Continue)
-            .circuit_breaker(None)
-            .target_batch_bytes(1)
-            .max_concurrent_batches(1)
-            .max_retries(4)
-            .initial_backoff(Duration::ZERO)
-            .max_backoff(Duration::ZERO)
-            .build()
-            .unwrap();
-
-        stream
-            .send_all((0..3).map(|id| serde_json::json!({"id": id})))
-            .await
-            .unwrap();
-        let report = stream.shutdown().await.unwrap();
-
-        let requests = server.requests();
-        assert_eq!(requests.len(), 5);
-        assert_eq!(requests[0].body, requests[1].body);
-        assert_eq!(requests[2].body, requests[3].body);
-        assert_ne!(requests[3].body, requests[4].body);
-        assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
-        assert_eq!(report.accepted_rows, 3);
-        assert_eq!(report.committed_rows, 1);
-        assert_eq!(report.failed_rows, 1);
-        assert_eq!(report.unknown_rows, 1);
-        assert_eq!(report.committed_batches, 1);
-        assert_eq!(report.failed_batches, 1);
-        assert_eq!(report.unknown_batches, 1);
-        assert_eq!(report.retries, 2);
-        assert_eq!(
-            report.accepted_rows,
-            report.committed_rows + report.failed_rows + report.unknown_rows
-        );
-    }
-
-    #[tokio::test]
-    async fn zero_retry_budget_reports_unknown_timeout() {
-        let server = MockServer::start(|_, request| {
-            MockResponse::committed(request).with_delay(Duration::from_millis(100))
-        });
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .failure_policy(AppendFailurePolicy::Continue)
-            .circuit_breaker(None)
-            .target_batch_bytes(1)
-            .max_retries(0)
-            .attempt_timeout(Duration::from_millis(10))
-            .build()
-            .unwrap();
-
-        stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-        let report = stream.shutdown().await.unwrap();
-
-        assert_eq!(server.requests().len(), 1);
-        assert_eq!(report.outcome, AppendDeliveryOutcome::Unknown);
-        assert_eq!(report.unknown_rows, 1);
-        assert_eq!(report.retries, 0);
-    }
-
-    #[tokio::test]
-    async fn write_timeout_bounds_direct_append_including_response_body() {
-        for body_delay in [false, true] {
-            let server = MockServer::start(move |_, _| {
-                let response =
-                    MockResponse::json(200, r#"{"status":"committed","num_rows_inserted":1}"#);
-                if body_delay {
-                    response.with_body_delay(Duration::from_millis(150))
-                } else {
-                    response.with_delay(Duration::from_millis(150))
-                }
-            });
-            let client = server.client_with_write_timeout(Duration::from_millis(50));
-            let error = client
-                .table("events")
-                .append("{\"id\":1}".to_string())
-                .await
-                .unwrap_err();
-            assert!(!error.is_retryable());
-            assert_write_timeout_contract(&error);
-            let source = std::error::Error::source(&error).unwrap();
-            assert!(source.is::<tokio::time::error::Elapsed>());
-            assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-            if body_delay {
-                assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
-            }
-            assert_eq!(server.requests().len(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn append_stream_policies_inherit_the_client_write_timeout() {
-        for policy in [AppendFailurePolicy::Stop, AppendFailurePolicy::Continue] {
-            let server = MockServer::start(|_, request| {
-                MockResponse::committed(request).with_delay(Duration::from_millis(150))
-            });
-            let stream = server
-                .client_with_write_timeout(Duration::from_millis(50))
-                .table("events")
-                .append_stream()
-                .failure_policy(policy)
-                .build()
-                .unwrap();
-            stream.send(&serde_json::json!({"id":1})).await.unwrap();
-            let result = stream.shutdown().await;
-            if policy == AppendFailurePolicy::Continue {
-                let report = result.unwrap();
-                assert_eq!(report.outcome, AppendDeliveryOutcome::Unknown);
-            } else {
-                let error = result.unwrap_err();
-                assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-                assert_write_timeout_contract(&error);
-                assert_write_timeout_contract(&stream.flush().await.unwrap_err());
-            }
-            assert_eq!(stream.stats().unknown_rows, 1);
-            assert_write_timeout_contract(&stream.stats().last_failure.unwrap().error);
-            assert_eq!(stream.stats().retries, 0);
-            assert_eq!(server.requests().len(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn attempt_timeout_can_exceed_the_client_write_timeout() {
-        let server = MockServer::start(|_, request| {
-            MockResponse::committed(request).with_delay(Duration::from_millis(50))
-        });
-        let stream = server
-            .client_with_write_timeout(Duration::from_millis(10))
-            .table("events")
-            .append_stream()
-            .attempt_timeout(Duration::from_secs(1))
-            .build()
-            .unwrap();
-        stream.send(&serde_json::json!({"id":1})).await.unwrap();
-        assert_eq!(stream.shutdown().await.unwrap().committed_rows, 1);
-    }
-
-    #[tokio::test]
-    async fn write_timeout_preserves_a_shorter_custom_http_timeout() {
-        for (body_delay, compressed) in [(false, false), (true, false), (true, true)] {
-            let server = MockServer::start(move |_, _| {
-                let mut response =
-                    MockResponse::json(200, r#"{"status":"committed","num_rows_inserted":1}"#);
-                if compressed {
-                    response.body = zstd::stream::encode_all(response.body.as_slice(), 1).unwrap();
-                    response = response.with_header("Content-Encoding", "zstd");
-                }
-                if body_delay {
-                    response.with_body_delay(Duration::from_millis(150))
-                } else {
-                    response.with_delay(Duration::from_millis(150))
-                }
-            });
-            let http = reqwest::Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_millis(50))
-                .build()
-                .unwrap();
-            let client = Client::builder(&server.endpoint)
-                .http_client(http)
-                .write_timeout(Duration::from_secs(1))
-                .build()
-                .unwrap();
-            let error = client
-                .table("events")
-                .append("{\"id\":1}".to_string())
-                .await
-                .unwrap_err();
-            let transport_error = std::error::Error::source(&error)
-                .and_then(|source| source.downcast_ref::<reqwest::Error>())
-                .expect("the native transport cause must remain available");
-            assert!(transport_error.is_timeout());
-            assert_write_timeout_contract(&error);
-            if body_delay {
-                assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
-            }
-            assert_eq!(server.requests().len(), 1);
-        }
-    }
-
-    fn assert_write_timeout_contract(error: &crate::Error) {
-        let details = error.write_details().unwrap();
-        assert_eq!(details.reason, crate::WriteErrorReason::Timeout);
-        assert_eq!(details.outcome, AppendState::Unknown);
-        assert!(!error.is_retryable());
-        assert_eq!(
-            serde_json::to_value(details).unwrap(),
-            serde_json::json!({"reason":"timeout","outcome":"unknown"})
-        );
-    }
-
-    #[tokio::test]
-    async fn write_timeout_starts_after_materializing_the_request() {
-        struct SlowPayload;
-        impl From<SlowPayload> for String {
-            fn from(_: SlowPayload) -> Self {
-                thread::sleep(Duration::from_millis(100));
-                "{\"id\":1}".to_string()
-            }
-        }
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let result = server
-            .client_with_write_timeout(Duration::from_millis(50))
-            .append_rows("scopedb", "public", "events", SlowPayload)
-            .await
-            .unwrap();
-        assert_eq!(result.num_rows_inserted, 1);
-        assert_eq!(server.requests().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn server_timeout_rejection_remains_safely_retryable() {
-        let server = MockServer::start(|_, _| {
-            MockResponse::json(
-                408,
-                r#"{"message":"admission timed out","retryable":true,"code":"ingest_failure","details":{"status":"rejected"}}"#,
-            )
-        });
-        let error = server
-            .client()
-            .table("events")
-            .append("{\"id\":1}".to_string())
-            .await
-            .unwrap_err();
-        assert!(error.write_details().is_none());
-        assert_eq!(
-            error.append_details().unwrap().status,
-            AppendState::Rejected
-        );
-        assert!(error.is_retryable());
-    }
-
-    #[tokio::test]
-    async fn connection_loss_is_not_replayed_when_append_retries_are_disabled() {
-        for disconnect in [MockDisconnect::BeforeHeaders, MockDisconnect::DuringBody] {
-            let server = MockServer::start(move |_, request| {
-                MockResponse::committed(request).with_disconnect(disconnect)
-            });
-            let client = server.client();
-            let direct = client.table("events").append(r#"{"id":1}"#).await;
-            let stream = client
-                .table("events")
-                .append_stream()
-                .max_retries(0)
-                .build()
-                .unwrap();
-            stream.send(&serde_json::json!({"id":1})).await.unwrap();
-            for error in [direct.unwrap_err(), stream.shutdown().await.unwrap_err()] {
-                assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-                assert!(!error.is_retryable());
-                if matches!(disconnect, MockDisconnect::DuringBody) {
-                    assert_eq!(error.http_status(), Some(reqwest::StatusCode::OK));
-                }
-            }
-            assert_eq!(server.requests().len(), 2);
-        }
-    }
-
-    #[tokio::test]
-    async fn stop_policy_closes_after_a_rejected_batch() {
-        let server = MockServer::start(|_, _| {
-            MockResponse::json(
-                422,
-                r#"{"message":"invalid","code":"ingest_failure","details":{"status":"rejected"}}"#,
-            )
-            .with_delay(Duration::from_millis(20))
-        });
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .target_batch_bytes(1)
-            .max_concurrent_batches(1)
-            .build()
-            .unwrap();
-        stream
-            .send_all((0..2).map(|id| serde_json::json!({"id": id})))
-            .await
-            .unwrap();
-
-        let error = stream.shutdown().await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Incomplete);
-        assert_eq!(
-            error.append_details().map(|details| details.status),
-            Some(AppendState::Rejected)
-        );
-        let stats = stream.stats();
-        assert_eq!(stats.state, AppendStreamState::Failed);
-        assert_eq!(stats.accepted_rows, 2);
-        assert_eq!(stats.failed_rows, 2);
-        assert_eq!(stats.pending_rows, 0);
-        let report = stats.last_report.unwrap();
-        assert_eq!(report.accepted_rows, 2);
-        assert_eq!(report.failed_rows, 2);
-        assert!(matches!(
-            stream.try_send(&serde_json::json!({"id": 3})),
-            Err(AppendTrySendError::Closed)
-        ));
-    }
-
-    #[tokio::test]
-    async fn failed_barriers_report_the_time_spent_waiting() {
-        for shutdown in [false, true] {
-            let (arrived_tx, arrived_rx) = oneshot::channel();
-            let arrived_tx = Mutex::new(Some(arrived_tx));
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            let release_rx = Mutex::new(release_rx);
-            let server = MockServer::start(move |_, _| {
-                lock(&arrived_tx).take().unwrap().send(()).unwrap();
-                lock(&release_rx)
-                    .recv_timeout(Duration::from_secs(3))
-                    .unwrap();
-                MockResponse::json(
-                    422,
-                    r#"{"message":"invalid","code":"invalid_schema","details":{"status":"rejected"}}"#,
-                )
-            });
-            let stream = server
-                .client()
-                .table("events")
-                .append_stream()
-                .flush_interval(Duration::from_secs(60))
-                .build()
-                .unwrap();
-            stream.send(&serde_json::json!({"id":1})).await.unwrap();
-            let mut barrier = Box::pin(async {
-                if shutdown {
-                    stream.shutdown().await
-                } else {
-                    stream.flush().await
-                }
-            });
-            tokio::select! {
-                _ = &mut barrier => panic!("response must remain gated"),
-                arrived = arrived_rx => arrived.unwrap(),
-            }
-            let waiting = Instant::now();
-            // Measure an actual wait after the barrier has dispatched its batch.
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            let minimum_duration = waiting.elapsed();
-            release_tx.send(()).unwrap();
-            assert!(barrier.await.is_err());
-            let report = stream.stats().last_report.unwrap();
-            assert_eq!(report.accepted_rows, 1);
-            assert_eq!(report.failed_rows, 1);
-            assert!(report.duration >= minimum_duration, "{report:?}");
-            assert_eq!(server.requests().len(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn strict_terminal_waits_for_every_in_flight_outcome() {
-        use std::future::Future;
-        use std::task::Poll;
-        let both_started = std::sync::Barrier::new(2);
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let release_rx = Mutex::new(release_rx);
-        let server = MockServer::start(move |index, _| {
-            both_started.wait();
-            if index == 0 {
-                MockResponse::json(
-                    422,
-                    r#"{"message":"invalid","code":"invalid_schema","details":{"status":"rejected"}}"#,
-                )
-            } else {
-                lock(&release_rx)
-                    .recv_timeout(Duration::from_secs(3))
-                    .unwrap();
-                MockResponse::json(
-                    503,
-                    r#"{"message":"ambiguous","code":"ingest_failure","details":{"status":"unknown"}}"#,
-                )
-            }
-        });
-        let (failed_tx, failed_rx) = oneshot::channel();
-        let failed_tx = Mutex::new(Some(failed_tx));
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .max_batch_rows(1)
-            .max_concurrent_batches(2)
-            .max_retries(0)
-            .on_batch_failure(move |_| {
-                if let Some(tx) = lock(&failed_tx).take() {
-                    let _ = tx.send(());
-                }
-            })
-            .build()
-            .unwrap();
-        stream
-            .send_all((0..2).map(|id| serde_json::json!({"id":id})))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), failed_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        let mut shutdown = Box::pin(stream.shutdown());
-        std::future::poll_fn(|cx| {
-            assert!(shutdown.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        release_tx.send(()).unwrap();
-        let error = shutdown.await.unwrap_err();
-        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
-        let stats = stream.stats();
-        assert_eq!(stats.failed_rows, 1);
-        assert_eq!(stats.unknown_rows, 1);
-        assert_eq!(stats.pending_rows, 0);
-        let report = stats.last_report.unwrap();
-        assert_eq!(report.accepted_rows, 2);
-        assert_eq!(report.failed_rows, 1);
-        assert_eq!(report.unknown_rows, 1);
-    }
-
-    #[tokio::test]
-    async fn concurrent_flush_and_shutdown_both_settle() {
-        let server = MockServer::start(|_, request| {
-            MockResponse::committed(request).with_delay(Duration::from_millis(5))
-        });
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .build()
-            .unwrap();
-        stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-
-        let (flush, shutdown) = tokio::join!(stream.flush(), stream.shutdown());
-        assert!(flush.is_ok(), "flush failed: {flush:?}");
-        assert!(shutdown.is_ok(), "shutdown failed: {shutdown:?}");
-        assert_eq!(stream.stats().state, AppendStreamState::Closed);
-    }
-
-    #[tokio::test]
-    async fn shutdown_is_idempotent_across_clones() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let stream = server
-            .client()
-            .table("events")
-            .append_stream()
-            .build()
-            .unwrap();
-        let clone = stream.clone();
-        stream.send(&serde_json::json!({"id": 1})).await.unwrap();
-
-        let (first, second) = tokio::join!(stream.shutdown(), clone.shutdown());
-        assert_eq!(first.unwrap(), second.unwrap());
-        assert_eq!(server.requests().len(), 1);
-        assert!(matches!(
-            stream.try_send(&serde_json::json!({"id": 2})),
-            Err(AppendTrySendError::Closed)
-        ));
-    }
-
-    #[tokio::test]
-    async fn try_send_rejects_rows_exceeding_buffer_capacity() {
-        let client = Client::new("http://127.0.0.1:1", reqwest::Client::new()).unwrap();
-        let stream = client
-            .table("events")
-            .append_stream()
-            .failure_policy(AppendFailurePolicy::Continue)
-            .max_buffered_bytes(1)
-            .build()
-            .unwrap();
-
-        assert!(matches!(
-            stream.try_send(&serde_json::json!({"id": 1})),
-            Err(AppendTrySendError::RecordTooLarge { bytes: 9, limit: 1 })
-        ));
-        let report = stream.shutdown().await.unwrap();
-        assert_eq!(report.outcome, AppendDeliveryOutcome::Failed);
-        assert_eq!(report.accepted_rows, 0);
-        assert_eq!(report.dropped_rows, 1);
-        assert_eq!(stream.stats().dropped_by_reason.buffer_full, 0);
-        assert_eq!(stream.stats().dropped_by_reason.record_too_large, 1);
-    }
 }
