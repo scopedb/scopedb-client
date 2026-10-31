@@ -275,23 +275,14 @@ fn parse_cell(value: Option<&str>, data_type: DataType) -> Result<Value, Error> 
 
     match data_type {
         DataType::Int => i64::from_str(value).map(Value::Int).map_err(|err| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("failed to parse int value: {err}"),
-            )
+            Error::new(ErrorKind::Unexpected, "failed to parse int value").set_source(err)
         }),
         DataType::UInt => u64::from_str(value).map(Value::UInt).map_err(|err| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("failed to parse uint value: {err}"),
-            )
+            Error::new(ErrorKind::Unexpected, "failed to parse uint value").set_source(err)
         }),
         DataType::Float => {
             let parsed = f64::from_str(value).map_err(|err| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    format!("failed to parse float value: {err}"),
-                )
+                Error::new(ErrorKind::Unexpected, "failed to parse float value").set_source(err)
             })?;
             if !parsed.is_finite() && !matches!(value, "NaN" | "inf" | "-inf") {
                 return Err(Error::new(
@@ -304,24 +295,15 @@ fn parse_cell(value: Option<&str>, data_type: DataType) -> Result<Value, Error> 
         DataType::Timestamp => jiff::Timestamp::from_str(value)
             .map(Value::Timestamp)
             .map_err(|err| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    format!("failed to parse timestamp value: {err}"),
-                )
+                Error::new(ErrorKind::Unexpected, "failed to parse timestamp value").set_source(err)
             }),
         DataType::Interval => jiff::SignedDuration::from_str(value)
             .map(Value::Interval)
             .map_err(|err| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    format!("failed to parse interval value: {err}"),
-                )
+                Error::new(ErrorKind::Unexpected, "failed to parse interval value").set_source(err)
             }),
         DataType::Boolean => bool::from_str(value).map(Value::Boolean).map_err(|err| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("failed to parse boolean value: {err}"),
-            )
+            Error::new(ErrorKind::Unexpected, "failed to parse boolean value").set_source(err)
         }),
         DataType::String => Ok(Value::String(value.to_string())),
         DataType::Binary => Ok(Value::Binary(value.to_string())),
@@ -612,6 +594,16 @@ mod tests {
             ] {
                 let diagnostic = error.to_string();
                 assert!(diagnostic.contains("row: 0") && diagnostic.contains("column: value"));
+                if matches!(kind, DataType::Int | DataType::UInt) {
+                    let cause = std::error::Error::source(&error).unwrap();
+                    assert!(cause.is::<std::num::ParseIntError>());
+                    let cloned = error.clone();
+                    assert!(
+                        std::error::Error::source(&cloned)
+                            .unwrap()
+                            .is::<std::num::ParseIntError>()
+                    );
+                }
             }
         }
     }

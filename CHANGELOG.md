@@ -16,6 +16,14 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 * Preserve unreported stream settlement when the background worker terminates unexpectedly. Failed barriers return a stable terminal report to concurrent waiters, with unresolved rows classified as unknown.
 * Add reusable `AppendWriter` instances through `Table::append_writer()` with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix. `AppendWriteReport` describes one write call and `AppendRequestResult` identifies each request within it.
 
+### Bug Fixes
+
+* Reject attempts to replace an existing error source in release builds, matching the documented `Error::set_source()` panic contract.
+
+### Improvements
+
+* Preserve native result-cell parse errors through `std::error::Error::source()` while retaining row and column diagnostics.
+
 ## v0.4.2 (2026-10-27)
 
 ### Bug Fixes

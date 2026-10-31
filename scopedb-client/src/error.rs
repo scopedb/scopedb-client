@@ -343,13 +343,13 @@ impl Error {
         self
     }
 
-    /// Set source for error.
+    /// Sets the underlying cause without replacing an existing source.
     ///
-    /// # Notes
+    /// # Panics
     ///
-    /// If the source has been set, we will raise a panic here.
+    /// Panics if the source has already been set.
     pub fn set_source(mut self, src: impl Into<anyhow::Error>) -> Self {
-        debug_assert!(self.source.is_none(), "the source error has been set");
+        assert!(self.source.is_none(), "the source error has been set");
 
         self.source = Some(Arc::new(src.into()));
         self
@@ -561,5 +561,18 @@ impl Error {
     fn http_metadata_mut(&mut self) -> &mut HttpErrorMetadata {
         self.http_metadata
             .get_or_insert_with(|| Box::new(HttpErrorMetadata::default()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "the source error has been set")]
+    fn replacing_source_is_rejected() {
+        Error::new(ErrorKind::Unexpected, "operation failed")
+            .set_source(std::io::Error::other("original cause"))
+            .set_source(std::io::Error::other("replacement"));
     }
 }
