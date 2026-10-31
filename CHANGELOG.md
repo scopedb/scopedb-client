@@ -6,18 +6,18 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### Breaking Changes
 
-* Replace operation-specific `ErrorKind` variants with actionable failure categories and a separate `ErrorOperation`. Use `is_retryable()` for the current operation and inspect typed commit and progress data before replaying writes. Error construction, context mutation, and retry-state setters are internal; application-specific failures belong to application error types. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).
+* Replace operation-specific `ErrorKind` variants with failure categories and a separate `ErrorOperation`. Use `is_retryable()` for the failed operation and inspect typed commit and progress data before replaying writes. Error construction, context mutation, and retry-state setters are internal; application-specific failures belong to application error types. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).
 
 ### New Features
 
 * Expose `Error::catalog_outcome()` with `CatalogMutationOutcome` to distinguish known rejections from possibly committed mutations without parsing error codes. Gateway and timeout responses retain an unknown outcome even when they include a structured error code.
 * Allocate a statement ID before submission and retain it on submission failures, including lost or malformed responses. Use `Client::statement_handle(error.statement_id().unwrap())` to inspect the existing execution; `with_statement_id()` can still supply an application-owned ID.
-* Expose partial admission, finite-write reports, and failed delivery intervals through typed accessors on `Error`, preserving them when SDK operations compose through `?`. Preserve unreported stream settlement when the background worker terminates unexpectedly. Failed barriers return a stable terminal report to concurrent waiters, with unresolved rows classified as unknown.
-* Add reusable `AppendWriter` instances through `Table::append_writer()` with bounded concurrent requests, existing append retry policies, per-request input ranges, and complete partial-failure reports including the unsubmitted input suffix. `AppendWriteReport` describes one write call and `AppendRequestResult` identifies each request within it.
+* Expose partial admission, finite-write reports, and failed delivery intervals through typed accessors on `Error`, preserving them when SDK operations compose through `?`. Failed stream barriers return a shared terminal report to concurrent waiters and classify unresolved rows as unknown.
+* Add reusable `AppendWriter` instances through `Table::append_writer()` with bounded concurrent requests, existing append retry policies, per-request input ranges, and partial-failure reports including the unsubmitted input suffix. `AppendWriteReport` describes one write call and `AppendRequestResult` identifies each request within it.
 
 ### Improvements
 
-* Keep transient failures, retry exhaustion, and unknown delivery outcomes separate when deciding retries and circuit availability. Preserve raw server codes without synthesizing codes for client-side uncertainty; use typed Catalog outcomes to reconcile failed mutations.
+* Keep transient failures, retry exhaustion, and unknown delivery outcomes separate when deciding retries and circuit availability, and preserve raw server codes without synthesizing client-side codes.
 * Preserve native result-cell parse errors through `std::error::Error::source()` while retaining row and column diagnostics.
 
 ## v0.4.2 (2026-10-27)

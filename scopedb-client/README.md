@@ -18,12 +18,10 @@ cargo add tokio --features macros,rt-multi-thread
 Set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` using the [connection guide](https://www.scopedb.io/docs/guides/connect-to-scopedb). Save this as `src/main.rs` and run `cargo run`:
 
 ```rust,no_run
-use std::error::Error;
-
 use scopedb_client::Client;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = std::env::var("SCOPEDB_ENDPOINT")?;
     let api_key = std::env::var("SCOPEDB_API_KEY")?;
     let client = Client::builder(endpoint)
@@ -65,10 +63,10 @@ println!("Written: {} rows", report.committed_rows);
 | Read query results           | [`ResultSet`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.ResultSet.html)                                      |
 | Track or cancel a query      | [`StatementHandle`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.StatementHandle.html)                          |
 | Read or change table schemas | [`Catalog`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Catalog.html)                                          |
-| Write a finite slice of rows | [`Table::append_writer`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Table.html#method.append_writer)            |
+| Write a finite slice of rows | [`Table::append_writer`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Table.html#method.append_writer)          |
 | Tune batching and retries    | [`AppendStreamBuilder`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.AppendStreamBuilder.html)                  |
 | Write logs or telemetry      | [Continue after a batch fails](https://docs.rs/scopedb-client/latest/scopedb_client/struct.AppendStreamBuilder.html#telemetry) |
 | Set timeouts or HTTP options | [`ClientBuilder`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.ClientBuilder.html)                              |
 | Inspect a failure            | [`Error`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Error.html)                                              |
 
-For complete programs, see the [examples](https://github.com/scopedb/scopedb-client/tree/main/scopedb-client/examples). For ScopeQL syntax, see the [query guide](https://www.scopedb.io/docs/guides/query-events).
+For complete programs, see the [examples](examples/README.md). For ScopeQL syntax, see the [query guide](https://www.scopedb.io/docs/guides/query-events).

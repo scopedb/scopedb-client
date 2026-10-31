@@ -2,11 +2,11 @@
 
 [![Version](https://img.shields.io/crates/v/scopedb-client)](https://crates.io/crates/scopedb-client) [![Docs](https://img.shields.io/badge/docs-scopedb.io-blue)](https://www.scopedb.io/docs/developer/rust) [![CI](https://img.shields.io/github/actions/workflow/status/scopedb/scopedb-client/ci.yml?branch=main&label=CI)](https://github.com/scopedb/scopedb-client/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://www.apache.org/licenses/LICENSE-2.0)
 
-The official async Rust client for [ScopeDB](https://www.scopedb.io). Run ScopeQL queries, browse the catalog, and write rows with bounded concurrent streams. For application writes, start with `Table::append_stream`.
+The official async Rust client for [ScopeDB](https://www.scopedb.io). Run ScopeQL queries, manage the catalog, and append rows with bounded concurrent streams.
 
 ## Runtime support
 
-Requires Rust 1.91.0 or later and a Tokio runtime. Use the SDK in a trusted server-side process and keep API keys out of source control. Applications upgrading from SDK 0.3 should follow [Upgrade from 0.3 to 0.4](scopedb-client/docs/migration-0.4.md).
+Requires Rust 1.91.0 or later and a Tokio runtime. Existing applications can follow [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md) and [Upgrade from 0.3 to 0.4](scopedb-client/docs/migration-0.4.md).
 
 ## Installation
 
@@ -22,12 +22,10 @@ cargo add tokio --features macros,rt-multi-thread
 Set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` using the [connection guide](https://www.scopedb.io/docs/guides/connect-to-scopedb). Save this program as `src/main.rs` and run `cargo run`:
 
 ```rust,no_run
-use std::error::Error;
-
 use scopedb_client::Client;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = std::env::var("SCOPEDB_ENDPOINT")?;
     let api_key = std::env::var("SCOPEDB_API_KEY")?;
     let client = Client::builder(endpoint)
@@ -45,6 +43,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 - [SDK guide](https://www.scopedb.io/docs/developer/rust)
 - [API reference](https://docs.rs/scopedb-client)
 - [Quickstart](scopedb-client/README.md)
+- [Error handling](scopedb-client/docs/errors.md)
+- [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md)
 - [Upgrade from 0.3 to 0.4](scopedb-client/docs/migration-0.4.md)
 - [Examples](scopedb-client/examples/README.md)
 - [HTTP wire reference](scopedb-client/docs/rust-http-api.md)
@@ -83,4 +83,4 @@ To publish, push an annotated `vX.Y.Z` tag on the merged release commit in `main
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+Licensed under the [Apache License, Version 2.0](LICENSE).
