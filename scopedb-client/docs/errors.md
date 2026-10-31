@@ -1,4 +1,3 @@
-
 ## Classify the failure and identify the operation
 
 `Error::kind()` is a stable category for application policy. `Error::operation()` identifies the public SDK operation that failed. A missing table can therefore be `ErrorKind::NotFound` during either `ErrorOperation::Append` or `ErrorOperation::ReadCatalog`. `ErrorKind::Incomplete` means an aggregate operation left input unconfirmed; it does not imply that any particular row committed.
