@@ -37,29 +37,29 @@ use crate::AppendState;
 use crate::Client;
 use crate::Error;
 use crate::ErrorKind;
-use crate::client::MAX_APPEND_BODY_BYTES;
-use crate::client::MAX_APPEND_ROWS;
+use crate::append::AppendBatchRequest;
+use crate::append::AppendOptions;
+use crate::append::append_batch;
+use crate::append::config_error;
+use crate::append::prepare_record;
+use crate::append::prepare_record_for_try_send;
+use crate::append::validate_deadline;
+use crate::append::validate_positive;
 
-const DEFAULT_BATCH_BYTES: usize = 4 * 1024 * 1024;
-const DEFAULT_MAX_BATCH_ROWS: usize = MAX_APPEND_ROWS;
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
-const DEFAULT_MAX_IN_FLIGHT_REQUESTS: usize = 4;
 const DEFAULT_MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
-const DEFAULT_MAX_RETRIES: usize = 8;
-const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
-const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD: usize = 5;
 const DEFAULT_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// Determines what an append stream does after one HTTP batch fails.
+/// Determines whether to stop scheduling rows after one HTTP batch fails.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AppendFailurePolicy {
-    /// Stop accepting rows and fail the stream's delivery barrier.
+    /// Stop scheduling new batches after observing a failure.
     #[default]
     Stop,
-    /// Record the loss in the delivery report and continue with later batches.
+    /// Continue scheduling later batches, retaining every failure in the report.
     Continue,
 }
 
@@ -254,14 +254,6 @@ impl StdError for AppendTrySendError {
 
 type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 
-#[derive(Debug, Clone, Copy)]
-struct RetryConfig {
-    max_retries: usize,
-    retry_unknown: bool,
-    initial_backoff: Duration,
-    max_backoff: Duration,
-}
-
 /// Configures a bounded, concurrent table append stream.
 ///
 /// Retries temporary rejections by default. Replaying unknown outcomes requires
@@ -301,17 +293,13 @@ pub struct AppendStreamBuilder {
     database: String,
     schema: String,
     table: String,
-    batch_bytes: usize,
-    max_batch_rows: usize,
     flush_interval: Duration,
     channel_capacity: usize,
     max_pending_bytes: usize,
-    max_in_flight_requests: usize,
-    retry: RetryConfig,
     failure_policy: AppendFailurePolicy,
-    attempt_timeout: Option<Duration>,
     circuit_breaker: Option<AppendCircuitBreakerOptions>,
     batch_failure_listeners: Vec<BatchFailureListener>,
+    options: AppendOptions,
 }
 
 impl AppendStreamBuilder {
@@ -321,20 +309,11 @@ impl AppendStreamBuilder {
             database,
             schema,
             table,
-            batch_bytes: DEFAULT_BATCH_BYTES,
-            max_batch_rows: DEFAULT_MAX_BATCH_ROWS,
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
             max_pending_bytes: DEFAULT_MAX_PENDING_BYTES,
-            max_in_flight_requests: DEFAULT_MAX_IN_FLIGHT_REQUESTS,
-            retry: RetryConfig {
-                max_retries: DEFAULT_MAX_RETRIES,
-                retry_unknown: false,
-                initial_backoff: DEFAULT_INITIAL_BACKOFF,
-                max_backoff: DEFAULT_MAX_BACKOFF,
-            },
+            options: AppendOptions::default(),
             failure_policy: AppendFailurePolicy::Stop,
-            attempt_timeout: None,
             circuit_breaker: Some(AppendCircuitBreakerOptions::default()),
             batch_failure_listeners: Vec::new(),
         }
@@ -349,13 +328,13 @@ impl AppendStreamBuilder {
     /// Sets the target NDJSON payload size (default 4 MiB, maximum 8 MiB).
     /// One row may exceed this target up to 8 MiB.
     pub fn target_batch_bytes(mut self, target_batch_bytes: usize) -> Self {
-        self.batch_bytes = target_batch_bytes;
+        self.options.batch_bytes = target_batch_bytes;
         self
     }
 
     /// Sets the maximum rows in one HTTP batch, up to the 200,000-row protocol limit.
     pub fn max_batch_rows(mut self, max_batch_rows: usize) -> Self {
-        self.max_batch_rows = max_batch_rows;
+        self.options.max_batch_rows = max_batch_rows;
         self
     }
 
@@ -378,29 +357,29 @@ impl AppendStreamBuilder {
 
     /// Sets the maximum number of append batches sent concurrently per stream (default 4).
     pub fn max_concurrent_batches(mut self, max_concurrent_batches: usize) -> Self {
-        self.max_in_flight_requests = max_concurrent_batches;
+        self.options.max_in_flight_requests = max_concurrent_batches;
         self
     }
 
     pub fn max_retries(mut self, max_retries: usize) -> Self {
-        self.retry.max_retries = max_retries;
+        self.options.retry.max_retries = max_retries;
         self
     }
 
     /// Opts into replaying transient unknown outcomes. This can duplicate rows.
     /// Client timeouts are never replayed automatically, even when enabled.
     pub fn retry_unknown(mut self, enabled: bool) -> Self {
-        self.retry.retry_unknown = enabled;
+        self.options.retry.retry_unknown = enabled;
         self
     }
 
     pub fn initial_backoff(mut self, initial_backoff: Duration) -> Self {
-        self.retry.initial_backoff = initial_backoff;
+        self.options.retry.initial_backoff = initial_backoff;
         self
     }
 
     pub fn max_backoff(mut self, max_backoff: Duration) -> Self {
-        self.retry.max_backoff = max_backoff;
+        self.options.retry.max_backoff = max_backoff;
         self
     }
 
@@ -408,7 +387,7 @@ impl AppendStreamBuilder {
     /// A timeout has an unknown commit outcome. By default the client uses 30 seconds.
     /// The duration must be finite and nonzero; this deadline cannot be disabled.
     pub fn attempt_timeout(mut self, attempt_timeout: Duration) -> Self {
-        self.attempt_timeout = Some(attempt_timeout);
+        self.options.attempt_timeout = Some(attempt_timeout);
         self
     }
 
@@ -444,15 +423,11 @@ impl AppendStreamBuilder {
             database: self.database,
             schema: self.schema,
             table: self.table,
-            batch_bytes: self.batch_bytes,
-            max_batch_rows: self.max_batch_rows,
+            options: self.options,
             flush_interval: self.flush_interval,
             channel_capacity: self.channel_capacity,
             max_pending_bytes: self.max_pending_bytes,
-            max_in_flight_requests: self.max_in_flight_requests,
-            retry: self.retry,
             failure_policy: self.failure_policy,
-            attempt_timeout: self.attempt_timeout,
             circuit_breaker: self.circuit_breaker,
             batch_failure_listeners: self.batch_failure_listeners,
         }))
@@ -470,22 +445,9 @@ fn validate_builder(builder: &AppendStreamBuilder) -> Result<(), Error> {
         &builder.table,
         "ingest",
     ])?;
-    validate_deadline("initial_backoff", builder.retry.initial_backoff)?;
-    validate_deadline("max_backoff", builder.retry.max_backoff)?;
+    builder.options.validate()?;
     if builder.channel_capacity > Semaphore::MAX_PERMITS {
         return Err(config_error("channel_capacity is too large"));
-    }
-    validate_positive("target_batch_bytes", builder.batch_bytes)?;
-    if builder.batch_bytes > MAX_APPEND_BODY_BYTES {
-        return Err(config_error(format!(
-            "target_batch_bytes must not exceed {MAX_APPEND_BODY_BYTES}"
-        )));
-    }
-    validate_positive("max_batch_rows", builder.max_batch_rows)?;
-    if builder.max_batch_rows > MAX_APPEND_ROWS {
-        return Err(config_error(format!(
-            "max_batch_rows must not exceed {MAX_APPEND_ROWS}"
-        )));
     }
     if builder.flush_interval.is_zero() {
         return Err(config_error("flush_interval must be greater than zero"));
@@ -498,16 +460,6 @@ fn validate_builder(builder: &AppendStreamBuilder) -> Result<(), Error> {
             "max_buffered_bytes must not exceed {}",
             u32::MAX
         )));
-    }
-    validate_positive("max_concurrent_batches", builder.max_in_flight_requests)?;
-    if builder
-        .attempt_timeout
-        .is_some_and(|attempt_timeout| attempt_timeout.is_zero())
-    {
-        return Err(config_error("attempt_timeout must be greater than zero"));
-    }
-    if let Some(attempt_timeout) = builder.attempt_timeout {
-        validate_deadline("attempt_timeout", attempt_timeout)?;
     }
     if let Some(circuit) = builder.circuit_breaker {
         validate_positive(
@@ -524,42 +476,18 @@ fn validate_builder(builder: &AppendStreamBuilder) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_deadline(name: &str, duration: Duration) -> Result<(), Error> {
-    if Instant::now().checked_add(duration).is_none() {
-        Err(config_error(format!("{name} is too large")))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_positive(name: &str, value: usize) -> Result<(), Error> {
-    if value == 0 {
-        Err(config_error(format!("{name} must be greater than zero")))
-    } else {
-        Ok(())
-    }
-}
-
-fn config_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::ConfigInvalid, message)
-}
-
 struct AppendStreamConfig {
     client: Client,
     database: String,
     schema: String,
     table: String,
-    batch_bytes: usize,
-    max_batch_rows: usize,
     flush_interval: Duration,
     channel_capacity: usize,
     max_pending_bytes: usize,
-    max_in_flight_requests: usize,
-    retry: RetryConfig,
     failure_policy: AppendFailurePolicy,
-    attempt_timeout: Option<Duration>,
     circuit_breaker: Option<AppendCircuitBreakerOptions>,
     batch_failure_listeners: Vec<BatchFailureListener>,
+    options: AppendOptions,
 }
 
 enum AppendCommand {
@@ -1104,64 +1032,12 @@ fn error_from_shared(shared: &SharedState) -> Error {
     })
 }
 
-fn prepare_record<T>(row: &T) -> Result<String, Error>
-where
-    T: Serialize + ?Sized,
-{
-    let payload = serde_json::to_string(row).map_err(|err| {
-        Error::new(ErrorKind::Unexpected, "failed to serialize append row").set_source(err)
-    })?;
-    validate_record_payload(&payload).map_err(|err| match err {
-        AppendTrySendError::RecordTooLarge { bytes, limit } => Error::new(
-            ErrorKind::Unexpected,
-            format!("append row is {bytes} bytes, exceeding the {limit}-byte limit"),
-        ),
-        _ => Error::new(
-            ErrorKind::Unexpected,
-            "append row must serialize to a JSON object",
-        ),
-    })?;
-    Ok(payload)
-}
-
-fn prepare_record_for_try_send<T>(row: &T) -> Result<String, AppendTrySendError>
-where
-    T: Serialize + ?Sized,
-{
-    let payload = serde_json::to_string(row).map_err(AppendTrySendError::Serialization)?;
-    validate_record_payload(&payload)?;
-    Ok(payload)
-}
-
-fn validate_record_payload(payload: &str) -> Result<(), AppendTrySendError> {
-    let bytes = payload.len();
-    if bytes > MAX_APPEND_BODY_BYTES {
-        return Err(AppendTrySendError::RecordTooLarge {
-            bytes,
-            limit: MAX_APPEND_BODY_BYTES,
-        });
-    }
-    if !payload.starts_with('{') {
-        return Err(AppendTrySendError::InvalidRecord);
-    }
-    Ok(())
-}
-
 struct BatchOutcome {
     records: Vec<BufferedRecord>,
     batch_bytes: usize,
     result: Result<AppendRowsResult, Error>,
     retries: usize,
     circuit_probe: bool,
-}
-
-struct AppendBatchRequest {
-    client: Client,
-    database: String,
-    schema: String,
-    table: String,
-    retry: RetryConfig,
-    attempt_timeout: Option<Duration>,
 }
 
 struct AppendWorker {
@@ -1294,14 +1170,11 @@ async fn monitor_append_worker(
 impl AppendWorker {
     async fn buffer_record(&mut self, record: BufferedRecord) {
         self.interval.accepted_rows = self.interval.accepted_rows.saturating_add(1);
-        let separator = usize::from(!self.rows.is_empty());
-        if !self.rows.is_empty()
-            && self
-                .current_bytes
-                .saturating_add(separator)
-                .saturating_add(record.payload.len())
-                > self.config.batch_bytes
-        {
+        if self.config.options.would_overflow(
+            self.current_bytes,
+            self.rows.len(),
+            record.payload.len(),
+        ) {
             self.dispatch_buffered().await;
         }
         if self.fatal.is_some() {
@@ -1316,8 +1189,10 @@ impl AppendWorker {
         }
         self.current_bytes = self.current_bytes.saturating_add(record.payload.len());
         self.rows.push(record);
-        if self.current_bytes >= self.config.batch_bytes
-            || self.rows.len() >= self.config.max_batch_rows
+        if self
+            .config
+            .options
+            .is_full(self.current_bytes, self.rows.len())
         {
             self.dispatch_buffered().await;
         }
@@ -1327,7 +1202,7 @@ impl AppendWorker {
         if self.rows.is_empty() || self.fatal.is_some() {
             return;
         }
-        while self.in_flight.len() >= self.config.max_in_flight_requests {
+        while self.in_flight.len() >= self.config.options.max_in_flight_requests {
             let outcome = self.in_flight.join_next().await;
             self.handle_joined(outcome).await;
             if self.fatal.is_some() {
@@ -1352,8 +1227,7 @@ impl AppendWorker {
             database: self.config.database.clone(),
             schema: self.config.schema.clone(),
             table: self.config.table.clone(),
-            retry: self.config.retry,
-            attempt_timeout: self.config.attempt_timeout,
+            options: self.config.options.clone(),
         };
         lock(&self.shared).in_flight_batches += 1;
         self.in_flight.spawn(async move {
@@ -1713,90 +1587,6 @@ impl AppendWorker {
     }
 }
 
-async fn append_batch(
-    request: AppendBatchRequest,
-    payload: String,
-) -> (Result<AppendRowsResult, Error>, usize) {
-    let mut retries = 0usize;
-    let mut backoff = request.retry.initial_backoff.min(request.retry.max_backoff);
-    let mut saw_unknown = false;
-    loop {
-        let result = request
-            .client
-            .append_rows_with_timeout(
-                &request.database,
-                &request.schema,
-                &request.table,
-                payload.clone(),
-                request.attempt_timeout,
-            )
-            .await;
-
-        let error = match result {
-            Ok(result) => return (Ok(result), retries),
-            Err(error) => error,
-        };
-        saw_unknown |= error
-            .append_details()
-            .is_some_and(|details| details.status == AppendState::Unknown);
-        let retryable = append_retryable(&error, request.retry.retry_unknown);
-        if !retryable || retries >= request.retry.max_retries {
-            let error = if retryable {
-                error.with_context("retries", retries).set_persistent()
-            } else {
-                error
-            };
-            return (Err(preserve_unknown_outcome(error, saw_unknown)), retries);
-        }
-        let retry_delay = retry_delay(backoff, &error, request.retry.max_backoff);
-        if !retry_delay.is_zero() {
-            tokio::time::sleep(retry_delay).await;
-        }
-        retries += 1;
-        backoff = next_backoff(backoff, request.retry.max_backoff);
-    }
-}
-
-fn append_retryable(error: &Error, retry_unknown: bool) -> bool {
-    if error.write_details().is_some() || error.server_retryable() == Some(false) {
-        return false;
-    }
-    match error.append_details().map(|details| details.status) {
-        Some(AppendState::Rejected) => error.is_temporary(),
-        Some(AppendState::Unknown) if retry_unknown => error.http_status().is_none_or(|status| {
-            status.is_success()
-                || status == reqwest::StatusCode::REQUEST_TIMEOUT
-                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || status.is_server_error()
-        }),
-        _ => false,
-    }
-}
-
-fn preserve_unknown_outcome(error: Error, saw_unknown: bool) -> Error {
-    if !saw_unknown
-        || error
-            .append_details()
-            .is_some_and(|details| details.status == AppendState::Unknown)
-    {
-        return error;
-    }
-    // A later rejection cannot establish whether an earlier attempt committed.
-    let mut details = error
-        .append_details()
-        .cloned()
-        .unwrap_or(AppendErrorDetails {
-            status: AppendState::Unknown,
-            row_errors: Vec::new(),
-            row_errors_truncated: false,
-        });
-    details.status = AppendState::Unknown;
-    error
-        .with_context("delivery", "an earlier append attempt may have committed")
-        .set_append_details(details)
-        .set_persistent()
-}
-
 fn unknown_append_error<E>(message: impl Into<String>, source: Option<E>) -> Error
 where
     E: Into<anyhow::Error>,
@@ -1811,22 +1601,6 @@ where
         error = error.set_source(source);
     }
     error.set_persistent()
-}
-
-fn next_backoff(current: Duration, max_backoff: Duration) -> Duration {
-    if current.is_zero() {
-        return Duration::ZERO;
-    }
-    current
-        .checked_mul(2)
-        .unwrap_or(max_backoff)
-        .min(max_backoff)
-}
-
-fn retry_delay(backoff: Duration, error: &Error, max_backoff: Duration) -> Duration {
-    backoff
-        .max(error.retry_after().unwrap_or(Duration::ZERO))
-        .min(max_backoff)
 }
 
 fn try_claim_circuit_admission(shared: &mut SharedState) -> bool {
@@ -1953,328 +1727,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::io::Read;
-    use std::io::Write;
-    use std::net::TcpListener;
-    use std::net::TcpStream;
-    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::thread;
 
     use super::*;
-
-    #[derive(Debug, Clone)]
-    struct RecordedRequest {
-        target: String,
-        headers: HashMap<String, String>,
-        body: String,
-    }
-
-    #[derive(Debug, Clone)]
-    struct MockResponse {
-        status: u16,
-        body: Vec<u8>,
-        delay: Duration,
-        headers: Vec<(&'static str, String)>,
-        body_delay: Duration,
-        disconnect: Option<MockDisconnect>,
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    enum MockDisconnect {
-        BeforeHeaders,
-        DuringBody,
-    }
-
-    impl MockResponse {
-        fn json(status: u16, body: impl Into<String>) -> Self {
-            Self {
-                status,
-                body: body.into().into_bytes(),
-                delay: Duration::ZERO,
-                headers: Vec::new(),
-                body_delay: Duration::ZERO,
-                disconnect: None,
-            }
-        }
-
-        fn committed(request: &RecordedRequest) -> Self {
-            let rows = request
-                .body
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .count();
-            Self::json(
-                200,
-                format!(r#"{{"status":"committed","num_rows_inserted":{rows}}}"#),
-            )
-        }
-
-        fn with_delay(mut self, delay: Duration) -> Self {
-            self.delay = delay;
-            self
-        }
-
-        fn with_header(mut self, name: &'static str, value: &str) -> Self {
-            self.headers.push((name, value.to_string()));
-            self
-        }
-
-        fn without_ack(mut self) -> Self {
-            self.disconnect = Some(MockDisconnect::BeforeHeaders);
-            self
-        }
-
-        fn with_body_delay(mut self, delay: Duration) -> Self {
-            self.body_delay = delay;
-            self
-        }
-
-        fn with_disconnect(mut self, disconnect: MockDisconnect) -> Self {
-            self.disconnect = Some(disconnect);
-            self
-        }
-    }
-
-    type Responder = dyn Fn(usize, &RecordedRequest) -> MockResponse + Send + Sync;
-
-    struct MockServer {
-        endpoint: String,
-        requests: Arc<Mutex<Vec<RecordedRequest>>>,
-        max_active: Arc<AtomicUsize>,
-        stop: Arc<AtomicBool>,
-        accept_task: Option<thread::JoinHandle<()>>,
-    }
-
-    impl MockServer {
-        fn start<F>(responder: F) -> Self
-        where
-            F: Fn(usize, &RecordedRequest) -> MockResponse + Send + Sync + 'static,
-        {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let address = listener.local_addr().unwrap();
-            let endpoint = format!("http://{address}");
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let active = Arc::new(AtomicUsize::new(0));
-            let max_active = Arc::new(AtomicUsize::new(0));
-            let stop = Arc::new(AtomicBool::new(false));
-            let responder: Arc<Responder> = Arc::new(responder);
-
-            let accept_task = thread::spawn({
-                let requests = requests.clone();
-                let active = active.clone();
-                let max_active = max_active.clone();
-                let stop = stop.clone();
-                move || {
-                    while !stop.load(Ordering::Acquire) {
-                        match listener.accept() {
-                            Ok((stream, _)) => {
-                                if stop.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                let requests = requests.clone();
-                                let active = active.clone();
-                                let max_active = max_active.clone();
-                                let responder = responder.clone();
-                                thread::spawn(move || {
-                                    handle_connection(
-                                        stream, requests, active, max_active, responder,
-                                    );
-                                });
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                                thread::sleep(Duration::from_millis(1));
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
-            });
-
-            Self {
-                endpoint,
-                requests,
-                max_active,
-                stop,
-                accept_task: Some(accept_task),
-            }
-        }
-
-        fn client(&self) -> Client {
-            let http_client = reqwest::Client::builder().no_proxy().build().unwrap();
-            Client::new(&self.endpoint, http_client).unwrap()
-        }
-
-        fn client_with_write_timeout(&self, timeout: Duration) -> Client {
-            Client::builder(&self.endpoint)
-                .http_client(reqwest::Client::builder().no_proxy().build().unwrap())
-                .write_timeout(timeout)
-                .build()
-                .unwrap()
-        }
-
-        fn requests(&self) -> Vec<RecordedRequest> {
-            lock(&self.requests).clone()
-        }
-
-        fn max_active(&self) -> usize {
-            self.max_active.load(Ordering::Acquire)
-        }
-    }
-
-    impl Drop for MockServer {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::Release);
-            let _ = TcpStream::connect(self.endpoint.trim_start_matches("http://"));
-            if let Some(task) = self.accept_task.take() {
-                let _ = task.join();
-            }
-        }
-    }
-
-    fn handle_connection(
-        mut stream: TcpStream,
-        requests: Arc<Mutex<Vec<RecordedRequest>>>,
-        active: Arc<AtomicUsize>,
-        max_active: Arc<AtomicUsize>,
-        responder: Arc<Responder>,
-    ) {
-        stream.set_nonblocking(false).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let Some(request) = read_request(&mut stream) else {
-            return;
-        };
-        let index = {
-            let mut recorded = lock(&requests);
-            let index = recorded.len();
-            recorded.push(request.clone());
-            index
-        };
-        let now_active = active.fetch_add(1, Ordering::AcqRel) + 1;
-        max_active.fetch_max(now_active, Ordering::AcqRel);
-        let response = responder(index, &request);
-        if !response.delay.is_zero() {
-            thread::sleep(response.delay);
-        }
-        if matches!(response.disconnect, Some(MockDisconnect::BeforeHeaders)) {
-            active.fetch_sub(1, Ordering::AcqRel);
-            return;
-        }
-        let reason = match response.status {
-            200 => "OK",
-            400 => "Bad Request",
-            422 => "Unprocessable Entity",
-            503 => "Service Unavailable",
-            _ => "Test Response",
-        };
-        let headers = response
-            .headers
-            .iter()
-            .map(|(name, value)| format!("{name}: {value}\r\n"))
-            .collect::<String>();
-        let wire = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n",
-            response.status,
-            reason,
-            response.body.len(),
-            headers,
-        );
-        let _ = stream.write_all(wire.as_bytes());
-        let _ = stream.flush();
-        if !response.body_delay.is_zero() {
-            thread::sleep(response.body_delay);
-        }
-        let body = response.body.as_slice();
-        let body = if matches!(response.disconnect, Some(MockDisconnect::DuringBody)) {
-            &body[..body.len().min(1)]
-        } else {
-            body
-        };
-        let _ = stream.write_all(body);
-        let _ = stream.flush();
-        active.fetch_sub(1, Ordering::AcqRel);
-    }
-
-    fn read_request(stream: &mut TcpStream) -> Option<RecordedRequest> {
-        let mut bytes = Vec::new();
-        let mut buffer = [0u8; 4096];
-        let header_end = loop {
-            let read = stream.read(&mut buffer).ok()?;
-            if read == 0 {
-                return None;
-            }
-            bytes.extend_from_slice(&buffer[..read]);
-            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-                break position + 4;
-            }
-        };
-        let headers_text = String::from_utf8(bytes[..header_end].to_vec()).ok()?;
-        let mut lines = headers_text.split("\r\n");
-        let target = lines.next()?.split_whitespace().nth(1)?.to_string();
-        let mut headers = HashMap::new();
-        for line in lines.filter(|line| !line.is_empty()) {
-            let (name, value) = line.split_once(':')?;
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
-        }
-        let content_length = headers
-            .get("content-length")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0);
-        while bytes.len().saturating_sub(header_end) < content_length {
-            let read = stream.read(&mut buffer).ok()?;
-            if read == 0 {
-                return None;
-            }
-            bytes.extend_from_slice(&buffer[..read]);
-        }
-        let wire_body = &bytes[header_end..header_end.saturating_add(content_length)];
-        let decoded_body = match headers.get("content-encoding").map(String::as_str) {
-            Some("zstd") => zstd::stream::decode_all(wire_body).ok()?,
-            None | Some("identity") => wire_body.to_vec(),
-            Some(_) => return None,
-        };
-        let body = String::from_utf8(decoded_body).ok()?;
-        Some(RecordedRequest {
-            target,
-            headers,
-            body,
-        })
-    }
-
-    #[test]
-    fn mock_server_waits_for_delayed_request_bytes() {
-        let server = MockServer::start(|_, request| MockResponse::committed(request));
-        let mut stream = TcpStream::connect(server.endpoint.trim_start_matches("http://")).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
-
-        thread::sleep(Duration::from_millis(20));
-        let body = "{\"id\":1}\n";
-        let request = format!(
-            "POST /rows HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(request.as_bytes()).unwrap();
-
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-        assert_eq!(server.requests().len(), 1);
-    }
-
-    #[test]
-    fn rejects_non_object_rows() {
-        assert!(matches!(
-            prepare_record_for_try_send(&vec![1, 2, 3]),
-            Err(AppendTrySendError::InvalidRecord)
-        ));
-    }
+    use crate::append::RetryConfig;
+    use crate::client::MAX_APPEND_BODY_BYTES;
+    use crate::client::MAX_APPEND_ROWS;
+    use crate::test_support::MockDisconnect;
+    use crate::test_support::MockResponse;
+    use crate::test_support::MockServer;
 
     #[test]
     fn report_outcomes_include_drops_and_unknown_rows() {
@@ -2283,20 +1746,22 @@ mod tests {
             database: "scopedb".to_string(),
             schema: "public".to_string(),
             table: "events".to_string(),
-            batch_bytes: 1024,
-            max_batch_rows: 100,
             flush_interval: Duration::from_secs(1),
             channel_capacity: 1,
             max_pending_bytes: 1024,
-            max_in_flight_requests: 1,
-            retry: RetryConfig {
-                max_retries: 0,
-                retry_unknown: false,
-                initial_backoff: Duration::ZERO,
-                max_backoff: Duration::ZERO,
+            options: AppendOptions {
+                batch_bytes: 1024,
+                max_batch_rows: 100,
+                max_in_flight_requests: 1,
+                retry: RetryConfig {
+                    max_retries: 0,
+                    retry_unknown: false,
+                    initial_backoff: Duration::ZERO,
+                    max_backoff: Duration::ZERO,
+                },
+                attempt_timeout: Some(Duration::from_secs(1)),
             },
             failure_policy: AppendFailurePolicy::Continue,
-            attempt_timeout: Some(Duration::from_secs(1)),
             circuit_breaker: None,
             batch_failure_listeners: Vec::new(),
         };
@@ -2323,31 +1788,6 @@ mod tests {
         let report = worker.take_report(1, Instant::now());
         assert_eq!(report.outcome, AppendDeliveryOutcome::Partial);
         assert_eq!(report.dropped_rows, 1);
-    }
-
-    #[test]
-    fn backoff_is_capped() {
-        assert_eq!(
-            next_backoff(Duration::from_secs(4), Duration::from_secs(5)),
-            Duration::from_secs(5)
-        );
-    }
-
-    #[test]
-    fn retry_after_is_honored_and_capped() {
-        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
-            .set_retry_after(Duration::from_secs(30));
-        assert_eq!(
-            retry_delay(Duration::from_millis(100), &error, Duration::from_secs(5)),
-            Duration::from_secs(5)
-        );
-
-        let error = Error::new(ErrorKind::AppendRowsFailed, "busy")
-            .set_retry_after(Duration::from_millis(200));
-        assert_eq!(
-            retry_delay(Duration::from_secs(1), &error, Duration::from_secs(5)),
-            Duration::from_secs(1)
-        );
     }
 
     #[tokio::test]

@@ -100,6 +100,18 @@ impl Table {
             .await
     }
 
+    /// Builds a reusable writer for finite input slices with per-batch input ranges.
+    pub fn append_batch(&self) -> crate::AppendBatchBuilder {
+        crate::AppendBatchBuilder::new(
+            self.client.clone(),
+            self.database
+                .clone()
+                .unwrap_or_else(|| "scopedb".to_string()),
+            self.schema.clone().unwrap_or_else(|| "public".to_string()),
+            self.table.clone(),
+        )
+    }
+
     /// Builds an asynchronous, bounded and concurrent append stream for this table.
     pub fn append_stream(&self) -> AppendStreamBuilder {
         AppendStreamBuilder::new(

@@ -17,6 +17,8 @@
 #[doc = include_str!("../docs/migration-0.4.md")]
 pub mod migration {}
 
+mod append;
+mod append_batch;
 mod append_stream;
 mod catalog;
 mod client;
@@ -25,7 +27,14 @@ mod protocol;
 mod result;
 mod statement;
 mod table;
+#[cfg(test)]
+mod test_support;
 
+pub use append_batch::AppendBatch;
+pub use append_batch::AppendBatchBuilder;
+pub use append_batch::AppendBatchError;
+pub use append_batch::AppendBatchReport;
+pub use append_batch::AppendBatchResult;
 pub use append_stream::AppendAdmissionResult;
 pub use append_stream::AppendBatchFailureAction;
 pub use append_stream::AppendBatchFailureEvent;
