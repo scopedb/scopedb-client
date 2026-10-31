@@ -94,7 +94,7 @@ impl Table {
     }
 
     /// Builds a reusable writer for finite input slices with per-batch input ranges.
-    pub fn append_batch(&self) -> AppendWriterBuilder {
+    pub fn append_writer(&self) -> AppendWriterBuilder {
         AppendWriterBuilder::new(self.clone())
     }
 
@@ -190,7 +190,7 @@ mod tests {
             .table("events/blue")
             .with_database("analytics")
             .with_schema("archive");
-        let writer = table.append_batch().build().unwrap();
+        let writer = table.append_writer().build().unwrap();
         let stream = table.append_stream().build().unwrap();
         let catalog = table.catalog();
         table.append(r#"{"id":1}"#).await.unwrap();

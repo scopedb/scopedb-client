@@ -2,7 +2,7 @@
 
 Query ScopeDB and write rows from async Rust applications.
 
-Upgrading an existing application? See [Upgrade from 0.3 to 0.4](https://docs.rs/scopedb-client/latest/scopedb_client/migration/index.html), including the move from Ingest to Append.
+Upgrading an existing application? See [Upgrade from 0.4 to 0.5](docs/migration-0.5.md) or [Upgrade from 0.3 to 0.4](docs/migration-0.4.md), including the move from Ingest to Append.
 
 ## Install
 
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 With an existing `events` table containing `id int` and `name string` columns:
 
 ```rust,no_run
-# async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
+# async fn example(client: scopedb_client::Client) -> Result<(), Box<dyn std::error::Error>> {
 let stream = client.table("events")
     .append_stream()
     .build()?;
@@ -65,7 +65,7 @@ println!("Written: {} rows", report.committed_rows);
 | Read query results           | [`ResultSet`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.ResultSet.html)                                      |
 | Track or cancel a query      | [`StatementHandle`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.StatementHandle.html)                          |
 | Read or change table schemas | [`Catalog`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Catalog.html)                                          |
-| Write a finite slice of rows | [`Table::append_batch`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Table.html#method.append_batch)            |
+| Write a finite slice of rows | [`Table::append_writer`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Table.html#method.append_writer)            |
 | Tune batching and retries    | [`AppendStreamBuilder`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.AppendStreamBuilder.html)                  |
 | Write logs or telemetry      | [Continue after a batch fails](https://docs.rs/scopedb-client/latest/scopedb_client/struct.AppendStreamBuilder.html#telemetry) |
 | Set timeouts or HTTP options | [`ClientBuilder`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.ClientBuilder.html)                              |

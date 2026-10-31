@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 
 use fastrace_reqwest::traceparent_headers;
 use reqwest::Method;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -128,6 +129,16 @@ pub struct CatalogOptions {
     pub allow_destructive: bool,
     /// Opaque ETag returned by Get or a dry-run result, including its quotes.
     pub if_match: Option<String>,
+}
+
+/// What a failed Catalog mutation establishes about its commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CatalogMutationOutcome {
+    /// The server rejected the mutation without committing it.
+    Rejected,
+    /// The mutation may have committed; read the resource before replaying it.
+    Unknown,
 }
 
 #[derive(Debug, Clone)]
@@ -344,12 +355,21 @@ impl<T> CatalogResource<T> {
         if !status.is_success() {
             let error = decode_http_error(status, &headers, &bytes, ErrorKind::CatalogFailed);
             return Err(if writing {
-                if error.code().is_none() {
-                    error
-                        .set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
-                        .set_persistent()
+                // A coded client rejection establishes failure. A gateway or
+                // timeout response can follow a commit, even when it has a code.
+                let outcome = if status.is_client_error()
+                    && status != StatusCode::REQUEST_TIMEOUT
+                    && error.code().is_some()
+                {
+                    CatalogMutationOutcome::Rejected
                 } else {
-                    error.set_persistent()
+                    CatalogMutationOutcome::Unknown
+                };
+                let error = error.set_catalog_outcome(outcome).set_persistent();
+                if outcome == CatalogMutationOutcome::Unknown && error.code().is_none() {
+                    error.set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
+                } else {
+                    error
                 }
             } else {
                 error
@@ -499,6 +519,7 @@ fn catalog_response_error(writing: bool, message: &str) -> Error {
     if writing {
         error
             .set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
+            .set_catalog_outcome(CatalogMutationOutcome::Unknown)
             .set_persistent()
     } else {
         error

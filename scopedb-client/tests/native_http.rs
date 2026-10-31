@@ -18,6 +18,7 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 
+use scopedb_client::CatalogMutationOutcome;
 use scopedb_client::CatalogOptions;
 use scopedb_client::Client;
 use scopedb_client::ErrorKind;
@@ -175,6 +176,45 @@ async fn query_poll_failures_resume_the_existing_statement() {
 }
 
 #[tokio::test]
+async fn cancelled_submissions_keep_their_preallocated_identity() {
+    let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut arrived_tx = Some(arrived_tx);
+    let (client, task) = serve(
+        vec![
+            (200, "lost submission response".into()),
+            (
+                404,
+                json!({"code":"not_found","message":"not observed"}).to_string(),
+            ),
+        ],
+        None,
+        move |index| {
+            if index == 0 {
+                arrived_tx.take().unwrap().send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+        },
+    );
+    let statement = client.statement("SELECT 1 AS id INSERT INTO events");
+    let id = statement.statement_id();
+    let mut submit = Box::pin(statement.submit());
+    tokio::select! {
+        result = &mut submit => panic!("submission returned before response: {result:?}"),
+        arrived = arrived_rx => arrived.unwrap(),
+    }
+    drop(submit);
+    release_tx.send(()).unwrap();
+    let error = client.statement_handle(id).refresh().await.unwrap_err();
+    assert_eq!(error.statement_id(), Some(id));
+    let requests = task.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    let body: Value = serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["statement_id"], id.to_string());
+    assert!(requests[1].starts_with(&format!("GET /proxy/v1/statements/{id}?format=json ")));
+}
+
+#[tokio::test]
 async fn ambiguous_statement_submissions_are_not_retryable() {
     for id in [None, Some(uuid::Uuid::now_v7())] {
         for (status, body) in [
@@ -187,7 +227,13 @@ async fn ambiguous_statement_submissions_are_not_retryable() {
             (408, "request timed out".to_string()),
             (200, "invalid response".to_string()),
         ] {
-            let (client, task) = server(vec![(status, body)]);
+            let (client, task) = server(vec![
+                (status, body),
+                (
+                    404,
+                    json!({"code":"not_found","message":"not observed"}).to_string(),
+                ),
+            ]);
             let mut statement = client.statement("SELECT 1 AS id INSERT INTO events");
             if let Some(id) = id {
                 statement = statement.with_statement_id(id);
@@ -195,12 +241,28 @@ async fn ambiguous_statement_submissions_are_not_retryable() {
             let error = statement.submit().await.unwrap_err();
             assert!(error.is_persistent(), "{error:?}");
             assert!(!error.is_retryable());
-            assert_eq!(error.statement_id(), id);
+            let submitted_id = error.statement_id().unwrap();
+            if let Some(id) = id {
+                assert_eq!(submitted_id, id);
+            }
             assert_eq!(error.http_status().unwrap().as_u16(), status);
             if status == 503 {
                 assert_eq!(error.code(), Some("unavailable"));
             }
-            assert_eq!(task.join().unwrap().len(), 1);
+            let lookup = client
+                .statement_handle(submitted_id)
+                .refresh()
+                .await
+                .unwrap_err();
+            assert_eq!(lookup.statement_id(), Some(submitted_id));
+            let requests = task.join().unwrap();
+            assert_eq!(requests.len(), 2);
+            let body: Value =
+                serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["statement_id"], submitted_id.to_string());
+            assert!(requests[1].starts_with(&format!(
+                "GET /proxy/v1/statements/{submitted_id}?format=json "
+            )));
         }
     }
 }
@@ -263,6 +325,10 @@ async fn catalog_round_trip_preserves_unknown_fields_and_preconditions() {
         .await
         .unwrap_err();
     assert_eq!(stale.code(), Some("catalog_version_mismatch"));
+    assert_eq!(
+        stale.catalog_outcome(),
+        Some(CatalogMutationOutcome::Rejected)
+    );
     assert_eq!(stale.details().unwrap()["current"], "new");
     assert!(!stale.is_retryable());
     let requests = task.join().unwrap();
@@ -310,6 +376,10 @@ async fn malformed_mutation_responses_keep_the_commit_outcome_unknown() {
             .await
             .unwrap_err();
         assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+        assert_eq!(
+            error.catalog_outcome(),
+            Some(CatalogMutationOutcome::Unknown)
+        );
         assert!(!error.is_retryable());
     }
     assert_eq!(task.join().unwrap().len(), 2);
@@ -425,6 +495,10 @@ async fn catalog_requires_etag_and_preserves_ambiguous_mutations() {
         .await
         .unwrap_err();
     assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(
+        error.catalog_outcome(),
+        Some(CatalogMutationOutcome::Unknown)
+    );
     assert!(!error.is_retryable());
     task.join().unwrap();
 
@@ -453,6 +527,10 @@ async fn catalog_requires_etag_and_preserves_ambiguous_mutations() {
         if !dry_run {
             assert!(!error.is_retryable());
         }
+        assert_eq!(
+            error.catalog_outcome(),
+            (!dry_run).then_some(CatalogMutationOutcome::Unknown)
+        );
     }
     let requests = task.join().unwrap();
     assert_eq!(requests.len(), 2);
@@ -570,6 +648,10 @@ async fn catalog_write_budget_preserves_a_shorter_custom_http_timeout() {
     .unwrap()
     .unwrap_err();
     assert_eq!(error.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(
+        error.catalog_outcome(),
+        Some(CatalogMutationOutcome::Unknown)
+    );
     assert!(!error.is_retryable());
     release_tx.send(()).unwrap();
     assert_eq!(task.join().unwrap().len(), 1);
@@ -622,10 +704,45 @@ async fn response_body_interruptions_follow_operation_retry_safety() {
     assert!(submit.is_persistent());
     for error in [catalog_get, catalog_dry_run, refresh, cancel] {
         assert!(error.is_retryable());
+        assert_eq!(error.catalog_outcome(), None);
         assert_eq!(error.http_status().map(|status| status.as_u16()), Some(200));
     }
     assert!(!catalog_write.is_retryable());
     assert_eq!(catalog_write.code(), Some("catalog_commit_outcome_unknown"));
+    assert_eq!(
+        catalog_write.catalog_outcome(),
+        Some(CatalogMutationOutcome::Unknown)
+    );
     assert!(!submit.is_retryable());
     assert_eq!(task.join().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn catalog_gateway_codes_do_not_establish_a_rejected_mutation() {
+    for status in [408, 502, 503] {
+        let payload = json!({
+            "code": "upstream_unavailable",
+            "message": "response unavailable",
+            "request_id": "gateway-request",
+            "retryable": true,
+            "details": {"stage": "response"}
+        });
+        let (client, task) = server(vec![(status, payload.to_string())]);
+        let error = client
+            .table("events")
+            .catalog()
+            .delete(CatalogOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.catalog_outcome(),
+            Some(CatalogMutationOutcome::Unknown)
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(error.code(), Some("upstream_unavailable"));
+        assert_eq!(error.request_id(), Some("gateway-request"));
+        assert_eq!(error.http_status().unwrap().as_u16(), status);
+        assert_eq!(error.details(), payload.get("details"));
+        assert_eq!(task.join().unwrap().len(), 1);
+    }
 }

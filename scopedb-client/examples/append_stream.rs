@@ -39,7 +39,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // send_all() confirms only local admission. With the default strict policy,
     // successful shutdown confirms at least one commit acknowledgement per row.
     // Retrying an unknown outcome can insert duplicates.
-    let report = stream.shutdown().await?;
+    let report = match stream.shutdown().await {
+        Ok(report) => report,
+        Err(failure) => {
+            eprintln!("delivery: {:?}", failure.report());
+            return Err(failure.into());
+        }
+    };
     println!("committed remotely: {} rows", report.committed_rows);
 
     Ok(())

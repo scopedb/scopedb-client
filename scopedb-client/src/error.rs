@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::AppendErrorDetails;
 use crate::AppendState;
+use crate::CatalogMutationOutcome;
 use crate::StatementErrorDetails;
 
 /// ErrorKind is all kinds of Error of ScopeDB client.
@@ -160,6 +161,11 @@ impl fmt::Display for ErrorStatus {
 /// timeout. A timed-out write may already have committed; reconcile it before
 /// replaying.
 ///
+/// HTTP diagnostics and raw [`Self::details`] describe the response retained
+/// from the last failed attempt. [`Self::append_details`] describes what is
+/// known about delivery across all attempts: a later rejection cannot rule out
+/// an earlier commit. Retry classification is separate from delivery outcome.
+///
 /// [`Self::is_retryable`] describes the failed operation. For a query that was
 /// already submitted, resume its [`Self::statement_id`] through
 /// [`crate::Client::statement_handle`] instead of submitting another query.
@@ -173,6 +179,7 @@ pub struct Error {
     api_error: Option<Box<ApiErrorDetails>>,
     append_details: Option<AppendErrorDetails>,
     write_details: Option<WriteErrorDetails>,
+    catalog_outcome: Option<CatalogMutationOutcome>,
     statement_metadata: Option<Box<StatementErrorMetadata>>,
     http_metadata: Option<Box<HttpErrorMetadata>>,
 
@@ -229,6 +236,10 @@ impl fmt::Display for Error {
             write!(f, ", source: {source}")?;
         }
 
+        if let Some(outcome) = self.catalog_outcome() {
+            write!(f, ", catalog_outcome: {outcome:?}")?;
+        }
+
         Ok(())
     }
 }
@@ -245,6 +256,7 @@ impl fmt::Debug for Error {
             de.field("context", &self.context);
             de.field("append_details", &self.append_details);
             de.field("write_details", &self.write_details);
+            de.field("catalog_outcome", &self.catalog_outcome);
             de.field("statement_id", &self.statement_id());
             de.field("statement_details", &self.statement_details());
             de.field("http_metadata", &self.http_metadata);
@@ -277,6 +289,9 @@ impl fmt::Debug for Error {
                 ", write_reason: {}, write_outcome: {}",
                 details.reason, details.outcome
             )?;
+        }
+        if let Some(outcome) = self.catalog_outcome() {
+            write!(f, ", catalog_outcome: {outcome:?}")?;
         }
         writeln!(f)?;
 
@@ -315,6 +330,7 @@ impl Error {
             api_error: None,
             append_details: None,
             write_details: None,
+            catalog_outcome: None,
             statement_metadata: None,
             http_metadata: None,
             source: None,
@@ -327,13 +343,13 @@ impl Error {
         self
     }
 
-    /// Set source for error.
+    /// Sets the underlying cause without replacing an existing source.
     ///
-    /// # Notes
+    /// # Panics
     ///
-    /// If the source has been set, we will raise a panic here.
+    /// Panics if the source has already been set.
     pub fn set_source(mut self, src: impl Into<anyhow::Error>) -> Self {
-        debug_assert!(self.source.is_none(), "the source error has been set");
+        assert!(self.source.is_none(), "the source error has been set");
 
         self.source = Some(Arc::new(src.into()));
         self
@@ -345,9 +361,20 @@ impl Error {
         self.write_details.as_ref()
     }
 
-    /// Return structured table-append failure details, when available.
+    /// Returns table-append failure details across the operation's attempts.
+    /// An earlier unknown attempt keeps the status Unknown even if the last
+    /// response rejected the request. Row errors still describe that last response;
+    /// use [`Self::details`] for its original, unmodified server payload.
     pub fn append_details(&self) -> Option<&AppendErrorDetails> {
         self.append_details.as_ref()
+    }
+
+    /// Returns the commit outcome of a failed Catalog mutation after sending
+    /// began. Unknown requires reconciliation even if [`Self::code`] contains
+    /// a server or intermediary error code. Reads, dry runs, and local validation
+    /// failures return None.
+    pub fn catalog_outcome(&self) -> Option<CatalogMutationOutcome> {
+        self.catalog_outcome
     }
 
     /// Return structured statement failure details, when available.
@@ -391,7 +418,9 @@ impl Error {
         self.kind
     }
 
-    /// Returns the server error code, including codes introduced by newer servers.
+    /// Returns the retained server error code, including codes introduced by newer
+    /// servers. After retries this describes the last failed attempt, not the
+    /// delivery outcome across attempts.
     pub fn code(&self) -> Option<&str> {
         self.api_error
             .as_deref()
@@ -400,6 +429,9 @@ impl Error {
     }
 
     /// Returns the original structured server details, when provided.
+    /// After retries these describe the last failed response. They are not
+    /// rewritten when an earlier unknown attempt makes the overall append
+    /// outcome uncertain; use [`Self::append_details`] for that conclusion.
     pub fn details(&self) -> Option<&serde_json::Value> {
         self.api_error
             .as_deref()
@@ -433,7 +465,9 @@ impl Error {
             .and_then(|metadata| metadata.retry_after)
     }
 
-    /// Return whether retrying this operation is currently appropriate.
+    /// Returns whether retrying this operation is currently appropriate.
+    /// This is a policy decision, not a commit acknowledgement: false can mean
+    /// a permanent rejection, an exhausted retry budget, or an unknown outcome.
     /// For statement handles, retry on the same handle. Errors from `query()` or
     /// `execute()` after submission never indicate that resubmitting is safe.
     pub fn is_retryable(&self) -> bool {
@@ -460,6 +494,11 @@ impl Error {
             reason: WriteErrorReason::Timeout,
             outcome: AppendState::Unknown,
         });
+        self
+    }
+
+    pub(crate) fn set_catalog_outcome(mut self, outcome: CatalogMutationOutcome) -> Self {
+        self.catalog_outcome = Some(outcome);
         self
     }
 
@@ -522,5 +561,18 @@ impl Error {
     fn http_metadata_mut(&mut self) -> &mut HttpErrorMetadata {
         self.http_metadata
             .get_or_insert_with(|| Box::new(HttpErrorMetadata::default()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "the source error has been set")]
+    fn replacing_source_is_rejected() {
+        Error::new(ErrorKind::Unexpected, "operation failed")
+            .set_source(std::io::Error::other("original cause"))
+            .set_source(std::io::Error::other("replacement"));
     }
 }

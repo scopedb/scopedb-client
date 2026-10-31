@@ -30,14 +30,22 @@ use crate::protocol::StatementRequest;
 pub struct Statement {
     client: Client,
     statement: String,
-    statement_id: Option<Uuid>,
+    statement_id: Uuid,
     max_elapsed: Option<Duration>,
     max_estimated: Option<Duration>,
 }
 
 impl Statement {
+    /// Returns the identifier allocated for this execution. Retain it before
+    /// submitting if the submission future may be cancelled: dropping that
+    /// future does not establish whether execution started on the server.
+    pub fn statement_id(&self) -> Uuid {
+        self.statement_id
+    }
+
+    /// Overrides the identifier allocated for this execution before submission.
     pub fn with_statement_id(mut self, statement_id: Uuid) -> Self {
-        self.statement_id = Some(statement_id);
+        self.statement_id = statement_id;
         self
     }
 
@@ -54,8 +62,11 @@ impl Statement {
     }
 
     /// Submits one statement. An interrupted response does not establish whether
-    /// execution started. Supply an ID with [`Self::with_statement_id`] to look it
-    /// up after such a failure without submitting another execution.
+    /// execution started. Every submission carries an identifier, allocated by
+    /// the SDK unless overridden with [`Self::with_statement_id`]. Submission
+    /// errors retain [`Error::statement_id`] so the existing execution can be
+    /// inspected without resubmitting it. The identifier does not establish that
+    /// the server accepted the request or make replay safe.
     pub async fn submit(self) -> Result<StatementHandle, Error> {
         if self.max_elapsed.is_some_and(|d| d.is_zero())
             || self.max_estimated.is_some_and(|d| d.is_zero())
@@ -63,7 +74,8 @@ impl Statement {
             return Err(Error::new(
                 ErrorKind::ConfigInvalid,
                 "statement duration limits must be positive",
-            ));
+            )
+            .set_statement_id(self.statement_id));
         }
         let Statement {
             client,
@@ -82,10 +94,7 @@ impl Statement {
                 format: "json",
             })
             .await
-            .map_err(|error| match statement_id {
-                Some(id) => error.set_statement_id(id),
-                None => error,
-            })?;
+            .map_err(|error| error.set_statement_id(statement_id))?;
 
         Ok(StatementHandle {
             client,
@@ -112,7 +121,7 @@ impl Statement {
         Self {
             client,
             statement,
-            statement_id: None,
+            statement_id: Uuid::now_v7(),
             max_elapsed: None,
             max_estimated: None,
         }

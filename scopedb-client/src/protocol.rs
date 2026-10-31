@@ -64,7 +64,9 @@ pub struct AppendRowError {
     pub message: String,
 }
 
-/// Structured failure details returned by the table append API.
+/// Table-append failure details. When exposed through [`Error::append_details`],
+/// status includes uncertainty from earlier retry attempts; row diagnostics
+/// remain relative to the last failed response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
     pub status: AppendState,
@@ -219,9 +221,7 @@ fn parse_retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
 #[derive(Debug, Serialize)]
 pub struct StatementRequest {
     pub statement: String,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub statement_id: Option<Uuid>,
+    pub statement_id: Uuid,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_elapsed_seconds: Option<f64>,
