@@ -64,7 +64,7 @@ impl Reply {
     pub fn committed(request: &Request) -> Self {
         Self::json(
             200,
-            json!({"status": "committed", "num_rows_inserted": request.body.lines().count()}),
+            json!({"num_rows_inserted": request.body.lines().count()}),
         )
     }
 

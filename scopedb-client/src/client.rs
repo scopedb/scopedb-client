@@ -28,8 +28,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::AppendErrorDetails;
+use crate::AppendOutcome;
 use crate::AppendRowsResult;
-use crate::AppendState;
 use crate::Catalog;
 use crate::Error;
 use crate::ErrorKind;
@@ -41,7 +41,7 @@ use crate::StatementStatus;
 use crate::Table;
 use crate::protocol::StatementRequest;
 use crate::protocol::apply_response_metadata;
-use crate::protocol::decode_http_error;
+use crate::protocol::decode_append_error;
 use crate::protocol::decode_statement_response;
 
 const JSON_CONTENT_ENCODING: &str = "zstd";
@@ -118,7 +118,7 @@ impl ClientBuilder {
     /// [`AppendStreamBuilder::attempt_timeout`](crate::AppendStreamBuilder::attempt_timeout)
     /// override this default. Timeouts configured on a custom HTTP client also apply.
     ///
-    /// A timed-out write has an unknown commit outcome and is not replayed
+    /// A timed-out write has an ambiguous outcome and is not replayed
     /// automatically. Append timeouts populate [`Error::write_details`], and
     /// catalog mutation timeouts set [`Error::catalog_outcome`] to
     /// [`CatalogMutationOutcome::Unknown`](crate::CatalogMutationOutcome::Unknown).
@@ -292,7 +292,7 @@ impl Client {
         timeout: Option<Duration>,
     ) -> Result<AppendRowsResult, Error> {
         if ndjson.len() > MAX_APPEND_BODY_BYTES {
-            return Err(append_rejected_error(format!(
+            return Err(append_definite_failure(format!(
                 "append payload requires {} bytes, exceeds the {MAX_APPEND_BODY_BYTES}-byte append limit",
                 ndjson.len()
             )));
@@ -302,7 +302,7 @@ impl Client {
             .filter(|line| !line.trim().is_empty())
             .count();
         if expected_rows > MAX_APPEND_ROWS {
-            return Err(append_rejected_error(format!(
+            return Err(append_definite_failure(format!(
                 "append payload exceeds the {MAX_APPEND_ROWS}-row limit",
             )));
         }
@@ -318,7 +318,7 @@ impl Client {
         ])?;
         let body =
             zstd::stream::encode_all(ndjson.as_bytes(), ZSTD_COMPRESSION_LEVEL).map_err(|err| {
-                append_rejected_error("failed to compress table append request body")
+                append_definite_failure("failed to compress table append request body")
                     .set_source(err)
             })?;
         let request = self
@@ -332,10 +332,10 @@ impl Client {
         tokio::time::timeout(timeout.unwrap_or(self.write_timeout), async {
             let response = request.send().await.map_err(|err| {
                 let error = if err.is_timeout() {
-                    append_unknown_error(ErrorKind::Timeout, "table append request timed out; commit outcome is unknown")
+                    append_ambiguous_error(ErrorKind::Timeout, "table append request timed out; write outcome is ambiguous")
                         .set_write_timeout()
                 } else {
-                    append_unknown_error(ErrorKind::Unavailable, "failed to send table append request")
+                    append_ambiguous_error(ErrorKind::Unavailable, "failed to send table append request")
                 };
                 error.set_source(err)
             })?;
@@ -344,16 +344,16 @@ impl Client {
             headers = response.headers().clone();
             let payload = response.bytes().await.map_err(|err| {
                 let error = if err.is_timeout() {
-                    append_unknown_error(ErrorKind::Timeout, "table append request timed out; commit outcome is unknown")
+                    append_ambiguous_error(ErrorKind::Timeout, "table append request timed out; write outcome is ambiguous")
                         .set_write_timeout()
                 } else {
-                    append_unknown_error(ErrorKind::Unavailable, "failed to read table append response")
+                    append_ambiguous_error(ErrorKind::Unavailable, "failed to read table append response")
                 };
                 error.set_source(err)
             })?;
             let result = decode_append_response(response_status, &headers, &payload)?;
             if result.num_rows_inserted != expected_rows as i64 {
-                return Err(append_unknown_error(ErrorKind::InvalidResponse, format!(
+                return Err(append_ambiguous_error(ErrorKind::InvalidResponse, format!(
                     "table append response reported {} inserted rows for a {expected_rows}-row request",
                     result.num_rows_inserted
                 )));
@@ -363,7 +363,7 @@ impl Client {
         .await
         .unwrap_or_else(|err| {
             Err(
-                append_unknown_error(ErrorKind::Timeout, "table append request timed out; commit outcome is unknown")
+                append_ambiguous_error(ErrorKind::Timeout, "table append request timed out; write outcome is ambiguous")
                     .set_write_timeout()
                     .set_source(err),
             )
@@ -553,12 +553,12 @@ fn decode_append_response(
     if status == StatusCode::OK {
         return match serde_json::from_slice::<AppendRowsResult>(payload) {
             Ok(result)
-                if result.status == AppendState::Committed && result.num_rows_inserted >= 0 =>
+                if result.status == AppendOutcome::Succeeded && result.num_rows_inserted >= 0 =>
             {
                 Ok(result)
             }
             Ok(_) => Err(apply_response_metadata(
-                append_unknown_error(
+                append_ambiguous_error(
                     ErrorKind::InvalidResponse,
                     "table append response has an invalid body",
                 ),
@@ -566,7 +566,7 @@ fn decode_append_response(
                 headers,
             )),
             Err(err) => Err(apply_response_metadata(
-                append_unknown_error(
+                append_ambiguous_error(
                     ErrorKind::InvalidResponse,
                     "failed to decode table append response",
                 )
@@ -579,7 +579,7 @@ fn decode_append_response(
 
     if status.is_success() {
         return Err(apply_response_metadata(
-            append_unknown_error(
+            append_ambiguous_error(
                 ErrorKind::InvalidResponse,
                 format!(
                     "table append returned unexpected success status {}",
@@ -591,36 +591,21 @@ fn decode_append_response(
         ));
     }
 
-    let error = decode_http_error(status, headers, payload, ErrorOperation::Append);
-    if let Some(details) = error
-        .details()
-        .and_then(|value| serde_json::from_value::<AppendErrorDetails>(value.clone()).ok())
-        && matches!(details.status, AppendState::Rejected | AppendState::Unknown)
-    {
-        let error = error.set_append_details(details);
-
-        return Err(error);
-    }
-
-    Err(error.set_append_details(AppendErrorDetails {
-        status: AppendState::Unknown,
-        row_errors: Vec::new(),
-        row_errors_truncated: false,
-    }))
+    Err(decode_append_error(status, headers, payload))
 }
 
-fn append_unknown_error(kind: ErrorKind, message: impl Into<String>) -> Error {
+fn append_ambiguous_error(kind: ErrorKind, message: impl Into<String>) -> Error {
     Error::new(kind, ErrorOperation::Append, message).set_append_details(AppendErrorDetails {
-        status: AppendState::Unknown,
+        status: AppendOutcome::Ambiguous,
         row_errors: Vec::new(),
         row_errors_truncated: false,
     })
 }
 
-fn append_rejected_error(message: impl Into<String>) -> Error {
+fn append_definite_failure(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidInput, ErrorOperation::Append, message).set_append_details(
         AppendErrorDetails {
-            status: AppendState::Rejected,
+            status: AppendOutcome::Failed,
             row_errors: Vec::new(),
             row_errors_truncated: false,
         },

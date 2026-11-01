@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Stop producers before calling shutdown() to settle all admitted rows.
     let report = telemetry.shutdown().await?;
-    if report.outcome != AppendDeliveryOutcome::Ok {
+    if report.outcome != AppendDeliveryOutcome::Succeeded {
         eprintln!("telemetry loss or ambiguity: {report:?}");
     }
     println!("final stream stats: {:?}", telemetry.stats());

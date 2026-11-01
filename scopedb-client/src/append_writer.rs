@@ -23,8 +23,8 @@ use serde::Serialize;
 
 use crate::AppendDeliveryOutcome;
 use crate::AppendFailurePolicy;
+use crate::AppendOutcome;
 use crate::AppendRowsResult;
-use crate::AppendState;
 use crate::Error;
 use crate::ErrorOperation;
 use crate::Table;
@@ -36,7 +36,7 @@ use crate::append::encode_record;
 ///
 /// Defaults match [`AppendStreamBuilder`](crate::AppendStreamBuilder): 4 MiB target batches, up to
 /// 200,000 rows per batch, 4 concurrent batches, [`AppendFailurePolicy::Stop`],
-/// and up to 8 retries of temporary [`AppendState::Rejected`] responses.
+/// and up to 8 retries of validated HTTP 429 admission refusals.
 #[derive(Debug, Clone)]
 pub struct AppendWriterBuilder {
     table: Table,
@@ -73,12 +73,12 @@ impl AppendWriterBuilder {
         self
     }
 
-    /// Enables retrying transient [`AppendState::Unknown`] responses (default `false`).
+    /// Enables retrying transient [`AppendOutcome::Ambiguous`] responses (default `false`).
     ///
-    /// Retrying an unknown outcome can insert duplicate rows. Client timeouts
+    /// Retrying an ambiguous outcome can insert duplicate rows. Client timeouts
     /// are never replayed automatically.
-    pub fn retry_unknown(mut self, enabled: bool) -> Self {
-        self.options.retry.retry_unknown = enabled;
+    pub fn retry_ambiguous(mut self, enabled: bool) -> Self {
+        self.options.retry.retry_ambiguous = enabled;
         self
     }
 
@@ -185,21 +185,21 @@ impl AppendWriteReport {
     /// Returns the aggregate [`AppendDeliveryOutcome`] for this write call.
     ///
     /// [`AppendDeliveryOutcome::Partial`] may include batches with
-    /// [`AppendState::Unknown`]; inspect [`batches`](Self::batches) before replaying
+    /// [`AppendOutcome::Ambiguous`]; inspect [`batches`](Self::batches) before replaying
     /// failed ranges.
     pub fn outcome(&self) -> AppendDeliveryOutcome {
         if self.unsubmitted.is_empty() && self.batches.iter().all(|batch| batch.result.is_ok()) {
-            AppendDeliveryOutcome::Ok
+            AppendDeliveryOutcome::Succeeded
         } else if self.committed_rows() > 0 {
             AppendDeliveryOutcome::Partial
         } else if self.batches.iter().any(|batch| {
             batch.result.as_ref().is_err_and(|error| {
                 error
                     .append_details()
-                    .is_some_and(|details| details.status == AppendState::Unknown)
+                    .is_some_and(|details| details.status == AppendOutcome::Ambiguous)
             })
         }) {
-            AppendDeliveryOutcome::Unknown
+            AppendDeliveryOutcome::Ambiguous
         } else {
             AppendDeliveryOutcome::Failed
         }
@@ -373,7 +373,7 @@ impl AppendWriter {
             .find(|error| {
                 error
                     .append_details()
-                    .is_some_and(|details| details.status == AppendState::Unknown)
+                    .is_some_and(|details| details.status == AppendOutcome::Ambiguous)
             })
             .or_else(|| {
                 report

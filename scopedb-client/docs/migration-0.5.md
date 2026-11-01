@@ -22,7 +22,7 @@ Version 0.5 makes partial stream progress available on failure. Applications upg
 
 ## Inspect failed delivery reports
 
-`AppendStream::flush()` and `shutdown()` keep returning `Result<AppendDeliveryReport, Error>`. A failure now retains its terminal interval in `Error::append_delivery_report()`, including committed, rejected, unknown, and dropped row counts. Returning that error through `?` preserves the report and the original diagnostics.
+`AppendStream::flush()` and `shutdown()` keep returning `Result<AppendDeliveryReport, Error>`. A failure now retains its terminal interval in `Error::append_delivery_report()`, including committed, failed, ambiguous, and dropped row counts. Returning that error through `?` preserves the report and the original diagnostics.
 
 ```rust,no_run
 # async fn example(stream: scopedb_client::AppendStream) -> Result<(), scopedb_client::Error> {
@@ -37,13 +37,40 @@ match stream.shutdown().await {
 # }
 ```
 
-The terminal failure report covers activity since the previous completed barrier, including in-flight batches settled while stopping, and is shared by concurrent waiters. Because report counts do not identify individual rows and may include unknown outcomes, reconcile before replaying. `stats().last_report` also retains the latest report.
+The terminal failure report covers activity since the previous completed barrier, including in-flight batches settled while stopping, and is shared by concurrent waiters. Because report counts do not identify individual rows and may include ambiguous outcomes, reconcile before replaying. `stats().last_report` also retains the latest report.
 
 ## Inspect partial admission and finite writes
 
 `AppendStream::send_all()` keeps returning `Error` on failure. Read `error.append_admission().unwrap().accepted_rows` instead of parsing the diagnostic message for the prefix admitted by that call. Those rows remain owned by the stream; use `flush()` or `shutdown()` to observe their delivery. The remaining suffix was not admitted.
 
 Finite writers also return `Error`. `append_write_report()` retains successful and failed batches, input-index mappings, and the unsubmitted suffix. `append_input_index()` identifies local encoding failures. SDK operations compose through `?` without converting errors or discarding these recovery facts.
+
+## Handle table append confirmations and retries
+
+Append outcomes describe success, definite failure, and ambiguity. Update enum matches, retry configuration, and report accessors:
+
+| In 0.4                                  | In 0.5                                    |
+| --------------------------------------- | ----------------------------------------- |
+| `AppendState`                           | `AppendOutcome`                           |
+| `AppendState::Committed`                | `AppendOutcome::Succeeded`                |
+| `AppendState::Rejected`                 | `AppendOutcome::Failed`                   |
+| `AppendState::Unknown`                  | `AppendOutcome::Ambiguous`                |
+| `AppendDeliveryOutcome::Ok`             | `AppendDeliveryOutcome::Succeeded`        |
+| `AppendDeliveryOutcome::Unknown`        | `AppendDeliveryOutcome::Ambiguous`        |
+| `AppendStreamBuilder::retry_unknown()`  | `AppendStreamBuilder::retry_ambiguous()`  |
+| `AppendDeliveryReport::unknown_rows`    | `AppendDeliveryReport::ambiguous_rows`    |
+| `AppendDeliveryReport::unknown_batches` | `AppendDeliveryReport::ambiguous_batches` |
+| `AppendStreamStats::unknown_rows`       | `AppendStreamStats::ambiguous_rows`       |
+
+`Failed` guarantees that this attempt took effect on no rows and will not take effect later. Retry decisions still depend on the cause: invalid input needs correction, while admission limits may clear. `Ambiguous` means the attempt may have taken effect or may still take effect later. `AppendOutcome` retains the serialized values `committed`, `rejected`, and `unknown`; its `Display` output uses `succeeded`, `failed`, and `ambiguous`.
+
+`AppendRowsResult::status` is now `AppendOutcome::Succeeded` after a valid success response, including responses that omit the wire `status` field. Update matches on `AppendState::Committed` to use the new variant. Success still confirms that the entire batch committed. The SDK accepts both success formats during service upgrades.
+
+The SDK also accepts older flat error responses with explicit `details.status: rejected` on HTTP 4xx. Missing or unrecognized rejection details leave those responses ambiguous. Older row diagnostics remain available through `append_details()` when supplied; `AppendRequestResult::input_index` maps their zero-based request indexes back to the input slice. See the [HTTP API reference](rust-http-api.md#table-ingest) for the current response format and status/code correspondence.
+
+Use `Error::append_details()` for outcome certainty instead of inspecting `details.status` in the raw server error. A valid modern 4xx error establishes `Failed`; 5xx and interrupted or invalid responses are `Ambiguous`. Only validated HTTP 429 admission refusals are retried by default. In particular, older HTTP 503 responses no longer qualify as safe retries even when they contain `status: rejected` or `retryable: true`. Keep ambiguous batches available for application reconciliation; `.retry_ambiguous(true)` explicitly accepts duplicate-write risk.
+
+Row-error lists may be empty because modern responses provide a diagnostic message instead of structured row errors. Handle the entire failed batch; do not parse diagnostic text to select individual rows for replay. A later definite failure leaves an earlier ambiguous attempt unresolved.
 
 ## Recover submitted statements
 
