@@ -47,16 +47,16 @@ Streams retry temporary rejections by default. They do not replay an unknown wri
 
 ## Update Catalog reads
 
-Replace paginated `list_*`, `fetch_*`, and `iterate_*` calls with a resource selector followed by `get()`. Each read returns a complete `definition` and an opaque version token for conditional updates. In the table below, `catalog` is `client.catalog()`.
+Replace paginated `list_*`, `fetch_*`, and `iterate_*` calls with a resource selector followed by `get()`. Each read returns a complete `definition` and an `etag` for conditional updates. In the table below, `catalog` is `client.catalog()`.
 
-| In 0.3                          | In 0.4                                      |
-| ------------------------------- | ------------------------------------------- |
-| List databases                  | `catalog.get()`                             |
-| List schemas in a database      | `catalog.database(db).get()`                |
-| List tables in a schema         | `catalog.schema(db, schema).get()`          |
-| `describe()` / `table_schema()` | `table.catalog().get()`                     |
-| `distinct_on`                   | `definition.distinct.on`                    |
-| `data_retention_days`           | `definition.retention_days`                 |
+| In 0.3                          | In 0.4                             |
+| ------------------------------- | ---------------------------------- |
+| List databases                  | `catalog.get()`                    |
+| List schemas in a database      | `catalog.database(db).get()`       |
+| List tables in a schema         | `catalog.schema(db, schema).get()` |
+| `describe()` / `table_schema()` | `table.catalog().get()`            |
+| `distinct_on`                   | `definition.distinct.on`           |
+| `data_retention_days`           | `definition.retention_days`        |
 
 For example, list the tables in a schema:
 
@@ -72,18 +72,18 @@ for table in snapshot.definition.tables {
 # }
 ```
 
-Typed definitions reject unsupported fields. Use `raw().get()` to keep them as JSON. `Table::drop()` remains available; use [`CatalogResource::delete`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.CatalogResource.html#method.delete) when you need a preview or version precondition.
+Typed definitions reject unsupported fields. Use `raw().get()` to keep them as JSON. `Table::drop()` remains available; use [`CatalogResource::delete`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.CatalogResource.html#method.delete) when you need a preview or ETag precondition.
 
 ## Update statements and timeouts
 
-| In 0.3                                         | In 0.4                                  |
-| ---------------------------------------------- | --------------------------------------- |
-| `with_exec_timeout(...)`                       | `with_max_elapsed(Duration)`            |
-| `with_max_parallelism(...)`                    | Removed                                 |
-| `handle.last_status()`                         | `handle.snapshot()`                     |
-| `handle.status().await` / `fetch_once().await` | `handle.refresh().await`                |
-| `handle.fetch().await`                         | `handle.wait().await`                   |
-| Handle progress/result accessors               | Inspect `snapshot()` or call `wait()`   |
+| In 0.3                                         | In 0.4                                |
+| ---------------------------------------------- | ------------------------------------- |
+| `with_exec_timeout(...)`                       | `with_max_elapsed(Duration)`          |
+| `with_max_parallelism(...)`                    | Removed                               |
+| `handle.last_status()`                         | `handle.snapshot()`                   |
+| `handle.status().await` / `fetch_once().await` | `handle.refresh().await`              |
+| `handle.fetch().await`                         | `handle.wait().await`                 |
+| Handle progress/result accessors               | Inspect `snapshot()` or call `wait()` |
 
 Use `std::time::Duration` in place of `jiff::SignedDuration`. `with_max_elapsed` includes queueing time. The separate `with_max_estimated` option rejects queries whose estimated duration exceeds a limit; it does not control parallelism. Both take positive durations. Omitted limits use service defaults.
 
@@ -100,7 +100,7 @@ println!("{:?}", result.into_objects()?);
 # }
 ```
 
-`cancel()` now returns the complete [`StatementStatus`](https://docs.rs/scopedb-client/latest/scopedb_client/enum.StatementStatus.html). A query can finish before cancellation takes effect. Pending or running statuses still need `wait()`; observed cancellation makes `wait()` return `ErrorKind::StatementCancelled`.
+`cancel()` now returns the complete [`StatementStatus`](https://docs.rs/scopedb-client/latest/scopedb_client/enum.StatementStatus.html). A query can finish before cancellation takes effect. Pending or running statuses still need `wait()`; observed cancellation makes `wait()` return `ErrorKind::Cancelled`.
 
 When matching status variants directly, read `failed.error` instead of `failed.message`. Cancelled statuses no longer carry a message. Read cached progress with `snapshot().map(StatementStatus::progress)` and match `StatementStatus::Finished` for a cached result.
 

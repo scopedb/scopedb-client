@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 
 use fastrace_reqwest::traceparent_headers;
 use reqwest::Method;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -24,11 +25,14 @@ use crate::Client;
 use crate::DataType;
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::protocol::apply_response_metadata;
 use crate::protocol::decode_http_error;
 
-/// Complete tenant catalog. Apply replaces the entire selected subtree.
-/// Typed definitions reject unknown fields; use [`Catalog::raw`] for newer definitions.
+/// Complete tenant catalog definition.
+///
+/// [`Catalog::apply`] replaces the entire catalog. Typed definitions reject
+/// unknown fields; use [`Catalog::raw`] to preserve fields from newer server versions.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogDocument {
@@ -36,6 +40,7 @@ pub struct CatalogDocument {
     pub databases: Vec<CatalogDatabase>,
 }
 
+/// Database definition within a [`CatalogDocument`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogDatabase {
@@ -46,6 +51,7 @@ pub struct CatalogDatabase {
     pub schemas: Vec<CatalogSchema>,
 }
 
+/// Schema definition containing tables and views.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSchema {
@@ -58,8 +64,11 @@ pub struct CatalogSchema {
     pub views: Vec<CatalogView>,
 }
 
-/// A complete table definition. Omitted collections are empty and omitted
-/// optional fields are cleared. Storage is accepted only at creation.
+/// Complete table definition.
+///
+/// [`CatalogResource::apply`] replaces the entire table definition; omitted
+/// collections become empty and omitted optional fields are cleared. `storage`
+/// is accepted only when creating a table and is omitted from exports.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogTable {
@@ -80,6 +89,7 @@ pub struct CatalogTable {
     pub storage: Option<serde_json::Value>,
 }
 
+/// Table column definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogColumn {
@@ -93,7 +103,7 @@ pub struct CatalogColumn {
     pub indexes: Vec<CatalogColumnIndex>,
 }
 
-/// Additional column index. Supports type "search" and analyzer "log".
+/// Secondary column index definition (such as `index_type: "search"` with `analyzer: Some("log")`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogColumnIndex {
@@ -103,6 +113,7 @@ pub struct CatalogColumnIndex {
     pub analyzer: Option<String>,
 }
 
+/// Table deduplication key (`on`) and ordering (`by`) configuration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogDistinct {
@@ -112,6 +123,7 @@ pub struct CatalogDistinct {
     pub by: Vec<String>,
 }
 
+/// View definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogView {
@@ -121,37 +133,57 @@ pub struct CatalogView {
     pub comment: Option<String>,
 }
 
-/// Preview, concurrency preconditions, and explicit data-loss authorization.
+/// Options for [`CatalogResource::apply`] and [`CatalogResource::delete`].
 #[derive(Debug, Clone, Default)]
 pub struct CatalogOptions {
+    /// Validate and preview the change without committing it.
     pub dry_run: bool,
+    /// Authorize changes that drop data or columns (`destructive == true`).
     pub allow_destructive: bool,
-    /// Requires the opaque version returned by a prior read or dry run. Pass it unchanged.
+    /// Requires the tenant catalog version returned by a prior read or dry run. Pass it unchanged.
+    /// Any catalog change in the tenant can invalidate it, including changes outside this
+    /// resource.
     pub expected_version: Option<String>,
 }
 
+/// Commit status of a failed catalog mutation, exposed via [`Error::catalog_outcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CatalogMutationOutcome {
+    /// The server rejected the mutation without committing it.
+    Rejected,
+    /// The mutation may have committed; read the resource with [`CatalogResource::get`] before
+    /// retrying.
+    Unknown,
+}
+
+/// Resource definition and tenant catalog version returned by [`CatalogResource::get`].
 #[derive(Debug, Clone)]
 pub struct CatalogSnapshot<T> {
     pub definition: T,
-    /// Opaque catalog version. Pass it unchanged as `expected_version` for conditional changes.
+    /// Opaque version token. Pass it unchanged as [`CatalogOptions::expected_version`].
     pub version: String,
 }
 
-/// Normalized states compared in one transaction; None means absent.
+/// Result of [`CatalogResource::apply`] or [`CatalogResource::delete`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatalogResult<T> {
+    /// Resource definition before the mutation, or `None` if it did not exist.
     pub before: Option<T>,
+    /// Resource definition after the mutation, or `None` if it was deleted.
     pub after: Option<T>,
+    /// Whether the change drops existing data or schema objects.
     pub destructive: bool,
-    /// The base version for dry-run, or the resulting version after a mutation.
+    /// Base tenant catalog version for a dry run, or the resulting version after a committed
+    /// mutation. A mutation with no catalog changes preserves the version.
     #[serde(skip)]
     pub version: String,
 }
 
-/// Reads database, schema, table, and view definitions.
+/// Entry point for declarative catalog snapshots and updates.
 ///
 /// Select the smallest resource you need, then call [`CatalogResource::get`].
-/// Each read returns the complete definition and an opaque version for conditional changes.
+/// Each read returns the complete definition and a tenant catalog version for conditional changes.
 ///
 /// ```no_run
 /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
@@ -163,26 +195,21 @@ pub struct CatalogResult<T> {
 /// # }
 /// ```
 ///
-/// Use [`CatalogResource::apply`] to change a definition and
-/// [`CatalogResource::delete`] to remove a resource. Both support previews and
-/// version preconditions through [`CatalogOptions`].
+/// Use [`CatalogResource::apply`] to replace a definition and
+/// [`CatalogResource::delete`] to remove a resource. Both support dry-run
+/// previews and ETag preconditions through [`CatalogOptions`].
 #[derive(Debug, Clone)]
 pub struct Catalog {
     resource: CatalogResource<CatalogDocument>,
 }
 
 impl Catalog {
-    pub(crate) fn new(client: Client) -> Self {
-        Self {
-            resource: CatalogResource::new(client, &["catalog"]),
-        }
-    }
-
+    /// Reads the complete tenant catalog and its version.
     pub async fn get(&self) -> Result<CatalogSnapshot<CatalogDocument>, Error> {
         self.resource.get().await
     }
 
-    /// Replaces the complete tenant catalog. An empty document clears it.
+    /// Replaces the complete tenant catalog. An empty [`CatalogDocument`] removes all databases.
     pub async fn apply(
         &self,
         definition: &CatalogDocument,
@@ -191,23 +218,28 @@ impl Catalog {
         self.resource.apply(definition, options).await
     }
 
-    /// Retains fields unknown to this SDK when reading and applying definitions.
+    /// Returns a raw JSON selector that preserves unknown fields and arbitrary-precision numbers.
     pub fn raw(&self) -> CatalogResource<serde_json::Value> {
         self.resource.raw()
     }
 
+    /// Selects `database`.
     pub fn database(&self, database: &str) -> CatalogResource<CatalogDatabase> {
         CatalogResource::new(
             self.resource.client.clone(),
             &["catalog", "databases", database],
         )
     }
+
+    /// Selects `database.schema`.
     pub fn schema(&self, database: &str, schema: &str) -> CatalogResource<CatalogSchema> {
         CatalogResource::new(
             self.resource.client.clone(),
             &["catalog", "databases", database, "schemas", schema],
         )
     }
+
+    /// Selects `database.schema.table`.
     pub fn table(
         &self,
         database: &str,
@@ -227,6 +259,8 @@ impl Catalog {
             ],
         )
     }
+
+    /// Selects view `database.schema.view`.
     pub fn view(&self, database: &str, schema: &str, view: &str) -> CatalogResource<CatalogView> {
         CatalogResource::new(
             self.resource.client.clone(),
@@ -241,15 +275,27 @@ impl Catalog {
             ],
         )
     }
+
+    pub(crate) fn new(client: Client) -> Self {
+        Self {
+            resource: CatalogResource::new(client, &["catalog"]),
+        }
+    }
 }
 
-/// A selected subtree. Names are unescaped identifiers. Apply replaces the whole
-/// definition; it is not a patch. Mutations never retry automatically.
+/// Selector for reading, replacing, or deleting a catalog subtree.
 ///
-/// An interrupted or malformed mutation response reports
-/// `catalog_commit_outcome_unknown`. Read the current state before deciding
-/// whether to retry. Typed definitions reject unsupported fields; [`Self::raw`]
-/// preserves them, including arbitrary-precision JSON numbers.
+/// [`apply`](Self::apply) replaces the entire selected subtree (`PUT`), including
+/// child resources; start from [`get`](Self::get) when modifying an existing
+/// resource. Typed definitions reject unknown fields;
+/// call [`raw`](Self::raw) to read and apply [`serde_json::Value`] definitions with
+/// forward-compatible fields and arbitrary-precision numbers.
+///
+/// Catalog mutations use [`ClientBuilder::write_timeout`](crate::ClientBuilder::write_timeout)
+/// and are never retried automatically. On failure, inspect
+/// [`Error::catalog_outcome`]: [`CatalogMutationOutcome::Unknown`] means the
+/// mutation may have committed (including on timeouts or gateway errors) and
+/// requires reading the resource before retrying.
 #[derive(Debug, Clone)]
 pub struct CatalogResource<T> {
     client: Client,
@@ -258,18 +304,20 @@ pub struct CatalogResource<T> {
 }
 
 impl<T> CatalogResource<T> {
-    fn new(client: Client, path: &[&str]) -> Self {
-        Self {
-            client,
-            path: path.iter().map(|s| (*s).to_string()).collect(),
-            definition: PhantomData,
-        }
-    }
-
+    /// Converts this selector to [`serde_json::Value`] to preserve unknown fields and
+    /// arbitrary-precision numbers.
     pub fn raw(&self) -> CatalogResource<serde_json::Value> {
         CatalogResource {
             client: self.client.clone(),
             path: self.path.clone(),
+            definition: PhantomData,
+        }
+    }
+
+    fn new(client: Client, path: &[&str]) -> Self {
+        Self {
+            client,
+            path: path.iter().map(|s| (*s).to_string()).collect(),
             definition: PhantomData,
         }
     }
@@ -297,8 +345,12 @@ impl<T> CatalogResource<T> {
         }
         if let Some(version) = options.expected_version {
             let version = reqwest::header::HeaderValue::from_str(&version).map_err(|e| {
-                Error::new(ErrorKind::ConfigInvalid, "invalid expected catalog version")
-                    .set_source(e)
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    ErrorOperation::ApplyCatalog,
+                    "invalid expected catalog version",
+                )
+                .set_source(e)
             })?;
             request = request.header(reqwest::header::IF_MATCH, version);
         }
@@ -310,15 +362,32 @@ impl<T> CatalogResource<T> {
         let mut response_metadata = None;
         let read_response = async {
             let response = request.send().await.map_err(|e| {
-                catalog_transport_error(writing, "failed to send catalog request").set_source(e)
+                catalog_error(
+                    writing,
+                    if e.is_timeout() {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Unavailable
+                    },
+                    "failed to send catalog request",
+                )
+                .set_source(e)
             })?;
             let status = response.status();
             let headers = response.headers().clone();
             response_metadata = Some((status, headers.clone()));
             let bytes = response.bytes().await.map_err(|e| {
                 apply_response_metadata(
-                    catalog_transport_error(writing, "failed to read catalog response")
-                        .set_source(e),
+                    catalog_error(
+                        writing,
+                        if e.is_timeout() {
+                            ErrorKind::Timeout
+                        } else {
+                            ErrorKind::Unavailable
+                        },
+                        "failed to read catalog response",
+                    )
+                    .set_source(e),
                     status,
                     &headers,
                 )
@@ -329,8 +398,9 @@ impl<T> CatalogResource<T> {
             match tokio::time::timeout(self.client.write_timeout(), read_response).await {
                 Ok(result) => result?,
                 Err(source) => {
-                    let error = catalog_transport_error(writing, "catalog request timed out")
-                        .set_source(source);
+                    let error =
+                        catalog_error(writing, ErrorKind::Timeout, "catalog request timed out")
+                            .set_source(source);
                     return Err(match response_metadata {
                         Some((status, headers)) => apply_response_metadata(error, status, &headers),
                         None => error,
@@ -341,15 +411,28 @@ impl<T> CatalogResource<T> {
             read_response.await?
         };
         if !status.is_success() {
-            let error = decode_http_error(status, &headers, &bytes, ErrorKind::CatalogFailed);
+            let error = decode_http_error(
+                status,
+                &headers,
+                &bytes,
+                match method {
+                    Method::GET => ErrorOperation::ReadCatalog,
+                    Method::DELETE => ErrorOperation::DeleteCatalog,
+                    _ => ErrorOperation::ApplyCatalog,
+                },
+            );
             return Err(if writing {
-                if error.code().is_none() {
-                    error
-                        .set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
-                        .set_persistent()
+                // A coded client rejection establishes failure. A gateway or
+                // timeout response can follow a commit, even when it has a code.
+                let outcome = if status.is_client_error()
+                    && status != StatusCode::REQUEST_TIMEOUT
+                    && error.code().is_some()
+                {
+                    CatalogMutationOutcome::Rejected
                 } else {
-                    error.set_persistent()
-                }
+                    CatalogMutationOutcome::Unknown
+                };
+                error.set_catalog_outcome(outcome)
             } else {
                 error
             });
@@ -360,7 +443,11 @@ impl<T> CatalogResource<T> {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 apply_response_metadata(
-                    catalog_response_error(writing, "catalog response is missing a version"),
+                    catalog_error(
+                        writing,
+                        ErrorKind::InvalidResponse,
+                        "catalog response is missing ETag",
+                    ),
                     status,
                     &headers,
                 )
@@ -368,7 +455,12 @@ impl<T> CatalogResource<T> {
             .to_string();
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             apply_response_metadata(
-                catalog_response_error(writing, "invalid catalog response").set_source(e),
+                catalog_error(
+                    writing,
+                    ErrorKind::InvalidResponse,
+                    "invalid catalog response",
+                )
+                .set_source(e),
                 status,
                 &headers,
             )
@@ -383,15 +475,20 @@ impl<T> CatalogResource<T> {
                         .is_some_and(serde_json::Value::is_boolean)))
         {
             return Err(apply_response_metadata(
-                catalog_response_error(writing, "invalid catalog response"),
+                catalog_error(
+                    writing,
+                    ErrorKind::InvalidResponse,
+                    "invalid catalog response",
+                ),
                 status,
                 &headers,
             ));
         }
         let result = serde_json::from_value(value).map_err(|e| {
             apply_response_metadata(
-                catalog_response_error(
+                catalog_error(
                     writing,
+                    ErrorKind::InvalidResponse,
                     "cannot decode catalog definition; use raw() to retain unsupported fields",
                 )
                 .set_source(e),
@@ -404,22 +501,26 @@ impl<T> CatalogResource<T> {
 }
 
 impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
-    /// Reads the complete definition and its version.
+    /// Reads the complete definition of the selected resource and the tenant catalog version.
     pub async fn get(&self) -> Result<CatalogSnapshot<T>, Error> {
         let (definition, version) = self
             .request(Method::GET, None, CatalogOptions::default())
-            .await?;
+            .await
+            .map_err(|error| error.with_operation(ErrorOperation::ReadCatalog))?;
         Ok(CatalogSnapshot {
             definition,
             version,
         })
     }
 
-    /// Replaces the selected definition, including its children. Omitted fields
-    /// are cleared. Start from a snapshot to retain fields you are not changing.
+    /// Replaces the selected resource definition (`PUT`), clearing any omitted optional fields or
+    /// child collections.
     ///
-    /// Preview with `dry_run` and use `expected_version` to reject concurrent changes.
-    /// Set `allow_destructive` only after reviewing the potential data loss.
+    /// Use [`CatalogOptions`] to preview changes with `dry_run`, guard against
+    /// concurrent edits with `expected_version`, and authorize destructive changes with
+    /// `allow_destructive`.
+    /// A stale version returns [`ErrorKind::Conflict`]; read the resource again and revise the
+    /// change.
     ///
     /// ```no_run
     /// use scopedb_client::CatalogOptions;
@@ -460,48 +561,46 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
     ) -> Result<CatalogResult<T>, Error> {
         let body = serde_json::to_vec(definition).map_err(|e| {
             Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::ApplyCatalog,
                 "failed to serialize catalog definition",
             )
             .set_source(e)
         })?;
-        let (mut result, version): (CatalogResult<T>, _) =
-            self.request(Method::PUT, Some(body), options).await?;
+        let (mut result, version): (CatalogResult<T>, _) = self
+            .request(Method::PUT, Some(body), options)
+            .await
+            .map_err(|error| error.with_operation(ErrorOperation::ApplyCatalog))?;
         result.version = version;
         Ok(result)
     }
 
-    /// Deletes the selected resource. Use `dry_run` to preview the change and
-    /// `expected_version` to require the version from a prior read or preview.
+    /// Deletes the selected database, schema, table, or view.
+    ///
+    /// Deleting the root catalog is not supported; apply an empty [`CatalogDocument`] instead.
+    /// Use [`CatalogOptions::expected_version`] to guard against concurrent catalog changes.
     pub async fn delete(&self, options: CatalogOptions) -> Result<CatalogResult<T>, Error> {
         if self.path.len() == 1 {
             return Err(Error::new(
-                ErrorKind::ConfigInvalid,
+                ErrorKind::InvalidInput,
+                ErrorOperation::DeleteCatalog,
                 "the root catalog does not support DELETE; apply an empty document instead",
             ));
         }
-        let (mut result, version): (CatalogResult<T>, _) =
-            self.request(Method::DELETE, None, options).await?;
+        let (mut result, version): (CatalogResult<T>, _) = self
+            .request(Method::DELETE, None, options)
+            .await
+            .map_err(|error| error.with_operation(ErrorOperation::DeleteCatalog))?;
         result.version = version;
         Ok(result)
     }
 }
 
-fn catalog_transport_error(writing: bool, message: &str) -> Error {
-    let error = catalog_response_error(writing, message);
+fn catalog_error(writing: bool, kind: ErrorKind, message: &str) -> Error {
+    let error = Error::new(kind, ErrorOperation::ApplyCatalog, message)
+        .with_transient_failure(matches!(kind, ErrorKind::Unavailable | ErrorKind::Timeout));
     if writing {
-        error
-    } else {
-        error.set_temporary()
-    }
-}
-
-fn catalog_response_error(writing: bool, message: &str) -> Error {
-    let error = Error::new(ErrorKind::CatalogFailed, message);
-    if writing {
-        error
-            .set_api_error(Some("catalog_commit_outcome_unknown".to_string()), None)
-            .set_persistent()
+        error.set_catalog_outcome(CatalogMutationOutcome::Unknown)
     } else {
         error
     }

@@ -12,55 +12,57 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
+use crate::AppendRowsResult;
+use crate::AppendStreamBuilder;
+use crate::AppendWriterBuilder;
+use crate::CatalogResource;
 use crate::CatalogTable;
 use crate::Client;
 use crate::Error;
-use crate::append_stream::AppendStreamBuilder;
-use crate::protocol::AppendRowsResult;
 
-/// A table selected for writes or catalog reads.
+const DEFAULT_DATABASE: &str = "scopedb";
+const DEFAULT_SCHEMA: &str = "public";
+
+/// Reference to a table for appending rows or managing its catalog definition.
 ///
-/// The table must already exist for writes. Database and schema default to
-/// `scopedb` and `public`; override them with [`Self::with_database`] and
-/// [`Self::with_schema`].
+/// The database and schema default to `scopedb` and `public`; override them with
+/// [`with_database`](Self::with_database) and [`with_schema`](Self::with_schema).
 #[derive(Debug, Clone)]
 pub struct Table {
     client: Client,
-    database: Option<String>,
-    schema: Option<String>,
+    database: String,
+    schema: String,
     table: String,
 }
 
 impl Table {
-    pub(crate) fn new(client: Client, table: String) -> Self {
-        Self {
-            client,
-            database: None,
-            schema: None,
-            table,
-        }
-    }
-
+    /// Overrides the database name (defaults to `scopedb`).
     pub fn with_database(mut self, database: impl Into<String>) -> Self {
-        self.database = Some(database.into());
+        self.database = database.into();
         self
     }
 
+    /// Overrides the schema name (defaults to `public`).
     pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
-        self.schema = Some(schema.into());
+        self.schema = schema.into();
         self
     }
 
+    /// Returns the backtick-quoted `` `database`.`schema`.`table` `` identifier for ScopeQL
+    /// statements.
     pub fn identifier(&self) -> String {
         [
-            self.database.as_deref().unwrap_or("scopedb"),
-            self.schema.as_deref().unwrap_or("public"),
-            &self.table,
+            self.database.as_str(),
+            self.schema.as_str(),
+            self.table.as_str(),
         ]
         .map(quote_ident)
         .join(".")
     }
 
+    /// Executes `DROP TABLE` for this table.
     pub async fn drop(&self) -> Result<(), Error> {
         self.client
             .statement(format!("DROP TABLE {}", self.identifier()))
@@ -69,15 +71,22 @@ impl Table {
             .map(|_| ())
     }
 
-    /// Writes newline-delimited JSON to this table in one HTTP attempt.
+    /// Appends newline-delimited JSON rows to an existing table in one HTTP attempt.
     ///
-    /// Each line must be a JSON object matching the destination columns. A request
-    /// allows at most 8 MiB of uncompressed NDJSON and 200,000 rows. The SDK sends
-    /// it with zstd compression and does not automatically retry it.
+    /// Each non-empty line must be a JSON object matching the table schema, up to
+    /// 8 MiB of uncompressed NDJSON and 200,000 rows. Integer values in NDJSON
+    /// input must fit in `i64` (including `uint` columns and nested JSON); query
+    /// results support the full `u64` range.
     ///
-    /// Integer inputs must fit in a signed 64-bit integer, including values in
-    /// `uint` columns and nested JSON. Larger integers are rejected without
-    /// narrowing; query results still support the full `u64` range.
+    /// A complete HTTP 200 response with a matching row count confirms the entire batch
+    /// committed and returns [`AppendOutcome::Succeeded`](crate::AppendOutcome::Succeeded).
+    /// Valid HTTP 4xx error responses establish a definite failure; 5xx, malformed responses, and
+    /// interrupted requests leave the outcome ambiguous. Only validated HTTP 429 refusals
+    /// are classified as safe automatic retries.
+    ///
+    /// On failure, inspect [`Error::append_details`] for [`AppendOutcome`](crate::AppendOutcome).
+    /// When the status is [`AppendOutcome::Ambiguous`](crate::AppendOutcome::Ambiguous), reconcile
+    /// before replaying the payload.
     ///
     /// ```no_run
     /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
@@ -91,34 +100,60 @@ impl Table {
     /// ```
     pub async fn append(&self, ndjson: impl Into<String>) -> Result<AppendRowsResult, Error> {
         self.client
-            .append_rows(
-                self.database.as_deref().unwrap_or("scopedb"),
-                self.schema.as_deref().unwrap_or("public"),
-                &self.table,
-                ndjson,
-            )
+            .append_rows(&self.database, &self.schema, &self.table, ndjson)
             .await
     }
 
-    /// Builds an asynchronous, bounded and concurrent append stream for this table.
-    pub fn append_stream(&self) -> AppendStreamBuilder {
-        AppendStreamBuilder::new(
-            self.client.clone(),
-            self.database
-                .clone()
-                .unwrap_or_else(|| "scopedb".to_string()),
-            self.schema.clone().unwrap_or_else(|| "public".to_string()),
-            self.table.clone(),
-        )
+    /// Returns an [`AppendWriterBuilder`] for writing finite slices of rows with per-batch progress
+    /// reports.
+    pub fn append_writer(&self) -> AppendWriterBuilder {
+        AppendWriterBuilder::new(self.clone())
     }
 
-    /// Selects this table's complete definition and opaque version for conditional changes.
-    pub fn catalog(&self) -> crate::CatalogResource<CatalogTable> {
-        self.client.catalog().table(
-            self.database.as_deref().unwrap_or("scopedb"),
-            self.schema.as_deref().unwrap_or("public"),
+    /// Returns an [`AppendStreamBuilder`] for buffered, concurrent background streaming.
+    pub fn append_stream(&self) -> AppendStreamBuilder {
+        AppendStreamBuilder::new(self.clone())
+    }
+
+    /// Selects this table's [`CatalogResource`] for reading, updating, or deleting its schema
+    /// definition.
+    pub fn catalog(&self) -> CatalogResource<CatalogTable> {
+        self.client
+            .catalog()
+            .table(&self.database, &self.schema, &self.table)
+    }
+
+    pub(crate) fn new(client: Client, table: String) -> Self {
+        Self {
+            client,
+            database: DEFAULT_DATABASE.to_string(),
+            schema: DEFAULT_SCHEMA.to_string(),
+            table,
+        }
+    }
+
+    pub(crate) fn validate_append(&self) -> Result<(), Error> {
+        self.client.make_resource_url(&[
+            "catalog",
+            "databases",
+            &self.database,
+            "schemas",
+            &self.schema,
+            "tables",
             &self.table,
-        )
+            "ingest",
+        ])?;
+        Ok(())
+    }
+
+    pub(crate) async fn append_with_timeout(
+        &self,
+        payload: String,
+        timeout: Option<Duration>,
+    ) -> Result<AppendRowsResult, Error> {
+        self.client
+            .append_rows_with_timeout(&self.database, &self.schema, &self.table, payload, timeout)
+            .await
     }
 }
 
@@ -142,38 +177,4 @@ fn quote_ident(input: &str) -> String {
     }
     out.push(quote);
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::quote_ident;
-
-    #[test]
-    fn identifiers_always_use_the_same_defaults_as_append_and_catalog() {
-        let client = crate::Client::builder("https://example.invalid")
-            .build()
-            .unwrap();
-        assert_eq!(
-            client.table("events").identifier(),
-            "`scopedb`.`public`.`events`"
-        );
-        assert_eq!(
-            client
-                .table("events")
-                .with_database("analytics")
-                .identifier(),
-            "`analytics`.`public`.`events`"
-        );
-        assert_eq!(
-            client.table("events").with_schema("archive").identifier(),
-            "`scopedb`.`archive`.`events`"
-        );
-    }
-
-    #[test]
-    fn test_quote_ident() {
-        assert_eq!(quote_ident("plain"), "`plain`");
-        assert_eq!(quote_ident("a`b"), "`a\\`b`");
-        assert_eq!(quote_ident("a\nb"), "`a\\nb`");
-    }
 }

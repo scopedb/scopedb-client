@@ -17,6 +17,7 @@
 use std::io;
 
 use scopedb_client::Client;
+use scopedb_client::Error;
 use scopedb_client::Table;
 
 pub fn endpoint() -> String {
@@ -31,7 +32,7 @@ pub fn schema() -> String {
     std::env::var("SCOPEDB_SCHEMA").unwrap_or_else(|_| "public".to_string())
 }
 
-pub fn client() -> Result<Client, Box<dyn std::error::Error>> {
+pub fn client() -> Result<Client, Error> {
     let api_key = std::env::var("SCOPEDB_API_KEY")
         .ok()
         .filter(|value| !value.is_empty())
@@ -44,7 +45,7 @@ pub fn client() -> Result<Client, Box<dyn std::error::Error>> {
     if let Some(api_key) = api_key {
         builder = builder.api_key(api_key);
     }
-    Ok(builder.build()?)
+    builder.build()
 }
 
 pub fn write_table(client: &Client) -> Result<Table, io::Error> {

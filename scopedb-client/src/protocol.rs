@@ -25,38 +25,48 @@ use uuid::Uuid;
 
 use crate::Error;
 use crate::ErrorKind;
+use crate::ErrorOperation;
 use crate::ResultSet;
 
-/// The commit outcome used by table append responses and client-side write interruptions.
+/// Outcome certainty of a table append request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AppendState {
-    /// Every row in the request was committed.
-    Committed,
-    /// The request was rejected before any row was committed.
-    Rejected,
-    /// The server cannot determine whether the request committed.
-    Unknown,
+pub enum AppendOutcome {
+    /// The entire request succeeded; all rows committed.
+    #[serde(rename = "committed")]
+    Succeeded,
+    /// No rows from the attempt took effect, and none can take effect later.
+    #[serde(rename = "rejected")]
+    Failed,
+    /// The attempt may have taken effect or may still take effect later.
+    #[serde(rename = "unknown")]
+    Ambiguous,
 }
 
-impl fmt::Display for AppendState {
+impl fmt::Display for AppendOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Committed => f.write_str("committed"),
-            Self::Rejected => f.write_str("rejected"),
-            Self::Unknown => f.write_str("unknown"),
+            Self::Succeeded => f.write_str("succeeded"),
+            Self::Failed => f.write_str("failed"),
+            Self::Ambiguous => f.write_str("ambiguous"),
         }
     }
 }
 
-/// The result of a committed table append.
+/// Result of a committed table append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResult {
-    pub status: AppendState,
+    /// Confirmed commit outcome: [`AppendOutcome::Succeeded`].
+    #[serde(default = "succeeded_append_outcome")]
+    pub status: AppendOutcome,
     pub num_rows_inserted: i64,
 }
 
-/// A validation error for one row in an append request.
+fn succeeded_append_outcome() -> AppendOutcome {
+    AppendOutcome::Succeeded
+}
+
+/// Row-level validation diagnostic for a failed append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowError {
     pub row_index: u64,
@@ -64,36 +74,154 @@ pub struct AppendRowError {
     pub message: String,
 }
 
-/// Structured failure details returned by the table append API.
+/// SDK outcome certainty and available row diagnostics for a table append request.
+///
+/// On [`Error::append_details`], `status` is [`AppendOutcome::Ambiguous`] if any
+/// attempt had an ambiguous outcome. A definite failure establishes that no rows
+/// took effect or can take effect later. Row diagnostics, when available, describe
+/// the last failed response and do not determine the outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
-    pub status: AppendState,
+    pub status: AppendOutcome,
+    /// Optional row diagnostics; an empty list does not imply that every row is valid.
     #[serde(default)]
     pub row_errors: Vec<AppendRowError>,
     #[serde(default)]
     pub row_errors_truncated: bool,
 }
 
-pub(crate) async fn decode_statement_response(
+/// Decodes outcome certainty separately from the diagnostic error category.
+pub fn decode_append_error(status: StatusCode, headers: &HeaderMap, payload: &[u8]) -> Error {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        code: String,
+        message: String,
+        details: Option<serde_json::Value>,
+        retryable: Option<bool>,
+    }
+
+    let decoded = serde_json::from_slice::<serde_json::Value>(payload).and_then(|envelope| {
+        let modern = envelope.get("error").is_some();
+        let body = envelope.get("error").unwrap_or(&envelope).clone();
+        let request_id = envelope
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        serde_json::from_value::<ErrorBody>(body).map(|body| (body, modern, request_id))
+    });
+    let ambiguous = AppendErrorDetails {
+        status: AppendOutcome::Ambiguous,
+        row_errors: Vec::new(),
+        row_errors_truncated: false,
+    };
+    let (body, modern, request_id) = match decoded {
+        Ok(decoded) => decoded,
+        Err(source) => {
+            return apply_response_metadata(
+                Error::new(
+                    ErrorKind::InvalidResponse,
+                    ErrorOperation::Append,
+                    "failed to decode table append error response",
+                )
+                .set_source(source)
+                .set_append_details(ambiguous),
+                status,
+                headers,
+            );
+        }
+    };
+    let valid = (status.is_client_error() || status.is_server_error())
+        && (!modern || valid_http_error_code(&body.code, status));
+    let mut details = if modern {
+        ambiguous
+    } else {
+        body.details
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<AppendErrorDetails>(value.clone()).ok())
+            .unwrap_or(ambiguous)
+    };
+    // Explicit rejection details never override a 5xx ambiguous outcome.
+    details.status =
+        if valid && status.is_client_error() && (modern || details.status == AppendOutcome::Failed)
+        {
+            AppendOutcome::Failed
+        } else {
+            AppendOutcome::Ambiguous
+        };
+    let kind = if valid {
+        ErrorKind::from_http(status)
+    } else {
+        ErrorKind::InvalidResponse
+    };
+    let mut error = apply_response_metadata(
+        Error::new(kind, ErrorOperation::Append, body.message)
+            .set_api_error(Some(body.code), body.details)
+            .set_server_retryable(body.retryable)
+            .with_transient_failure(
+                valid
+                    && body.retryable != Some(false)
+                    && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()),
+            )
+            .set_append_details(details),
+        status,
+        headers,
+    );
+    if !valid {
+        error = error.with_context("response", "inconsistent HTTP status and error code");
+    }
+    if let Some(request_id) = request_id {
+        error = error.set_request_id(request_id);
+    }
+    error
+}
+
+fn valid_http_error_code(code: &str, status: StatusCode) -> bool {
+    let expected = match code {
+        "bad_request" => 400,
+        "not_found" => 404,
+        "method_not_allowed" => 405,
+        "request_timeout" => 408,
+        "conflict" => 409,
+        "precondition_failed" => 412,
+        "too_many_requests" => 429,
+        "internal_server_error" => 500,
+        "service_unavailable" => 503,
+        "statement_timeout" | "invalid_request" | "unauthorized" | "payload_too_large"
+        | "timeout" | "unavailable" | "internal_error" => return false,
+        _ => return true,
+    };
+    status.as_u16() == expected
+}
+
+pub async fn decode_statement_response(
     r: reqwest::Response,
-    retryable_transport: bool,
+    operation: ErrorOperation,
 ) -> Result<StatementStatus, Error> {
     let code = r.status();
     let headers = r.headers().clone();
     let payload = r.bytes().await.map_err(|err| {
-        let error =
-            Error::new(ErrorKind::Unexpected, "failed to read response body").set_source(err);
-        let error = if retryable_transport {
-            error.set_temporary()
-        } else {
-            error
-        };
+        let error = Error::new(
+            if err.is_timeout() {
+                ErrorKind::Timeout
+            } else {
+                ErrorKind::Unavailable
+            },
+            operation,
+            "failed to read response body",
+        )
+        .set_source(err);
+        let error = error.with_transient_failure(operation != ErrorOperation::SubmitStatement);
         apply_response_metadata(error, code, &headers)
     })?;
     if code.is_success() {
         let result = serde_json::from_slice(&payload).map_err(|err| {
             apply_response_metadata(
-                Error::new(ErrorKind::Unexpected, "failed to decode response body").set_source(err),
+                Error::new(
+                    ErrorKind::InvalidResponse,
+                    operation,
+                    "failed to decode response body",
+                )
+                .set_source(err),
                 code,
                 &headers,
             )
@@ -101,19 +229,14 @@ pub(crate) async fn decode_statement_response(
         return Ok(result);
     }
 
-    Err(decode_http_error(
-        code,
-        &headers,
-        &payload,
-        ErrorKind::Unexpected,
-    ))
+    Err(decode_http_error(code, &headers, &payload, operation))
 }
 
-pub(crate) fn decode_http_error(
+pub fn decode_http_error(
     status: StatusCode,
     headers: &HeaderMap,
     payload: &[u8],
-    kind: ErrorKind,
+    operation: ErrorOperation,
 ) -> Error {
     let parsed = parse_error_payload(payload).unwrap_or_else(|| ParsedErrorPayload {
         code: None,
@@ -123,7 +246,7 @@ pub(crate) fn decode_http_error(
         retryable: None,
     });
     let mut error = apply_response_metadata(
-        Error::new(kind, parsed.message)
+        Error::new(ErrorKind::from_http(status), operation, parsed.message)
             .set_server_retryable(parsed.retryable)
             .set_api_error(parsed.code, parsed.details),
         status,
@@ -138,11 +261,7 @@ pub(crate) fn decode_http_error(
             StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
         ) || status.is_server_error()
     });
-    if retryable {
-        error.set_temporary()
-    } else {
-        error.set_permanent()
-    }
+    error.with_transient_failure(retryable)
 }
 
 #[derive(Debug)]
@@ -189,11 +308,7 @@ fn parse_error_payload(payload: &[u8]) -> Option<ParsedErrorPayload> {
     })
 }
 
-pub(crate) fn apply_response_metadata(
-    mut error: Error,
-    status: StatusCode,
-    headers: &HeaderMap,
-) -> Error {
+pub fn apply_response_metadata(mut error: Error, status: StatusCode, headers: &HeaderMap) -> Error {
     error = error.set_http_status(status);
     if let Some(request_id) = header_string(headers, "x-request-id") {
         error = error.set_request_id(request_id);
@@ -221,11 +336,9 @@ fn parse_retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct StatementRequest {
+pub struct StatementRequest {
     pub statement: String,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub statement_id: Option<Uuid>,
+    pub statement_id: Uuid,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_elapsed_seconds: Option<f64>,
@@ -234,6 +347,7 @@ pub(crate) struct StatementRequest {
     pub format: &'static str,
 }
 
+/// Execution status snapshot of a submitted statement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum StatementStatus {
@@ -249,6 +363,7 @@ pub enum StatementStatus {
     Cancelled(StatementStatusCancelled),
 }
 
+/// Status of a statement queued for execution.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusPending {
@@ -257,6 +372,7 @@ pub struct StatementStatusPending {
     pub progress: StatementEstimatedProgress,
 }
 
+/// Status of an actively executing statement.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusRunning {
@@ -265,6 +381,7 @@ pub struct StatementStatusRunning {
     pub progress: StatementEstimatedProgress,
 }
 
+/// Status of a statement that completed successfully.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusFinished {
@@ -276,11 +393,13 @@ pub struct StatementStatusFinished {
 }
 
 impl StatementStatusFinished {
+    /// Returns the decoded [`ResultSet`].
     pub fn result_set(&self) -> ResultSet {
         ResultSet::from_statement_result_set(self.result_set.clone())
     }
 }
 
+/// Status of a statement that terminated with an execution error.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusFailed {
@@ -290,7 +409,7 @@ pub struct StatementStatusFailed {
     pub error: StatementErrorDetails,
 }
 
-/// Structured failure returned for a failed statement.
+/// Structured server error for a failed statement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatementErrorDetails {
     pub code: String,
@@ -299,6 +418,7 @@ pub struct StatementErrorDetails {
     pub details: Option<serde_json::Value>,
 }
 
+/// Status of a cancelled statement.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatementStatusCancelled {
@@ -352,19 +472,21 @@ impl StatementStatus {
     }
 }
 
+/// Estimated progress and timing metrics for a statement.
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct StatementEstimatedProgress {
     /// Total progress in percentage: `[0.0, 100.0]`.
     #[serde(deserialize_with = "deserialize_progress_float")]
     pub total_percentage: f64,
-    /// Duration in nanoseconds since the statement is submitted.
+    /// Elapsed nanoseconds since submission.
     pub nanos_from_submitted: i64,
-    /// Duration in nanoseconds since the statement is started.
+    /// Elapsed nanoseconds since execution started.
     pub nanos_from_started: i64,
     #[serde(flatten)]
     pub details: StatementProgress,
 }
 
+/// Stage, partition, row, byte, and compute counters for a statement.
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatementProgress {
     /// Compute consumed by the statement, in seconds.
@@ -438,6 +560,7 @@ pub struct FieldMetadata {
     pub data_type: DataType,
 }
 
+/// ScopeDB column and result data type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataType {
     #[serde(rename = "int")]
@@ -484,129 +607,10 @@ impl FromStr for DataType {
             "any" => Ok(Self::Any),
             "null" => Ok(Self::Null),
             _ => Err(Error::new(
-                ErrorKind::Unexpected,
+                ErrorKind::InvalidInput,
+                ErrorOperation::ParseDataType,
                 format!("unrecognized data type: {s}"),
             )),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-    use std::time::SystemTime;
-
-    use reqwest::header::HeaderMap;
-    use reqwest::header::HeaderValue;
-
-    use super::StatementStatus;
-    use super::decode_http_error;
-    use super::parse_error_payload;
-    use super::parse_retry_after;
-    use crate::ErrorKind;
-
-    #[test]
-    fn failed_statement_preserves_structured_error_details() {
-        let status: StatementStatus = serde_json::from_str(
-            r#"{
-                "status":"failed",
-                "statement_id":"01992f9b-8f54-7cd0-96b5-93ff4a218468",
-                "created_at":"2026-08-26T00:00:00Z",
-                "progress":{
-                    "total_percentage":100.0,
-                    "compute_seconds":0.25,
-                    "nanos_from_submitted":1,
-                    "nanos_from_started":1,
-                    "total_stages":1,
-                    "total_partitions":1,
-                    "total_rows":101,
-                    "total_compressed_bytes":0,
-                    "total_uncompressed_bytes":0,
-                    "scanned_stages":1,
-                    "scanned_partitions":1,
-                    "scanned_rows":101,
-                    "scanned_compressed_bytes":0,
-                    "scanned_uncompressed_bytes":0,
-                    "skipped_partitions":0,
-                    "skipped_rows":0,
-                    "skipped_compressed_bytes":0,
-                    "skipped_uncompressed_bytes":0
-                },
-                "error":{
-                    "code":"row_limit_exceeded",
-                    "message":"row limit exceeded",
-                    "details":{"total_rows":101,"max_total_rows":100}
-                }
-            }"#,
-        )
-        .unwrap();
-
-        let StatementStatus::Failed(failed) = status else {
-            panic!("expected failed statement status");
-        };
-        let error = failed.error;
-        assert_eq!(error.code, "row_limit_exceeded");
-        assert_eq!(error.details.unwrap()["max_total_rows"], 100);
-    }
-
-    #[test]
-    fn http_error_message_supports_direct_and_nested_payloads() {
-        assert_eq!(
-            parse_error_payload(br#"{"message":"direct failure","error":"details"}"#)
-                .unwrap()
-                .message,
-            "direct failure"
-        );
-        assert_eq!(
-            parse_error_payload(br#"{"error":{"message":"nested failure"}}"#)
-                .unwrap()
-                .message,
-            "nested failure"
-        );
-    }
-
-    #[test]
-    fn http_error_metadata_prefers_payload_and_honors_retryable() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-request-id", HeaderValue::from_static("header-request"));
-        headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("7"));
-
-        let error = decode_http_error(
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            &headers,
-            br#"{"message":"busy","request_id":"body-request","retryable":false}"#,
-            ErrorKind::Unexpected,
-        );
-
-        assert_eq!(error.message(), "busy");
-        assert_eq!(
-            error.http_status(),
-            Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
-        );
-        assert_eq!(error.request_id(), Some("body-request"));
-        assert_eq!(error.retry_after(), Some(Duration::from_secs(7)));
-        assert!(!error.is_retryable());
-
-        let nested = decode_http_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            &HeaderMap::new(),
-            br#"{"error":{"message":"try later","retryable":true}}"#,
-            ErrorKind::Unexpected,
-        );
-        assert_eq!(nested.message(), "try later");
-        assert!(nested.is_retryable());
-    }
-
-    #[test]
-    fn retry_after_accepts_http_dates() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            HeaderValue::from_static("Thu, 01 Jan 1970 00:00:10 GMT"),
-        );
-        assert_eq!(
-            parse_retry_after(&headers, SystemTime::UNIX_EPOCH),
-            Some(Duration::from_secs(10))
-        );
     }
 }

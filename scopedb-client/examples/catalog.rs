@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let snapshot = client.catalog().schema(&database, &schema).get().await?;
-    println!("schema version: {}", snapshot.version);
+    println!("catalog version: {}", snapshot.version);
     for table in snapshot.definition.tables {
         println!("table {}: {:?}", table.name, table.columns);
     }

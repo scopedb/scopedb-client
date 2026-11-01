@@ -16,16 +16,13 @@ mod common;
 
 use std::time::Duration;
 
-use scopedb_client::AppendState;
+use scopedb_client::AppendOutcome;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = common::client()?;
     let table = common::write_table(&client)?;
 
-    // The default Stop policy gives strict barriers. Local memory and request
-    // concurrency are bounded independently; concurrent batches have no
-    // defined commit order.
     let stream = table
         .append_stream()
         .target_batch_bytes(32 * 1024)
@@ -50,9 +47,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
         Err(error) => {
-            // There is no stream-wide abort or rollback. Settle the already
-            // accepted prefix even if row production or admission stopped.
-            eprintln!("row admission stopped; settling the accepted prefix: {error}");
+            // Settle the admitted prefix before returning the admission error.
+            eprintln!(
+                "row admission stopped after {} rows; settling the accepted prefix: {}",
+                error.append_admission().unwrap().accepted_rows,
+                error
+            );
             Some(error)
         }
     };
@@ -65,9 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => {
             if matches!(
                 error.append_details().map(|details| details.status),
-                Some(AppendState::Unknown)
+                Some(AppendOutcome::Ambiguous)
             ) {
-                eprintln!("commit outcome is unknown; reconcile before replaying");
+                eprintln!("write outcome is ambiguous; reconcile before replaying");
             } else {
                 eprintln!("bulk append failed: {error}");
             }

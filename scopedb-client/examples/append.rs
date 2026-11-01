@@ -14,16 +14,13 @@
 
 mod common;
 
-use scopedb_client::AppendState;
-use scopedb_client::ErrorKind;
+use scopedb_client::AppendOutcome;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = common::client()?;
     let table = common::write_table(&client)?;
 
-    // Direct append sends exactly one caller-owned NDJSON request. Each value
-    // is serialized as one line; JSON arrays are not accepted by this API.
     let ndjson = [
         serde_json::json!({
             "id": 1,
@@ -47,13 +44,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Err(error) => {
-            if error.kind() == ErrorKind::AppendRowsFailed
-                && matches!(
-                    error.append_details().map(|details| details.status),
-                    Some(AppendState::Unknown)
-                )
-            {
-                eprintln!("commit outcome is unknown; reconcile before replaying this payload");
+            if matches!(
+                error.append_details().map(|details| details.status),
+                Some(AppendOutcome::Ambiguous)
+            ) {
+                eprintln!("write outcome is ambiguous; reconcile before replaying this payload");
             }
             Err(error.into())
         }

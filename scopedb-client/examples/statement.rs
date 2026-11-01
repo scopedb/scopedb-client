@@ -22,8 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows = result.into_objects()?;
     println!("rows: {rows:?}");
 
-    // Keep the handle when an application needs progress, cancellation, or a
-    // durable statement ID before waiting for the result.
+    // Submit returns a handle for polling progress or cancelling execution.
     let mut handle = client.statement("SELECT 2 AS value").submit().await?;
     let statement_id = handle.statement_id();
     println!(

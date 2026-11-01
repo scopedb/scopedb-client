@@ -16,11 +16,13 @@ Names occupy individual percent-encoded path segments. Empty names and dot segme
 
 PUT replaces the selected subtree, including all its children. Omitted collections are empty and omitted optional fields are cleared. The definition's `name` must match the path. DELETE removes the selected resource. A mutation returns `before`, `after`, and `destructive`, with absent resources represented by JSON null, plus an `ETag` header.
 
-`CatalogOptions` maps `dry_run` and `allow_destructive` to query parameters and `expected_version` to the `If-Match` header. A dry run validates and rolls back the changes; its ETag identifies the base version. A stale precondition returns HTTP 412 with code `catalog_version_mismatch`. Potentially destructive changes require explicit authorization. The SDK exposes this token as `version`; pass it unchanged as `expected_version` to require the catalog version observed by a prior read or preview.
+`CatalogSnapshot::version` and `CatalogResult::version` contain the opaque tenant catalog version from the `ETag` response header. `CatalogOptions::expected_version` sends that token unchanged, including its quotes, in `If-Match`. The version covers the entire tenant catalog, so a change outside the selected resource can invalidate it. Data writes do not advance the catalog version.
+
+`CatalogOptions` maps `dry_run` and `allow_destructive` to query parameters. A dry run validates and rolls back the changes; its version identifies the base catalog state. A committed mutation returns the resulting version, which stays the same when no catalog changes occur. The server checks `expected_version` atomically with the mutation. A stale condition returns HTTP 412 with code `precondition_failed`, exposed as `ErrorKind::Conflict`; read the resource again and revise the change. Omitting `expected_version` applies the change without a version condition. Potentially destructive changes require explicit authorization.
 
 Definitions include databases, schemas, tables, views, comments, computed-column `expression`, explicit column `indexes`, partitioning, clustering, `distinct`, and `retention_days`. Storage is accepted on creation and omitted from exports. Typed definitions reject unknown fields at every modeled level. `raw()` reads and applies `serde_json::Value` to retain unknown fields and arbitrary-precision JSON numbers.
 
-Mutations use the client's `write_timeout` and never retry automatically. A transport or response-decoding interruption after sending produces `catalog_commit_outcome_unknown`; read the current definition before deciding whether to replay. A dry run cannot commit, so it does not receive this code solely for a transport failure.
+Mutations use the client's `write_timeout` and never retry automatically. `Error::catalog_outcome()` distinguishes a known `CatalogMutationOutcome::Rejected` from `Unknown`, which requires reading the current definition before replaying. Transport interruptions, malformed responses, and gateway or timeout responses leave the outcome unknown, even when an intermediary supplies an error code. Original server codes and diagnostics remain available; client-side uncertainty does not synthesize a server code. Reads, dry runs, and local validation failures have no mutation outcome.
 
 ## Table ingest
 
@@ -30,29 +32,44 @@ Content-Type: application/x-ndjson
 Content-Encoding: zstd
 ```
 
-Each non-empty line is one row object matching an existing table. The SDK and server limit each uncompressed request to 8 MiB and 200,000 rows. A successful response is:
+Each non-empty line is one row object matching an existing table. The SDK limits each uncompressed request to 8 MiB and 200,000 rows. The request is committed as a whole. A successful HTTP 200 response is:
 
 ```json
-{ "status": "committed", "num_rows_inserted": 2 }
+{ "num_rows_inserted": 2 }
 ```
 
-A rejected request can include row-level errors:
+The SDK verifies that `num_rows_inserted` matches the number of submitted rows and returns `AppendRowsResult` with `status: AppendOutcome::Succeeded`. An invalid response leaves the write outcome ambiguous.
+
+HTTP 4xx and 5xx responses contain an `error` object with a string `code`, a diagnostic `message`, and optional `details`. For example, an HTTP 429 response is:
 
 ```json
 {
-  "code": "invalid_schema",
-  "message": "row validation failed",
-  "details": {
-    "status": "rejected",
-    "row_errors": [{ "row_index": 0, "column": "id", "message": "invalid value" }],
-    "row_errors_truncated": false
+  "error": {
+    "code": "too_many_requests",
+    "message": "ingest admission capacity exceeded"
   }
 }
 ```
 
-`committed` means all request rows committed, `rejected` means none committed, and `unknown` means the outcome cannot be determined. Row indexes are zero-based within the request. Missing or malformed outcome details are treated as unknown. Both `AppendRowsResult::status` and `AppendErrorDetails::status` match the native wire fields.
+For a valid response, the HTTP status and `error.code` have the following correspondence. The SDK exposes them separately through `Error::http_status()` and `Error::code()`; `Error::kind()` provides the SDK failure category.
 
-Direct `Table::append` makes one attempt. `Table::append_stream` batches values and retries temporary rejections. Replaying transient unknown outcomes requires `.retry_unknown(true)` and can duplicate rows. Client timeouts are never automatically replayed. Use `flush` or `shutdown` to observe completion and delivery reports. See the [writing guide](../README.md#writing-rows) for batching, concurrency, and failure policies.
+| HTTP status | `error.code`            | SDK `ErrorKind` | SDK `AppendOutcome` | Default writer/stream retry  |
+| ----------- | ----------------------- | --------------- | ------------------- | ---------------------------- |
+| 400         | `bad_request`           | `InvalidInput`  | `Failed`            | No                           |
+| 404         | `not_found`             | `NotFound`      | `Failed`            | No                           |
+| 405         | `method_not_allowed`    | `InvalidInput`  | `Failed`            | No                           |
+| 408         | `request_timeout`       | `Timeout`       | `Failed`            | No                           |
+| 409         | `conflict`              | `Conflict`      | `Failed`            | No                           |
+| 412         | `precondition_failed`   | `Conflict`      | `Failed`            | No                           |
+| 429         | `too_many_requests`     | `RateLimited`   | `Failed`            | Yes, within the retry budget |
+| 500         | `internal_server_error` | `Internal`      | `Ambiguous`         | No                           |
+| 503         | `service_unavailable`   | `Unavailable`   | `Ambiguous`         | No                           |
+
+`Failed` means no rows in the request took effect or can take effect later; `Ambiguous` means they may have taken effect or may still take effect later. These are SDK recovery states, not response-body fields. HTTP 4xx establishes a definite failure and HTTP 5xx leaves the outcome ambiguous. In particular, the string `too_many_requests` alone does not establish a safe retry: it must accompany HTTP 429 in a valid error response. A known code paired with the wrong status is an invalid response. Unrecognized codes are preserved and follow the HTTP status guarantee when the response is otherwise valid. Codes defined only for statement execution results are not valid ingest HTTP error codes.
+
+The ingest API does not return per-row results. A diagnostic `message` has no stable machine-readable format; handle a failed batch as a whole. Interrupted requests, malformed responses, and client-side timeouts have an ambiguous outcome. A received HTTP 408 error establishes a definite failure, whereas a client-side timeout does not.
+
+Direct `Table::append` makes one attempt. `Table::append_writer` and `Table::append_stream` batch rows up to the SDK request limits and automatically retry validated HTTP 429 refusals. Opting into `.retry_ambiguous(true)` also retries transient ambiguous outcomes and can duplicate rows; client timeouts are never replayed automatically. A later definite failure leaves an earlier ambiguous attempt unresolved. See [Write rows](../README.md#write-rows) and the [error-handling guide](errors.md) for finite-write reports, stream admission, and barrier settlement.
 
 NDJSON input is limited to signed 64-bit integers, even for `uint` columns and nested JSON values. This input restriction does not apply to query results, whose `uint` cells support the full unsigned 64-bit range.
 
@@ -69,22 +86,23 @@ A submission request is:
 ```json
 {
   "statement": "SELECT 1",
+  "statement_id": "019a3998-0000-7000-8000-000000000000",
   "max_elapsed_seconds": 30,
   "max_estimated_seconds": 5,
   "format": "json"
 }
 ```
 
-`statement_id` is optional. Duration limits must be positive and finite; omitted values use server defaults. `with_max_elapsed(Duration)` includes queueing time, while `with_max_estimated(Duration)` limits estimated execution duration.
+The HTTP API accepts a `statement_id`; the SDK always supplies one, allocating a UUIDv7 unless `with_statement_id()` overrides it. Submission and execution errors retain this identifier through `Error::statement_id()` so callers can inspect or resume waiting on the execution with `Client::statement_handle()`. Duration limits must be positive and finite; omitted values use server defaults. `with_max_elapsed(Duration)` includes queueing time, while `with_max_estimated(Duration)` limits estimated execution duration.
 
-All three endpoints return the same complete status family: pending, running, finished, failed, or cancelled. Each includes `statement_id`, `created_at`, and progress with `compute_seconds`. Finished responses contain `result_set`; failed responses contain required `error: { code, message, details? }`. Neither failed nor cancelled responses require a top-level message. HTTP success alone does not mean execution succeeded.
+All three endpoints return the same status family: `pending`, `running`, `finished`, `failed`, or `cancelled`. Each includes `statement_id`, `created_at`, and `progress` with `compute_seconds`. Finished responses contain `result_set`; failed responses contain `error: { code, message, details? }`.
 
-`snapshot` returns the cached snapshot, `refresh` fetches an active statement once, and `wait` polls to a terminal state. `cancel` returns and caches the complete response; when execution finishes before cancellation, its result or original failure remains available. Pending or running cancellation responses are observations, not cancellation acknowledgements; continue waiting for a terminal state. `wait()` returns `StatementCancelled` for cancellation and `StatementFailed` for execution failure. Terminal cached states do not trigger another request. Dropping a waiting future does not cancel server execution. Upgrading from 0.5 clears saved statement history and results.
+`snapshot()` returns the cached status, `refresh()` fetches an active statement once, and `wait()` polls to a terminal state. `cancel()` requests cancellation and caches the returned status; if the status is still `pending` or `running`, call `wait()` to observe termination (`ErrorKind::Cancelled`, or the finished result / execution failure if the statement completed first). Terminal states are cached locally and do not trigger another request. Dropping a waiting future stops local polling without cancelling server execution.
 
-The JSON result format encodes cells as strings or null, with field metadata providing their types. `raw_rows` preserves those wire cells. Use value or object conversions for typed values; duplicate field names are rejected by object conversion.
+The JSON result format encodes cells as strings or null, with field metadata providing their types. `raw_rows()` preserves those wire cells. Use value or object conversions for typed values; duplicate field names are rejected by object conversion.
 
-## Errors and migration
+## Errors
 
-HTTP errors use `{ "code": "...", "message": "...", "details": ... }`. `Error::code()` and `details()` preserve unknown codes and structured details. `http_status()`, `request_id()`, and `retry_after()` expose transport diagnostics. Failed statements additionally expose `statement_details()`; append failures expose `append_details()`.
+All asynchronous SDK operations return the concrete `Error` type. Its `kind()` classifies the failure and `operation()` identifies the public operation. HTTP errors use `{ "error": { "code": "...", "message": "...", "details": ... } }`, with optional `details`. `Error::code()` and `details()` preserve server codes and structured details, while `http_status()`, `request_id()`, and `retry_after()` expose transport diagnostics. Failed statements additionally expose `statement_details()`; append failures expose `append_details()`.
 
-The legacy transform Ingest API is removed. Shape events before appending, or append raw events and execute a separate ScopeQL transformation. See [Upgrade from 0.3 to 0.4](migration-0.4.md#replace-ingest-with-append).
+After append retries, raw server details and HTTP diagnostics describe the last failed attempt, while `append_details().status` retains `AppendOutcome::Ambiguous` if any attempt had an ambiguous outcome. See the [error-handling guide](errors.md) for partial-progress accessors, `is_retryable()`, and the diagnostic source chain, and [Upgrade from 0.4 to 0.5](migration-0.5.md) or [Upgrade from 0.3 to 0.4](migration-0.4.md) for version upgrades.
