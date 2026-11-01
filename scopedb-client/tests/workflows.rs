@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use scopedb_client::AppendDeliveryOutcome;
 use scopedb_client::AppendFailurePolicy;
-use scopedb_client::AppendState;
+use scopedb_client::AppendOutcome;
 use scopedb_client::AppendWriter;
 use scopedb_client::CatalogMutationOutcome;
 use scopedb_client::CatalogOptions;
@@ -90,7 +90,7 @@ async fn append_accepts_success_before_and_after_the_protocol_upgrade() {
             .append(r#"{"id":1}"#)
             .await
             .unwrap();
-        assert_eq!(result.status, AppendState::Committed);
+        assert_eq!(result.status, AppendOutcome::Succeeded);
         assert_eq!(result.num_rows_inserted, 1);
         assert_eq!(server.received().len(), 1);
     }
@@ -103,55 +103,55 @@ async fn append_retries_only_valid_admission_refusals() {
             429,
             json!({"error": {"code": "too_many_requests", "message": "busy"}}),
             true,
-            AppendState::DefiniteFailure,
+            AppendOutcome::Failed,
         ),
         (
             429,
             json!({"error": {"code": "future_refusal", "message": "busy"}}),
             true,
-            AppendState::DefiniteFailure,
+            AppendOutcome::Failed,
         ),
         (
             429,
             json!({"code": "unavailable", "message": "busy", "details": {"status": "rejected"}}),
             true,
-            AppendState::DefiniteFailure,
+            AppendOutcome::Failed,
         ),
         (
             503,
             json!({"code": "unavailable", "message": "busy", "retryable": true, "details": {"status": "rejected"}}),
             false,
-            AppendState::Ambiguous,
+            AppendOutcome::Ambiguous,
         ),
         (
             500,
             json!({"error": {"code": "internal_server_error", "message": "commit response lost", "details": {"status": "rejected"}}}),
             false,
-            AppendState::Ambiguous,
+            AppendOutcome::Ambiguous,
         ),
         (
             429,
             json!({"error": {"message": "missing code"}}),
             false,
-            AppendState::Ambiguous,
+            AppendOutcome::Ambiguous,
         ),
         (
             429,
             json!({"error": {"code": "internal_server_error", "message": "inconsistent refusal"}}),
             false,
-            AppendState::Ambiguous,
+            AppendOutcome::Ambiguous,
         ),
         (
             400,
             json!({"error": {"code": "bad_request", "message": "invalid row", "retryable": true}}),
             false,
-            AppendState::DefiniteFailure,
+            AppendOutcome::Failed,
         ),
         (
             408,
             json!({"error": {"code": "request_timeout", "message": "body read timed out"}}),
             false,
-            AppendState::DefiniteFailure,
+            AppendOutcome::Failed,
         ),
     ] {
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -219,7 +219,7 @@ async fn invalid_append_successes_remain_ambiguous() {
         assert_eq!(error.kind(), ErrorKind::InvalidResponse);
         assert_eq!(
             error.append_details().unwrap().status,
-            AppendState::Ambiguous
+            AppendOutcome::Ambiguous
         );
         assert!(!error.is_retryable());
         assert_eq!(server.received().len(), 1);
@@ -758,7 +758,7 @@ async fn response_body_timeout_is_ambiguous_and_is_not_replayed() {
     let error = writer.write(&[json!({"id": 1})]).await.unwrap_err();
     let detail = error.write_details().unwrap();
     assert_eq!(detail.reason, WriteErrorReason::Timeout);
-    assert_eq!(detail.outcome, AppendState::Ambiguous);
+    assert_eq!(detail.outcome, AppendOutcome::Ambiguous);
     assert_eq!(
         error.http_status(),
         Some(scopedb_client::reqwest::StatusCode::OK)

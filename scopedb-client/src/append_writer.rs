@@ -23,8 +23,8 @@ use serde::Serialize;
 
 use crate::AppendDeliveryOutcome;
 use crate::AppendFailurePolicy;
+use crate::AppendOutcome;
 use crate::AppendRowsResult;
-use crate::AppendState;
 use crate::Error;
 use crate::ErrorOperation;
 use crate::Table;
@@ -73,7 +73,7 @@ impl AppendWriterBuilder {
         self
     }
 
-    /// Enables retrying transient [`AppendState::Ambiguous`] responses (default `false`).
+    /// Enables retrying transient [`AppendOutcome::Ambiguous`] responses (default `false`).
     ///
     /// Retrying an ambiguous outcome can insert duplicate rows. Client timeouts
     /// are never replayed automatically.
@@ -185,18 +185,18 @@ impl AppendWriteReport {
     /// Returns the aggregate [`AppendDeliveryOutcome`] for this write call.
     ///
     /// [`AppendDeliveryOutcome::Partial`] may include batches with
-    /// [`AppendState::Ambiguous`]; inspect [`batches`](Self::batches) before replaying
+    /// [`AppendOutcome::Ambiguous`]; inspect [`batches`](Self::batches) before replaying
     /// failed ranges.
     pub fn outcome(&self) -> AppendDeliveryOutcome {
         if self.unsubmitted.is_empty() && self.batches.iter().all(|batch| batch.result.is_ok()) {
-            AppendDeliveryOutcome::Ok
+            AppendDeliveryOutcome::Succeeded
         } else if self.committed_rows() > 0 {
             AppendDeliveryOutcome::Partial
         } else if self.batches.iter().any(|batch| {
             batch.result.as_ref().is_err_and(|error| {
                 error
                     .append_details()
-                    .is_some_and(|details| details.status == AppendState::Ambiguous)
+                    .is_some_and(|details| details.status == AppendOutcome::Ambiguous)
             })
         }) {
             AppendDeliveryOutcome::Ambiguous
@@ -373,7 +373,7 @@ impl AppendWriter {
             .find(|error| {
                 error
                     .append_details()
-                    .is_some_and(|details| details.status == AppendState::Ambiguous)
+                    .is_some_and(|details| details.status == AppendOutcome::Ambiguous)
             })
             .or_else(|| {
                 report

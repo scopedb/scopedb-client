@@ -28,8 +28,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::AppendErrorDetails;
+use crate::AppendOutcome;
 use crate::AppendRowsResult;
-use crate::AppendState;
 use crate::Catalog;
 use crate::Error;
 use crate::ErrorKind;
@@ -553,7 +553,7 @@ fn decode_append_response(
     if status == StatusCode::OK {
         return match serde_json::from_slice::<AppendRowsResult>(payload) {
             Ok(result)
-                if result.status == AppendState::Committed && result.num_rows_inserted >= 0 =>
+                if result.status == AppendOutcome::Succeeded && result.num_rows_inserted >= 0 =>
             {
                 Ok(result)
             }
@@ -596,7 +596,7 @@ fn decode_append_response(
 
 fn append_ambiguous_error(kind: ErrorKind, message: impl Into<String>) -> Error {
     Error::new(kind, ErrorOperation::Append, message).set_append_details(AppendErrorDetails {
-        status: AppendState::Ambiguous,
+        status: AppendOutcome::Ambiguous,
         row_errors: Vec::new(),
         row_errors_truncated: false,
     })
@@ -605,7 +605,7 @@ fn append_ambiguous_error(kind: ErrorKind, message: impl Into<String>) -> Error 
 fn append_definite_failure(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidInput, ErrorOperation::Append, message).set_append_details(
         AppendErrorDetails {
-            status: AppendState::DefiniteFailure,
+            status: AppendOutcome::Failed,
             row_errors: Vec::new(),
             row_errors_truncated: false,
         },

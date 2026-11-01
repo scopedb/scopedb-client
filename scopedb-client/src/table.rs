@@ -79,13 +79,13 @@ impl Table {
     /// results support the full `u64` range.
     ///
     /// A complete HTTP 200 response with a matching row count confirms the entire batch
-    /// committed and returns [`AppendState::Committed`](crate::AppendState::Committed).
+    /// committed and returns [`AppendOutcome::Succeeded`](crate::AppendOutcome::Succeeded).
     /// Valid HTTP 4xx error responses establish a definite failure; 5xx, malformed responses, and
     /// interrupted requests leave the outcome ambiguous. Only validated HTTP 429 refusals
     /// are classified as safe automatic retries.
     ///
-    /// On failure, inspect [`Error::append_details`] for [`AppendState`](crate::AppendState).
-    /// When the status is [`AppendState::Ambiguous`](crate::AppendState::Ambiguous), reconcile
+    /// On failure, inspect [`Error::append_details`] for [`AppendOutcome`](crate::AppendOutcome).
+    /// When the status is [`AppendOutcome::Ambiguous`](crate::AppendOutcome::Ambiguous), reconcile
     /// before replaying the payload.
     ///
     /// ```no_run

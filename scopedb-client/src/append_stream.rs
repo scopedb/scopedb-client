@@ -34,8 +34,8 @@ use tokio::task::JoinSet;
 use crate::AppendDeliveryOutcome;
 use crate::AppendErrorDetails;
 use crate::AppendFailurePolicy;
+use crate::AppendOutcome;
 use crate::AppendRowsResult;
-use crate::AppendState;
 use crate::Error;
 use crate::ErrorKind;
 use crate::ErrorOperation;
@@ -151,7 +151,7 @@ pub struct AppendBatchFailureEvent {
     pub error: Error,
     pub batch_rows: usize,
     pub batch_bytes: usize,
-    pub outcome: AppendState,
+    pub outcome: AppendOutcome,
     pub action: AppendBatchFailureAction,
 }
 
@@ -334,7 +334,7 @@ impl AppendStreamBuilder {
         self
     }
 
-    /// Enables retrying transient [`AppendState::Ambiguous`] responses (default `false`).
+    /// Enables retrying transient [`AppendOutcome::Ambiguous`] responses (default `false`).
     ///
     /// Retrying an ambiguous outcome can insert duplicate rows. Client timeouts
     /// are never replayed automatically.
@@ -623,7 +623,7 @@ impl SharedState {
             .saturating_add(self.interval.ambiguous_rows)
             .saturating_add(dropped_rows);
         let outcome = if lost_rows == 0 {
-            AppendDeliveryOutcome::Ok
+            AppendDeliveryOutcome::Succeeded
         } else if self.interval.committed_rows > 0 {
             AppendDeliveryOutcome::Partial
         } else if self.interval.ambiguous_rows > 0 {
@@ -1442,8 +1442,8 @@ impl AppendWorker {
                     let status = snapshot
                         .append_details()
                         .map(|d| d.status)
-                        .unwrap_or(AppendState::Ambiguous);
-                    if status == AppendState::Ambiguous {
+                        .unwrap_or(AppendOutcome::Ambiguous);
+                    if status == AppendOutcome::Ambiguous {
                         shared.ambiguous_rows = shared.ambiguous_rows.saturating_add(rows);
                         shared.interval.ambiguous_rows =
                             shared.interval.ambiguous_rows.saturating_add(rows);
@@ -1502,8 +1502,8 @@ impl AppendWorker {
         let replace = match &self.fatal {
             None => true,
             Some(current) => {
-                current.append_details().map(|d| d.status) != Some(AppendState::Ambiguous)
-                    && snapshot.append_details().map(|d| d.status) == Some(AppendState::Ambiguous)
+                current.append_details().map(|d| d.status) != Some(AppendOutcome::Ambiguous)
+                    && snapshot.append_details().map(|d| d.status) == Some(AppendOutcome::Ambiguous)
             }
         };
         if replace {
@@ -1635,7 +1635,7 @@ where
 {
     let mut error = Error::new(ErrorKind::Internal, ErrorOperation::Append, message)
         .set_append_details(AppendErrorDetails {
-            status: AppendState::Ambiguous,
+            status: AppendOutcome::Ambiguous,
             row_errors: Vec::new(),
             row_errors_truncated: false,
         });
@@ -1742,7 +1742,7 @@ fn note_drop(shared: &mut SharedState, reason: DropReason) {
 
 fn empty_report() -> AppendDeliveryReport {
     AppendDeliveryReport {
-        outcome: AppendDeliveryOutcome::Ok,
+        outcome: AppendDeliveryOutcome::Succeeded,
         accepted_rows: 0,
         committed_rows: 0,
         failed_rows: 0,

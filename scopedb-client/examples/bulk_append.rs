@@ -16,7 +16,7 @@ mod common;
 
 use std::time::Duration;
 
-use scopedb_client::AppendState;
+use scopedb_client::AppendOutcome;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => {
             if matches!(
                 error.append_details().map(|details| details.status),
-                Some(AppendState::Ambiguous)
+                Some(AppendOutcome::Ambiguous)
             ) {
                 eprintln!("write outcome is ambiguous; reconcile before replaying");
             } else {

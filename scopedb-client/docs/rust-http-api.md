@@ -36,7 +36,7 @@ Each non-empty line is one row object matching an existing table. The SDK limits
 { "num_rows_inserted": 2 }
 ```
 
-The SDK verifies that `num_rows_inserted` matches the number of submitted rows and returns `AppendRowsResult` with `status: AppendState::Committed`. An invalid response leaves the write outcome ambiguous.
+The SDK verifies that `num_rows_inserted` matches the number of submitted rows and returns `AppendRowsResult` with `status: AppendOutcome::Succeeded`. An invalid response leaves the write outcome ambiguous.
 
 HTTP 4xx and 5xx responses contain an `error` object with a string `code`, a diagnostic `message`, and optional `details`. For example, an HTTP 429 response is:
 
@@ -51,19 +51,19 @@ HTTP 4xx and 5xx responses contain an `error` object with a string `code`, a dia
 
 For a valid response, the HTTP status and `error.code` have the following correspondence. The SDK exposes them separately through `Error::http_status()` and `Error::code()`; `Error::kind()` provides the SDK failure category.
 
-| HTTP status | `error.code`            | SDK `ErrorKind` | SDK `AppendState` | Default writer/stream retry  |
-| ----------- | ----------------------- | --------------- | ----------------- | ---------------------------- |
-| 400         | `bad_request`           | `InvalidInput`  | `DefiniteFailure` | No                           |
-| 404         | `not_found`             | `NotFound`      | `DefiniteFailure` | No                           |
-| 405         | `method_not_allowed`    | `InvalidInput`  | `DefiniteFailure` | No                           |
-| 408         | `request_timeout`       | `Timeout`       | `DefiniteFailure` | No                           |
-| 409         | `conflict`              | `Conflict`      | `DefiniteFailure` | No                           |
-| 412         | `precondition_failed`   | `Conflict`      | `DefiniteFailure` | No                           |
-| 429         | `too_many_requests`     | `RateLimited`   | `DefiniteFailure` | Yes, within the retry budget |
-| 500         | `internal_server_error` | `Internal`      | `Ambiguous`       | No                           |
-| 503         | `service_unavailable`   | `Unavailable`   | `Ambiguous`       | No                           |
+| HTTP status | `error.code`            | SDK `ErrorKind` | SDK `AppendOutcome` | Default writer/stream retry  |
+| ----------- | ----------------------- | --------------- | ------------------- | ---------------------------- |
+| 400         | `bad_request`           | `InvalidInput`  | `Failed`            | No                           |
+| 404         | `not_found`             | `NotFound`      | `Failed`            | No                           |
+| 405         | `method_not_allowed`    | `InvalidInput`  | `Failed`            | No                           |
+| 408         | `request_timeout`       | `Timeout`       | `Failed`            | No                           |
+| 409         | `conflict`              | `Conflict`      | `Failed`            | No                           |
+| 412         | `precondition_failed`   | `Conflict`      | `Failed`            | No                           |
+| 429         | `too_many_requests`     | `RateLimited`   | `Failed`            | Yes, within the retry budget |
+| 500         | `internal_server_error` | `Internal`      | `Ambiguous`         | No                           |
+| 503         | `service_unavailable`   | `Unavailable`   | `Ambiguous`         | No                           |
 
-`DefiniteFailure` means no rows in the request took effect or can take effect later; `Ambiguous` means they may have taken effect or may still take effect later. These are SDK recovery states, not response-body fields. HTTP 4xx establishes a definite failure and HTTP 5xx leaves the outcome ambiguous. In particular, the string `too_many_requests` alone does not establish a safe retry: it must accompany HTTP 429 in a valid error response. A known code paired with the wrong status is an invalid response. Unrecognized codes are preserved and follow the HTTP status guarantee when the response is otherwise valid. Codes defined only for statement execution results are not valid ingest HTTP error codes.
+`Failed` means no rows in the request took effect or can take effect later; `Ambiguous` means they may have taken effect or may still take effect later. These are SDK recovery states, not response-body fields. HTTP 4xx establishes a definite failure and HTTP 5xx leaves the outcome ambiguous. In particular, the string `too_many_requests` alone does not establish a safe retry: it must accompany HTTP 429 in a valid error response. A known code paired with the wrong status is an invalid response. Unrecognized codes are preserved and follow the HTTP status guarantee when the response is otherwise valid. Codes defined only for statement execution results are not valid ingest HTTP error codes.
 
 The ingest API does not return per-row results. A diagnostic `message` has no stable machine-readable format; handle a failed batch as a whole. Interrupted requests, malformed responses, and client-side timeouts have an ambiguous outcome. A received HTTP 408 error establishes a definite failure, whereas a client-side timeout does not.
 
@@ -103,4 +103,4 @@ The JSON result format encodes cells as strings or null, with field metadata pro
 
 All asynchronous SDK operations return the concrete `Error` type. Its `kind()` classifies the failure and `operation()` identifies the public operation. HTTP errors use `{ "error": { "code": "...", "message": "...", "details": ... } }`, with optional `details`. `Error::code()` and `details()` preserve server codes and structured details, while `http_status()`, `request_id()`, and `retry_after()` expose transport diagnostics. Failed statements additionally expose `statement_details()`; append failures expose `append_details()`.
 
-After append retries, raw server details and HTTP diagnostics describe the last failed attempt, while `append_details().status` retains `AppendState::Ambiguous` if any attempt had an ambiguous outcome. See the [error-handling guide](errors.md) for partial-progress accessors, `is_retryable()`, and the diagnostic source chain, and [Upgrade from 0.4 to 0.5](migration-0.5.md) or [Upgrade from 0.3 to 0.4](migration-0.4.md) for version upgrades.
+After append retries, raw server details and HTTP diagnostics describe the last failed attempt, while `append_details().status` retains `AppendOutcome::Ambiguous` if any attempt had an ambiguous outcome. See the [error-handling guide](errors.md) for partial-progress accessors, `is_retryable()`, and the diagnostic source chain, and [Upgrade from 0.4 to 0.5](migration-0.5.md) or [Upgrade from 0.3 to 0.4](migration-0.4.md) for version upgrades.

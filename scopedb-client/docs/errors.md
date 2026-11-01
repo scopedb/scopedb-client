@@ -43,16 +43,16 @@ if let Err(error) = stream.shutdown().await {
 # }
 ```
 
-Always inspect the attached report before replaying failed input, as earlier batches may have committed or finished with `AppendState::Ambiguous`.
+Always inspect the attached report before replaying failed input, as earlier batches may have committed or finished with `AppendOutcome::Ambiguous`.
 
 ## Determine the append outcome
 
-`AppendState` describes what the SDK knows about the entire request, not a field to look for in the server response:
+`AppendOutcome` describes what the SDK knows about the entire request, not a field to look for in the server response:
 
 | SDK outcome       | Meaning                                                                | Where to read it                 |
 | ----------------- | ---------------------------------------------------------------------- | -------------------------------- |
-| `Committed`       | All request rows committed.                                            | `AppendRowsResult::status`       |
-| `DefiniteFailure` | No rows took effect or can take effect later.                          | `Error::append_details().status` |
+| `Succeeded`       | All request rows committed.                                            | `AppendRowsResult::status`       |
+| `Failed`          | No rows took effect or can take effect later.                          | `Error::append_details().status` |
 | `Ambiguous`       | The request may have taken effect or may still take effect later.      | `Error::append_details().status` |
 
 A complete HTTP 200 response with a valid, matching `num_rows_inserted` confirms commit. A valid HTTP 4xx error establishes a definite failure. HTTP 5xx errors, interrupted requests, and invalid responses leave the outcome ambiguous. Local validation can also establish a definite failure before sending a request. A server `408 request_timeout` is a definite failure; a client-side timeout is ambiguous.
@@ -75,6 +75,6 @@ After losing a submission response or a later status-read response, use the ID f
 
 `details()`, `request_id()`, and `retry_after()` expose structured diagnostics, the request identifier, and the server's retry delay from the last failed response. Client-side failures leave `code()` as `None`.
 
-After append retries, `details()` describes the last response, while `append_details()` preserves `AppendState::Ambiguous` if any earlier attempt had an ambiguous outcome. Client-side append timeouts also populate `write_details()`.
+After append retries, `details()` describes the last response, while `append_details()` preserves `AppendOutcome::Ambiguous` if any earlier attempt had an ambiguous outcome. Client-side append timeouts also populate `write_details()`.
 
 `Display` formats the operation, category, and key recovery fields. `std::error::Error::source()` and `Debug` expose the underlying transport, serialization, or parse error. Wrap `Error` as a source in your own error type when attaching application context.

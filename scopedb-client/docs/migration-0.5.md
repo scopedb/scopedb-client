@@ -47,25 +47,28 @@ Finite writers also return `Error`. `append_write_report()` retains successful a
 
 ## Handle table append confirmations and retries
 
-Append failure names describe outcome certainty. Update enum matches, retry configuration, and report accessors:
+Append outcomes describe success, definite failure, and ambiguity. Update enum matches, retry configuration, and report accessors:
 
 | In 0.4                                  | In 0.5                                    |
 | --------------------------------------- | ----------------------------------------- |
-| `AppendState::Rejected`                 | `AppendState::DefiniteFailure`            |
-| `AppendState::Unknown`                  | `AppendState::Ambiguous`                  |
+| `AppendState`                           | `AppendOutcome`                           |
+| `AppendState::Committed`                | `AppendOutcome::Succeeded`                |
+| `AppendState::Rejected`                 | `AppendOutcome::Failed`                   |
+| `AppendState::Unknown`                  | `AppendOutcome::Ambiguous`                |
+| `AppendDeliveryOutcome::Ok`             | `AppendDeliveryOutcome::Succeeded`        |
 | `AppendDeliveryOutcome::Unknown`        | `AppendDeliveryOutcome::Ambiguous`        |
 | `AppendStreamBuilder::retry_unknown()`  | `AppendStreamBuilder::retry_ambiguous()`  |
 | `AppendDeliveryReport::unknown_rows`    | `AppendDeliveryReport::ambiguous_rows`    |
 | `AppendDeliveryReport::unknown_batches` | `AppendDeliveryReport::ambiguous_batches` |
 | `AppendStreamStats::unknown_rows`       | `AppendStreamStats::ambiguous_rows`       |
 
-`DefiniteFailure` guarantees that this attempt took effect on no rows and will not take effect later. Retry decisions still depend on the cause: invalid input needs correction, while admission limits may clear. `Ambiguous` means the attempt may have taken effect or may still take effect later. `AppendState` retains its serialized values `committed`, `rejected`, and `unknown`; its `Display` output uses `committed`, `definite_failure`, and `ambiguous`.
+`Failed` guarantees that this attempt took effect on no rows and will not take effect later. Retry decisions still depend on the cause: invalid input needs correction, while admission limits may clear. `Ambiguous` means the attempt may have taken effect or may still take effect later. `AppendOutcome` retains the serialized values `committed`, `rejected`, and `unknown`; its `Display` output uses `succeeded`, `failed`, and `ambiguous`.
 
-`AppendRowsResult::status` remains available and is `AppendState::Committed` after a valid success response, including responses that omit the wire `status` field. Existing successful-write handling does not need to change. The SDK accepts both success formats during service upgrades.
+`AppendRowsResult::status` is now `AppendOutcome::Succeeded` after a valid success response, including responses that omit the wire `status` field. Update matches on `AppendState::Committed` to use the new variant. Success still confirms that the entire batch committed. The SDK accepts both success formats during service upgrades.
 
 The SDK also accepts older flat error responses with explicit `details.status: rejected` on HTTP 4xx. Missing or unrecognized rejection details leave those responses ambiguous. Older row diagnostics remain available through `append_details()` when supplied; `AppendRequestResult::input_index` maps their zero-based request indexes back to the input slice. See the [HTTP API reference](rust-http-api.md#table-ingest) for the current response format and status/code correspondence.
 
-Use `Error::append_details()` for outcome certainty instead of inspecting `details.status` in the raw server error. A valid modern 4xx error establishes `DefiniteFailure`; 5xx and interrupted or invalid responses are `Ambiguous`. Only validated HTTP 429 admission refusals are retried by default. In particular, older HTTP 503 responses no longer qualify as safe retries even when they contain `status: rejected` or `retryable: true`. Keep ambiguous batches available for application reconciliation; `.retry_ambiguous(true)` explicitly accepts duplicate-write risk.
+Use `Error::append_details()` for outcome certainty instead of inspecting `details.status` in the raw server error. A valid modern 4xx error establishes `Failed`; 5xx and interrupted or invalid responses are `Ambiguous`. Only validated HTTP 429 admission refusals are retried by default. In particular, older HTTP 503 responses no longer qualify as safe retries even when they contain `status: rejected` or `retryable: true`. Keep ambiguous batches available for application reconciliation; `.retry_ambiguous(true)` explicitly accepts duplicate-write risk.
 
 Row-error lists may be empty because modern responses provide a diagnostic message instead of structured row errors. Handle the entire failed batch; do not parse diagnostic text to select individual rows for replay. A later definite failure leaves an earlier ambiguous attempt unresolved.
 

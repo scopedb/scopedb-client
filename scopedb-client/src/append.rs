@@ -18,8 +18,8 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::AppendErrorDetails;
+use crate::AppendOutcome;
 use crate::AppendRowsResult;
-use crate::AppendState;
 use crate::Error;
 use crate::ErrorKind;
 use crate::ErrorOperation;
@@ -45,7 +45,7 @@ pub enum AppendFailurePolicy {
 #[non_exhaustive]
 pub enum AppendDeliveryOutcome {
     /// All covered rows committed and no rows were dropped locally.
-    Ok,
+    Succeeded,
     /// Some rows committed; others failed, were dropped, remain unsubmitted, or have ambiguous
     /// outcomes.
     Partial,
@@ -222,7 +222,7 @@ pub async fn append_batch(
         };
         saw_ambiguous |= error
             .append_details()
-            .is_some_and(|details| details.status == AppendState::Ambiguous);
+            .is_some_and(|details| details.status == AppendOutcome::Ambiguous);
         let retryable = append_retryable(&error, options.retry.retry_ambiguous);
         if !retryable || retries >= options.retry.max_retries {
             let error = error.with_retry_history(retries, retryable);
@@ -245,8 +245,8 @@ fn append_retryable(error: &Error, retry_ambiguous: bool) -> bool {
         return false;
     }
     match error.append_details().map(|details| details.status) {
-        Some(AppendState::DefiniteFailure) => error.is_retryable(),
-        Some(AppendState::Ambiguous) if retry_ambiguous => {
+        Some(AppendOutcome::Failed) => error.is_retryable(),
+        Some(AppendOutcome::Ambiguous) if retry_ambiguous => {
             error.http_status().is_none_or(|status| {
                 status.is_success()
                     || status == reqwest::StatusCode::REQUEST_TIMEOUT
@@ -262,7 +262,7 @@ fn preserve_ambiguous_outcome(error: Error, saw_ambiguous: bool) -> Error {
     if !saw_ambiguous
         || error
             .append_details()
-            .is_some_and(|details| details.status == AppendState::Ambiguous)
+            .is_some_and(|details| details.status == AppendOutcome::Ambiguous)
     {
         return error;
     }
@@ -271,11 +271,11 @@ fn preserve_ambiguous_outcome(error: Error, saw_ambiguous: bool) -> Error {
         .append_details()
         .cloned()
         .unwrap_or(AppendErrorDetails {
-            status: AppendState::Ambiguous,
+            status: AppendOutcome::Ambiguous,
             row_errors: Vec::new(),
             row_errors_truncated: false,
         });
-    details.status = AppendState::Ambiguous;
+    details.status = AppendOutcome::Ambiguous;
     error
         .with_context("delivery", "an earlier append attempt may have committed")
         .set_append_details(details)

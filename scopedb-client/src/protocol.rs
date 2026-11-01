@@ -31,22 +31,23 @@ use crate::ResultSet;
 /// Outcome certainty of a table append request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AppendState {
-    /// All rows in the request committed.
-    Committed,
+pub enum AppendOutcome {
+    /// The entire request succeeded; all rows committed.
+    #[serde(rename = "committed")]
+    Succeeded,
     /// No rows from the attempt took effect, and none can take effect later.
     #[serde(rename = "rejected")]
-    DefiniteFailure,
+    Failed,
     /// The attempt may have taken effect or may still take effect later.
     #[serde(rename = "unknown")]
     Ambiguous,
 }
 
-impl fmt::Display for AppendState {
+impl fmt::Display for AppendOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Committed => f.write_str("committed"),
-            Self::DefiniteFailure => f.write_str("definite_failure"),
+            Self::Succeeded => f.write_str("succeeded"),
+            Self::Failed => f.write_str("failed"),
             Self::Ambiguous => f.write_str("ambiguous"),
         }
     }
@@ -55,14 +56,14 @@ impl fmt::Display for AppendState {
 /// Result of a committed table append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResult {
-    /// Confirmed commit outcome: [`AppendState::Committed`].
-    #[serde(default = "committed_append_state")]
-    pub status: AppendState,
+    /// Confirmed commit outcome: [`AppendOutcome::Succeeded`].
+    #[serde(default = "succeeded_append_outcome")]
+    pub status: AppendOutcome,
     pub num_rows_inserted: i64,
 }
 
-fn committed_append_state() -> AppendState {
-    AppendState::Committed
+fn succeeded_append_outcome() -> AppendOutcome {
+    AppendOutcome::Succeeded
 }
 
 /// Row-level validation diagnostic for a failed append request.
@@ -75,13 +76,13 @@ pub struct AppendRowError {
 
 /// SDK outcome certainty and available row diagnostics for a table append request.
 ///
-/// On [`Error::append_details`], `status` is [`AppendState::Ambiguous`] if any
+/// On [`Error::append_details`], `status` is [`AppendOutcome::Ambiguous`] if any
 /// attempt had an ambiguous outcome. A definite failure establishes that no rows
 /// took effect or can take effect later. Row diagnostics, when available, describe
 /// the last failed response and do not determine the outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
-    pub status: AppendState,
+    pub status: AppendOutcome,
     /// Optional row diagnostics; an empty list does not imply that every row is valid.
     #[serde(default)]
     pub row_errors: Vec<AppendRowError>,
@@ -109,7 +110,7 @@ pub fn decode_append_error(status: StatusCode, headers: &HeaderMap, payload: &[u
         serde_json::from_value::<ErrorBody>(body).map(|body| (body, modern, request_id))
     });
     let ambiguous = AppendErrorDetails {
-        status: AppendState::Ambiguous,
+        status: AppendOutcome::Ambiguous,
         row_errors: Vec::new(),
         row_errors_truncated: false,
     };
@@ -140,14 +141,13 @@ pub fn decode_append_error(status: StatusCode, headers: &HeaderMap, payload: &[u
             .unwrap_or(ambiguous)
     };
     // Explicit rejection details never override a 5xx ambiguous outcome.
-    details.status = if valid
-        && status.is_client_error()
-        && (modern || details.status == AppendState::DefiniteFailure)
-    {
-        AppendState::DefiniteFailure
-    } else {
-        AppendState::Ambiguous
-    };
+    details.status =
+        if valid && status.is_client_error() && (modern || details.status == AppendOutcome::Failed)
+        {
+            AppendOutcome::Failed
+        } else {
+            AppendOutcome::Ambiguous
+        };
     let kind = if valid {
         ErrorKind::from_http(status)
     } else {
