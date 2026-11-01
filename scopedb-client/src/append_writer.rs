@@ -73,12 +73,12 @@ impl AppendWriterBuilder {
         self
     }
 
-    /// Enables retrying transient [`AppendState::Unknown`] responses (default `false`).
+    /// Enables retrying transient [`AppendState::Ambiguous`] responses (default `false`).
     ///
-    /// Retrying an unknown outcome can insert duplicate rows. Client timeouts
+    /// Retrying an ambiguous outcome can insert duplicate rows. Client timeouts
     /// are never replayed automatically.
-    pub fn retry_unknown(mut self, enabled: bool) -> Self {
-        self.options.retry.retry_unknown = enabled;
+    pub fn retry_ambiguous(mut self, enabled: bool) -> Self {
+        self.options.retry.retry_ambiguous = enabled;
         self
     }
 
@@ -185,7 +185,7 @@ impl AppendWriteReport {
     /// Returns the aggregate [`AppendDeliveryOutcome`] for this write call.
     ///
     /// [`AppendDeliveryOutcome::Partial`] may include batches with
-    /// [`AppendState::Unknown`]; inspect [`batches`](Self::batches) before replaying
+    /// [`AppendState::Ambiguous`]; inspect [`batches`](Self::batches) before replaying
     /// failed ranges.
     pub fn outcome(&self) -> AppendDeliveryOutcome {
         if self.unsubmitted.is_empty() && self.batches.iter().all(|batch| batch.result.is_ok()) {
@@ -196,10 +196,10 @@ impl AppendWriteReport {
             batch.result.as_ref().is_err_and(|error| {
                 error
                     .append_details()
-                    .is_some_and(|details| details.status == AppendState::Unknown)
+                    .is_some_and(|details| details.status == AppendState::Ambiguous)
             })
         }) {
-            AppendDeliveryOutcome::Unknown
+            AppendDeliveryOutcome::Ambiguous
         } else {
             AppendDeliveryOutcome::Failed
         }
@@ -373,7 +373,7 @@ impl AppendWriter {
             .find(|error| {
                 error
                     .append_details()
-                    .is_some_and(|details| details.status == AppendState::Unknown)
+                    .is_some_and(|details| details.status == AppendState::Ambiguous)
             })
             .or_else(|| {
                 report

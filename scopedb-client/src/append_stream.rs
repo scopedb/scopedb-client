@@ -83,7 +83,7 @@ pub struct AppendAdmissionResult {
 ///
 /// Counts aggregate across batches in the interval and do not identify
 /// individual rows; use application keys to reconcile rows when
-/// `unknown_rows > 0` or `outcome == AppendDeliveryOutcome::Partial`.
+/// `ambiguous_rows > 0` or `outcome == AppendDeliveryOutcome::Partial`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendDeliveryReport {
     pub outcome: AppendDeliveryOutcome,
@@ -91,11 +91,11 @@ pub struct AppendDeliveryReport {
     /// Rows in batches acknowledged as committed.
     pub committed_rows: u64,
     pub failed_rows: u64,
-    pub unknown_rows: u64,
+    pub ambiguous_rows: u64,
     pub dropped_rows: u64,
     pub committed_batches: u64,
     pub failed_batches: u64,
-    pub unknown_batches: u64,
+    pub ambiguous_batches: u64,
     pub retries: u64,
     /// Elapsed wall time waiting for this barrier.
     pub duration: Duration,
@@ -126,7 +126,7 @@ pub struct AppendStreamStats {
     pub accepted_rows: u64,
     pub committed_rows: u64,
     pub failed_rows: u64,
-    pub unknown_rows: u64,
+    pub ambiguous_rows: u64,
     pub dropped_rows: u64,
     pub dropped_by_reason: AppendDroppedRows,
     pub retries: u64,
@@ -245,7 +245,7 @@ type BatchFailureListener = Arc<dyn Fn(&AppendBatchFailureEvent) + Send + Sync>;
 ///
 /// Defaults to 4 MiB target batches, 4 concurrent requests, and
 /// [`AppendFailurePolicy::Stop`]. Validated HTTP 429 admission refusals are retried; retrying
-/// unknown outcomes requires opting into [`retry_unknown`](Self::retry_unknown).
+/// ambiguous outcomes requires opting into [`retry_ambiguous`](Self::retry_ambiguous).
 ///
 /// # Telemetry
 ///
@@ -334,12 +334,12 @@ impl AppendStreamBuilder {
         self
     }
 
-    /// Enables retrying transient [`AppendState::Unknown`] responses (default `false`).
+    /// Enables retrying transient [`AppendState::Ambiguous`] responses (default `false`).
     ///
-    /// Retrying an unknown outcome can insert duplicate rows. Client timeouts
+    /// Retrying an ambiguous outcome can insert duplicate rows. Client timeouts
     /// are never replayed automatically.
-    pub fn retry_unknown(mut self, enabled: bool) -> Self {
-        self.options.retry.retry_unknown = enabled;
+    pub fn retry_ambiguous(mut self, enabled: bool) -> Self {
+        self.options.retry.retry_ambiguous = enabled;
         self
     }
 
@@ -537,10 +537,10 @@ struct DeliveryCounters {
     accepted_rows: u64,
     committed_rows: u64,
     failed_rows: u64,
-    unknown_rows: u64,
+    ambiguous_rows: u64,
     committed_batches: u64,
     failed_batches: u64,
-    unknown_batches: u64,
+    ambiguous_batches: u64,
     retries: u64,
 }
 
@@ -569,7 +569,7 @@ struct SharedState {
     accepted_rows: u64,
     committed_rows: u64,
     failed_rows: u64,
-    unknown_rows: u64,
+    ambiguous_rows: u64,
     dropped_rows: u64,
     dropped_by_reason: AppendDroppedRows,
     retries: u64,
@@ -593,7 +593,7 @@ impl Default for SharedState {
             accepted_rows: 0,
             committed_rows: 0,
             failed_rows: 0,
-            unknown_rows: 0,
+            ambiguous_rows: 0,
             dropped_rows: 0,
             dropped_by_reason: AppendDroppedRows::default(),
             retries: 0,
@@ -620,14 +620,14 @@ impl SharedState {
         let lost_rows = self
             .interval
             .failed_rows
-            .saturating_add(self.interval.unknown_rows)
+            .saturating_add(self.interval.ambiguous_rows)
             .saturating_add(dropped_rows);
         let outcome = if lost_rows == 0 {
             AppendDeliveryOutcome::Ok
         } else if self.interval.committed_rows > 0 {
             AppendDeliveryOutcome::Partial
-        } else if self.interval.unknown_rows > 0 {
-            AppendDeliveryOutcome::Unknown
+        } else if self.interval.ambiguous_rows > 0 {
+            AppendDeliveryOutcome::Ambiguous
         } else {
             AppendDeliveryOutcome::Failed
         };
@@ -636,11 +636,11 @@ impl SharedState {
             accepted_rows: self.interval.accepted_rows,
             committed_rows: self.interval.committed_rows,
             failed_rows: self.interval.failed_rows,
-            unknown_rows: self.interval.unknown_rows,
+            ambiguous_rows: self.interval.ambiguous_rows,
             dropped_rows,
             committed_batches: self.interval.committed_batches,
             failed_batches: self.interval.failed_batches,
-            unknown_batches: self.interval.unknown_batches,
+            ambiguous_batches: self.interval.ambiguous_batches,
             retries: self.interval.retries,
             duration,
         };
@@ -926,7 +926,7 @@ impl AppendStream {
             accepted_rows: shared.accepted_rows,
             committed_rows: shared.committed_rows,
             failed_rows: shared.failed_rows,
-            unknown_rows: shared.unknown_rows,
+            ambiguous_rows: shared.ambiguous_rows,
             dropped_rows: shared.dropped_rows,
             dropped_by_reason: shared.dropped_by_reason,
             retries: shared.retries,
@@ -1203,25 +1203,25 @@ async fn monitor_append_worker(
             "append stream worker stopped before publishing a final result",
         ),
         Err(error) => {
-            unknown_append_error("append stream worker terminated unexpectedly", Some(error))
+            ambiguous_append_error("append stream worker terminated unexpectedly", Some(error))
         }
     };
     let snapshot = error.clone();
     let resolved = shared
         .committed_rows
         .saturating_add(shared.failed_rows)
-        .saturating_add(shared.unknown_rows);
+        .saturating_add(shared.ambiguous_rows);
     let unresolved = shared.accepted_rows.saturating_sub(resolved);
-    shared.unknown_rows = shared.unknown_rows.saturating_add(unresolved);
-    shared.interval.unknown_rows = shared.interval.unknown_rows.saturating_add(unresolved);
+    shared.ambiguous_rows = shared.ambiguous_rows.saturating_add(unresolved);
+    shared.interval.ambiguous_rows = shared.interval.ambiguous_rows.saturating_add(unresolved);
     if unresolved > 0 {
-        shared.interval.unknown_batches = shared.interval.unknown_batches.saturating_add(1);
+        shared.interval.ambiguous_batches = shared.interval.ambiguous_batches.saturating_add(1);
     }
     shared.interval.accepted_rows = shared
         .interval
         .committed_rows
         .saturating_add(shared.interval.failed_rows)
-        .saturating_add(shared.interval.unknown_rows);
+        .saturating_add(shared.interval.ambiguous_rows);
     let dropped = shared.dropped_rows;
     shared.take_report(dropped, Duration::ZERO);
     shared.pending_rows = 0;
@@ -1400,7 +1400,7 @@ impl AppendWorker {
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                let fatal = unknown_append_error(
+                let fatal = ambiguous_append_error(
                     "append stream background request task failed",
                     Some(error),
                 );
@@ -1442,13 +1442,13 @@ impl AppendWorker {
                     let status = snapshot
                         .append_details()
                         .map(|d| d.status)
-                        .unwrap_or(AppendState::Unknown);
-                    if status == AppendState::Unknown {
-                        shared.unknown_rows = shared.unknown_rows.saturating_add(rows);
-                        shared.interval.unknown_rows =
-                            shared.interval.unknown_rows.saturating_add(rows);
-                        shared.interval.unknown_batches =
-                            shared.interval.unknown_batches.saturating_add(1);
+                        .unwrap_or(AppendState::Ambiguous);
+                    if status == AppendState::Ambiguous {
+                        shared.ambiguous_rows = shared.ambiguous_rows.saturating_add(rows);
+                        shared.interval.ambiguous_rows =
+                            shared.interval.ambiguous_rows.saturating_add(rows);
+                        shared.interval.ambiguous_batches =
+                            shared.interval.ambiguous_batches.saturating_add(1);
                     } else {
                         shared.failed_rows = shared.failed_rows.saturating_add(rows);
                         shared.interval.failed_rows =
@@ -1502,8 +1502,8 @@ impl AppendWorker {
         let replace = match &self.fatal {
             None => true,
             Some(current) => {
-                current.append_details().map(|d| d.status) != Some(AppendState::Unknown)
-                    && snapshot.append_details().map(|d| d.status) == Some(AppendState::Unknown)
+                current.append_details().map(|d| d.status) != Some(AppendState::Ambiguous)
+                    && snapshot.append_details().map(|d| d.status) == Some(AppendState::Ambiguous)
             }
         };
         if replace {
@@ -1582,13 +1582,14 @@ impl AppendWorker {
             let resolved = shared
                 .committed_rows
                 .saturating_add(shared.failed_rows)
-                .saturating_add(shared.unknown_rows);
+                .saturating_add(shared.ambiguous_rows);
             let unresolved = shared.accepted_rows.saturating_sub(resolved);
             if unresolved > 0 {
-                shared.unknown_rows = shared.unknown_rows.saturating_add(unresolved);
-                shared.interval.unknown_rows =
-                    shared.interval.unknown_rows.saturating_add(unresolved);
-                shared.interval.unknown_batches = shared.interval.unknown_batches.saturating_add(1);
+                shared.ambiguous_rows = shared.ambiguous_rows.saturating_add(unresolved);
+                shared.interval.ambiguous_rows =
+                    shared.interval.ambiguous_rows.saturating_add(unresolved);
+                shared.interval.ambiguous_batches =
+                    shared.interval.ambiguous_batches.saturating_add(1);
             }
             shared.pending_rows = 0;
             shared.pending_bytes = 0;
@@ -1628,13 +1629,13 @@ impl AppendWorker {
     }
 }
 
-fn unknown_append_error<E>(message: impl Into<String>, source: Option<E>) -> Error
+fn ambiguous_append_error<E>(message: impl Into<String>, source: Option<E>) -> Error
 where
     E: std::error::Error + Send + Sync + 'static,
 {
     let mut error = Error::new(ErrorKind::Internal, ErrorOperation::Append, message)
         .set_append_details(AppendErrorDetails {
-            status: AppendState::Unknown,
+            status: AppendState::Ambiguous,
             row_errors: Vec::new(),
             row_errors_truncated: false,
         });
@@ -1745,11 +1746,11 @@ fn empty_report() -> AppendDeliveryReport {
         accepted_rows: 0,
         committed_rows: 0,
         failed_rows: 0,
-        unknown_rows: 0,
+        ambiguous_rows: 0,
         dropped_rows: 0,
         committed_batches: 0,
         failed_batches: 0,
-        unknown_batches: 0,
+        ambiguous_batches: 0,
         retries: 0,
         duration: Duration::ZERO,
     }

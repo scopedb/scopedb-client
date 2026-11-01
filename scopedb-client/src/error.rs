@@ -213,7 +213,7 @@ impl fmt::Display for WriteErrorReason {
 
 /// Client-side interruption details for an append request.
 ///
-/// When `outcome` is [`AppendState::Unknown`], the request may have committed on the server.
+/// When `outcome` is [`AppendState::Ambiguous`], the request may have committed on the server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct WriteErrorDetails {
@@ -328,8 +328,8 @@ impl Error {
 
     /// Returns table-append failure details across all attempts of the failed request.
     ///
-    /// `status` remains [`AppendState::Unknown`] if any attempt had an unknown
-    /// commit outcome, even when a later attempt was rejected. `row_errors`
+    /// `status` remains [`AppendState::Ambiguous`] if any attempt had an ambiguous
+    /// outcome, even when a later attempt failed definitely. `row_errors`
     /// come from the last failed response.
     pub fn append_details(&self) -> Option<&AppendErrorDetails> {
         match self.failure.as_deref() {
@@ -445,7 +445,7 @@ impl Error {
             || self.catalog_outcome() == Some(CatalogMutationOutcome::Unknown)
             || self
                 .append_details()
-                .is_some_and(|details| details.status == AppendState::Unknown)
+                .is_some_and(|details| details.status == AppendState::Ambiguous)
         {
             return false;
         }
@@ -610,7 +610,7 @@ impl Error {
             Some(FailureDetails::Append { interruption, .. }) => {
                 *interruption = Some(WriteErrorDetails {
                     reason: WriteErrorReason::Timeout,
-                    outcome: AppendState::Unknown,
+                    outcome: AppendState::Ambiguous,
                 })
             }
             _ => unreachable!("write interruption belongs to an append failure"),
@@ -766,8 +766,8 @@ impl fmt::Display for Error {
         if let Some(report) = self.append_delivery_report() {
             write!(
                 f,
-                ", committed_rows: {}, accepted_rows: {}, unknown_rows: {}, outcome: {:?}",
-                report.committed_rows, report.accepted_rows, report.unknown_rows, report.outcome
+                ", committed_rows: {}, accepted_rows: {}, ambiguous_rows: {}, outcome: {:?}",
+                report.committed_rows, report.accepted_rows, report.ambiguous_rows, report.outcome
             )?;
         }
         Ok(())

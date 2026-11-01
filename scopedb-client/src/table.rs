@@ -80,13 +80,13 @@ impl Table {
     ///
     /// A complete HTTP 200 response with a matching row count confirms the entire batch
     /// committed and returns [`AppendState::Committed`](crate::AppendState::Committed).
-    /// Valid HTTP 4xx error responses establish rejection; 5xx, malformed responses, and
-    /// interrupted requests leave the outcome unknown. Only validated HTTP 429 refusals
+    /// Valid HTTP 4xx error responses establish a definite failure; 5xx, malformed responses, and
+    /// interrupted requests leave the outcome ambiguous. Only validated HTTP 429 refusals
     /// are classified as safe automatic retries.
     ///
     /// On failure, inspect [`Error::append_details`] for [`AppendState`](crate::AppendState).
-    /// When the status is [`AppendState::Unknown`](crate::AppendState::Unknown), reconcile before
-    /// replaying the payload.
+    /// When the status is [`AppendState::Ambiguous`](crate::AppendState::Ambiguous), reconcile
+    /// before replaying the payload.
     ///
     /// ```no_run
     /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {

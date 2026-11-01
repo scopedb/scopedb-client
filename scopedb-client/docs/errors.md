@@ -36,34 +36,34 @@ Admitted rows belong to the stream; use `flush()` or `shutdown()` to observe the
 # async fn settle(stream: scopedb_client::AppendStream) -> Result<(), scopedb_client::Error> {
 if let Err(error) = stream.shutdown().await {
     let report = error.append_delivery_report().unwrap();
-    eprintln!("committed: {}, unknown: {}", report.committed_rows, report.unknown_rows);
+    eprintln!("committed: {}, ambiguous: {}", report.committed_rows, report.ambiguous_rows);
     return Err(error);
 }
 # Ok(())
 # }
 ```
 
-Always inspect the attached report before replaying failed input, as earlier batches may have committed or finished with `AppendState::Unknown`.
+Always inspect the attached report before replaying failed input, as earlier batches may have committed or finished with `AppendState::Ambiguous`.
 
-## Determine whether an append committed
+## Determine the append outcome
 
 `AppendState` describes what the SDK knows about the entire request, not a field to look for in the server response:
 
-| SDK outcome | Meaning                                                                | Where to read it                 |
-| ----------- | ---------------------------------------------------------------------- | -------------------------------- |
-| `Committed` | All request rows committed.                                            | `AppendRowsResult::status`       |
-| `Rejected`  | No request rows committed.                                             | `Error::append_details().status` |
-| `Unknown`   | The request may have committed; the SDK cannot confirm or rule it out. | `Error::append_details().status` |
+| SDK outcome       | Meaning                                                                | Where to read it                 |
+| ----------------- | ---------------------------------------------------------------------- | -------------------------------- |
+| `Committed`       | All request rows committed.                                            | `AppendRowsResult::status`       |
+| `DefiniteFailure` | No rows took effect or can take effect later.                          | `Error::append_details().status` |
+| `Ambiguous`       | The request may have taken effect or may still take effect later.      | `Error::append_details().status` |
 
-A complete HTTP 200 response with a valid, matching `num_rows_inserted` confirms commit. A valid HTTP 4xx error establishes rejection. HTTP 5xx errors, interrupted requests, and invalid responses leave the outcome unknown. Local validation can also establish rejection before sending a request. A server `408 request_timeout` is a known rejection; a client-side timeout is unknown.
+A complete HTTP 200 response with a valid, matching `num_rows_inserted` confirms commit. A valid HTTP 4xx error establishes a definite failure. HTTP 5xx errors, interrupted requests, and invalid responses leave the outcome ambiguous. Local validation can also establish a definite failure before sending a request. A server `408 request_timeout` is a definite failure; a client-side timeout is ambiguous.
 
-The ingest API reports failures for the entire batch, without per-row results. Handle the batch as a unit and do not parse diagnostic messages to select rows for replay. After retries, a later rejection cannot resolve an earlier unknown attempt.
+The ingest API reports failures for the entire batch, without per-row results. Handle the batch as a unit and do not parse diagnostic messages to select rows for replay. After retries, a later definite failure leaves an earlier ambiguous attempt unresolved.
 
 ## Decide whether to retry
 
-`is_retryable()` indicates whether repeating the same SDK call as-is is safe and useful. It returns `false` when a write or catalog mutation has an unknown commit outcome, when an error carries an aggregate progress report, or when a SQL submission or execution call failed after submission.
+`is_retryable()` indicates whether repeating the same SDK call as-is is safe and useful. It returns `false` when a write or catalog mutation has an uncertain write outcome, when an error carries an aggregate progress report, or when a SQL submission or execution call failed after submission.
 
-`Table::append` makes one attempt. Finite writers and append streams automatically retry validated HTTP 429 admission refusals within their retry budget. Other 4xx responses require caller handling. Unknown outcomes require application reconciliation before replay; `.retry_unknown(true)` explicitly accepts the risk of duplicate rows when retrying transient unknown failures. Client-side append timeouts are never retried automatically.
+`Table::append` makes one attempt. Finite writers and append streams automatically retry validated HTTP 429 admission refusals within their retry budget. Other 4xx responses require caller handling. Ambiguous outcomes require application reconciliation before replay; `.retry_ambiguous(true)` explicitly accepts the risk of duplicate rows when retrying transient ambiguous failures. Client-side append timeouts are never retried automatically.
 
 After losing a submission response or a later status-read response, use the ID from `error.statement_id()` with `Client::statement_handle()` to inspect the existing execution. Transient polling errors from `StatementHandle::refresh()` or `StatementHandle::wait()` can be retried on the same handle.
 
@@ -71,10 +71,10 @@ After losing a submission response or a later status-read response, use the ID f
 
 ## Diagnose the failure
 
-`http_status()` returns the HTTP status, such as 429. `code()` returns the response body's string error category, such as `too_many_requests`. `kind()` returns the SDK category, such as `ErrorKind::RateLimited`. These describe the failure; use `append_details().status` to determine the append's commit outcome. The [HTTP API reference](rust-http-api.md#table-ingest) lists the status/code pairs and their recovery guarantees. Known codes must match their HTTP status; a mismatch is `InvalidResponse` with an unknown append outcome. Unrecognized codes are preserved and follow the HTTP status guarantee when the error response is otherwise valid.
+`http_status()` returns the HTTP status, such as 429. `code()` returns the response body's string error category, such as `too_many_requests`. `kind()` returns the SDK category, such as `ErrorKind::RateLimited`. These describe the failure; use `append_details().status` to determine the append's commit outcome. The [HTTP API reference](rust-http-api.md#table-ingest) lists the status/code pairs and their recovery guarantees. Known codes must match their HTTP status; a mismatch is `InvalidResponse` with an ambiguous append outcome. Unrecognized codes are preserved and follow the HTTP status guarantee when the error response is otherwise valid.
 
 `details()`, `request_id()`, and `retry_after()` expose structured diagnostics, the request identifier, and the server's retry delay from the last failed response. Client-side failures leave `code()` as `None`.
 
-After append retries, `details()` describes the last response, while `append_details()` preserves `AppendState::Unknown` if any earlier attempt had an unknown commit outcome. Client-side append timeouts also populate `write_details()`.
+After append retries, `details()` describes the last response, while `append_details()` preserves `AppendState::Ambiguous` if any earlier attempt had an ambiguous outcome. Client-side append timeouts also populate `write_details()`.
 
 `Display` formats the operation, category, and key recovery fields. `std::error::Error::source()` and `Debug` expose the underlying transport, serialization, or parse error. Wrap `Error` as a source in your own error type when attaching application context.

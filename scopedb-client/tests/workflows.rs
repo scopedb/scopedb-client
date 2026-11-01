@@ -103,55 +103,55 @@ async fn append_retries_only_valid_admission_refusals() {
             429,
             json!({"error": {"code": "too_many_requests", "message": "busy"}}),
             true,
-            AppendState::Rejected,
+            AppendState::DefiniteFailure,
         ),
         (
             429,
             json!({"error": {"code": "future_refusal", "message": "busy"}}),
             true,
-            AppendState::Rejected,
+            AppendState::DefiniteFailure,
         ),
         (
             429,
             json!({"code": "unavailable", "message": "busy", "details": {"status": "rejected"}}),
             true,
-            AppendState::Rejected,
+            AppendState::DefiniteFailure,
         ),
         (
             503,
             json!({"code": "unavailable", "message": "busy", "retryable": true, "details": {"status": "rejected"}}),
             false,
-            AppendState::Unknown,
+            AppendState::Ambiguous,
         ),
         (
             500,
             json!({"error": {"code": "internal_server_error", "message": "commit response lost", "details": {"status": "rejected"}}}),
             false,
-            AppendState::Unknown,
+            AppendState::Ambiguous,
         ),
         (
             429,
             json!({"error": {"message": "missing code"}}),
             false,
-            AppendState::Unknown,
+            AppendState::Ambiguous,
         ),
         (
             429,
             json!({"error": {"code": "internal_server_error", "message": "inconsistent refusal"}}),
             false,
-            AppendState::Unknown,
+            AppendState::Ambiguous,
         ),
         (
             400,
             json!({"error": {"code": "bad_request", "message": "invalid row", "retryable": true}}),
             false,
-            AppendState::Rejected,
+            AppendState::DefiniteFailure,
         ),
         (
             408,
             json!({"error": {"code": "request_timeout", "message": "body read timed out"}}),
             false,
-            AppendState::Rejected,
+            AppendState::DefiniteFailure,
         ),
     ] {
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -196,7 +196,7 @@ async fn append_retries_only_valid_admission_refusals() {
 }
 
 #[tokio::test]
-async fn invalid_append_successes_remain_unknown() {
+async fn invalid_append_successes_remain_ambiguous() {
     for body in [
         json!({"num_rows_inserted": 0}),
         json!({"num_rows_inserted": -1}),
@@ -217,7 +217,10 @@ async fn invalid_append_successes_remain_unknown() {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidResponse);
-        assert_eq!(error.append_details().unwrap().status, AppendState::Unknown);
+        assert_eq!(
+            error.append_details().unwrap().status,
+            AppendState::Ambiguous
+        );
         assert!(!error.is_retryable());
         assert_eq!(server.received().len(), 1);
     }
@@ -526,7 +529,7 @@ async fn finite_write_local_failure_keeps_buffered_input_unsubmitted() {
 }
 
 #[tokio::test]
-async fn replay_policy_preserves_earlier_unknown_outcomes() {
+async fn replay_policy_preserves_earlier_ambiguous_outcomes() {
     for replay in [false, true] {
         let attempts = Arc::new(AtomicUsize::new(0));
         let mut server = Server::start(move |_| {
@@ -549,12 +552,12 @@ async fn replay_policy_preserves_earlier_unknown_outcomes() {
             .append_writer()
             .max_retries(1)
             .initial_backoff(Duration::ZERO)
-            .retry_unknown(replay)
+            .retry_ambiguous(replay)
             .build()
             .unwrap();
         let error = writer.write(&[json!({"id": 1})]).await.unwrap_err();
         let report = error.append_write_report().unwrap();
-        assert_eq!(report.outcome(), AppendDeliveryOutcome::Unknown);
+        assert_eq!(report.outcome(), AppendDeliveryOutcome::Ambiguous);
         assert_eq!(report.batches()[0].retries(), usize::from(replay));
         assert!(!error.is_retryable());
         if replay {
@@ -737,7 +740,7 @@ async fn cancellation_while_waiting_for_http_response_stops_finite_delivery() {
 }
 
 #[tokio::test]
-async fn response_body_timeout_is_unknown_and_is_not_replayed() {
+async fn response_body_timeout_is_ambiguous_and_is_not_replayed() {
     let (release, blocked) = watch::channel(false);
     let mut server = Server::start(move |request| {
         let blocked = blocked.clone();
@@ -749,13 +752,13 @@ async fn response_body_timeout_is_unknown_and_is_not_replayed() {
         .table("events")
         .append_writer()
         .attempt_timeout(Duration::from_millis(100))
-        .retry_unknown(true)
+        .retry_ambiguous(true)
         .build()
         .unwrap();
     let error = writer.write(&[json!({"id": 1})]).await.unwrap_err();
     let detail = error.write_details().unwrap();
     assert_eq!(detail.reason, WriteErrorReason::Timeout);
-    assert_eq!(detail.outcome, AppendState::Unknown);
+    assert_eq!(detail.outcome, AppendState::Ambiguous);
     assert_eq!(
         error.http_status(),
         Some(scopedb_client::reqwest::StatusCode::OK)
