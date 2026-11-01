@@ -290,6 +290,10 @@ impl Error {
     }
 
     /// Returns the server error code, if the server supplied one.
+    ///
+    /// This is the response body's string category, such as `too_many_requests`.
+    /// Use [`http_status`](Self::http_status) for the HTTP status and
+    /// [`append_details`](Self::append_details) for an append's commit outcome.
     pub fn code(&self) -> Option<&str> {
         self.diagnostics
             .as_deref()

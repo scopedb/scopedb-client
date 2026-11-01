@@ -53,7 +53,7 @@ impl fmt::Display for AppendState {
 /// Result of a committed table append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResult {
-    /// SDK commit outcome, inferred from a valid HTTP 200 response when omitted by the server.
+    /// Confirmed commit outcome: [`AppendState::Committed`].
     #[serde(default = "committed_append_state")]
     pub status: AppendState,
     pub num_rows_inserted: i64,
@@ -74,12 +74,13 @@ pub struct AppendRowError {
 /// SDK commit knowledge and available row diagnostics for a table append request.
 ///
 /// On [`Error::append_details`], `status` is [`AppendState::Unknown`] if any
-/// attempt had an unknown commit outcome, while `row_errors` reflect the last
-/// failed response when supplied by an older server. Modern responses derive commit
-/// knowledge from HTTP status and do not supply structured row errors.
+/// attempt had an unknown commit outcome. A rejection establishes that no rows
+/// committed. Row diagnostics, when available, describe the last failed response
+/// and do not determine the commit outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
     pub status: AppendState,
+    /// Optional row diagnostics; an empty list does not imply that every row is valid.
     #[serde(default)]
     pub row_errors: Vec<AppendRowError>,
     #[serde(default)]
@@ -136,7 +137,7 @@ pub fn decode_append_error(status: StatusCode, headers: &HeaderMap, payload: &[u
             .and_then(|value| serde_json::from_value::<AppendErrorDetails>(value.clone()).ok())
             .unwrap_or(unknown)
     };
-    // Older responses can prove a rejection explicitly, but no 5xx is a safe replay signal.
+    // Explicit rejection details never override a 5xx unknown outcome.
     details.status =
         if valid && status.is_client_error() && (modern || details.status == AppendState::Rejected)
         {

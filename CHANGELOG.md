@@ -6,7 +6,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### Breaking Changes
 
-* Limit default append retries to validated HTTP 429 admission refusals. All HTTP 5xx responses now retain an unknown commit outcome, including older responses with explicit rejection details. Handle rejected batches without assuming structured row-error lists are present. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md#handle-table-append-confirmations-and-retries).
+* Limit default append retries to validated HTTP 429 admission refusals and treat all HTTP 5xx responses as unknown commit outcomes. Handle rejected batches as a whole. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md#handle-table-append-confirmations-and-retries).
 * Replace operation-specific `ErrorKind` variants with failure categories and a separate `ErrorOperation`. Use `is_retryable()` for the failed operation and inspect typed commit and progress data before replaying writes. Error construction, context mutation, and retry-state setters are internal; application-specific failures belong to application error types. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).
 
 ### New Features
@@ -18,7 +18,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ### Improvements
 
-* Accept table append success responses with or without the wire `status` field while preserving `AppendRowsResult::status`. Derive rejection from validated modern HTTP errors and retain support for older flat errors with explicit rejection details, allowing the SDK to be upgraded before the service.
+* Confirm table appends from HTTP 200 responses with matching row counts, and derive rejection from validated HTTP 4xx errors. Expose commit outcomes through `AppendRowsResult::status` and `Error::append_details()`.
 * Keep transient failures, retry exhaustion, and unknown delivery outcomes separate when deciding retries and circuit availability, and preserve raw server codes without synthesizing client-side codes.
 * Preserve native result-cell parse errors through `std::error::Error::source()` while retaining row and column diagnostics.
 

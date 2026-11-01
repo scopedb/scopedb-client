@@ -49,6 +49,8 @@ Finite writers also return `Error`. `append_write_report()` retains successful a
 
 `AppendRowsResult::status` remains available and is `AppendState::Committed` after a valid success response, including responses that omit the wire `status` field. Existing successful-write handling does not need to change. The SDK accepts both success formats during service upgrades.
 
+The SDK also accepts older flat error responses with explicit `details.status: rejected` on HTTP 4xx. Missing or unrecognized rejection details leave those responses unknown. Older row diagnostics remain available through `append_details()` when supplied; `AppendRequestResult::input_index` maps their zero-based request indexes back to the input slice. See the [HTTP API reference](rust-http-api.md#table-ingest) for the current response format and status/code correspondence.
+
 Use `Error::append_details()` for commit knowledge instead of inspecting `details.status` in the raw server error. A valid modern 4xx error establishes rejection; 5xx and interrupted or invalid responses are unknown. Only validated HTTP 429 admission refusals are retried by default. In particular, older HTTP 503 responses no longer qualify as safe retries even when they contain `status: rejected` or `retryable: true`. Keep unknown batches available for application reconciliation; `.retry_unknown(true)` explicitly accepts duplicate-write risk.
 
 Row-error lists may be empty because modern responses provide a diagnostic message instead of structured row errors. Handle the entire rejected batch; do not parse diagnostic text to select individual rows for replay. A later rejection cannot resolve an earlier unknown attempt.
