@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Opt-in protocol checks against a test environment with schema creation and write permissions.
+//!
+//! Run with `cargo test -p scopedb-client --test live -- --ignored --nocapture` after configuring
+//! the endpoint and test credentials. The test creates a temporary schema and attempts cleanup
+//! even after assertion failures. CI and release workflows leave this test ignored.
+
 use scopedb_client::AppendOutcome;
 use scopedb_client::CatalogColumn;
 use scopedb_client::CatalogMutationOutcome;

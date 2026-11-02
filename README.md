@@ -69,18 +69,6 @@ cargo x test --no-capture
 
 Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fixes. Run `cargo x --help` to list all development tasks.
 
-### Live protocol validation
-
-From a source checkout, set `SCOPEDB_ENDPOINT` and either `SCOPEDB_API_KEY` for Cloud or `SCOPEDB_TENANT_ID` for a local server, then run:
-
-```sh
-cargo test -p scopedb-client --test live -- --ignored --nocapture
-```
-
-The live test checks query decoding, catalog previews and conditional updates, stale-version rejection, successful batch writes, and whole-batch failure on invalid input. It creates a uniquely named schema with a table and attempts to delete it after the checks, including when an assertion fails. Use a test environment where schema creation, writes, and deletion are allowed. `SCOPEDB_DATABASE` selects the database (default: `scopedb`).
-
-Live tests are ignored by default and are not enabled in CI or release workflows. The regular test suite uses a local HTTP fixture to exercise request encoding, query recovery, catalog updates, partial writes, retries, and cancellation without service credentials.
-
 To publish, push an annotated `vX.Y.Z` tag on the merged release commit in `main`; [release.yml](.github/workflows/release.yml) runs the checks and publishes to crates.io.
 
 ## License
