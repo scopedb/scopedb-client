@@ -22,7 +22,15 @@
 )]
 #![doc = include_str!("../README.md")]
 
+#[doc = "[write-rows]: ../index.html#write-rows\n[error-handling]: crate::Error\n"]
+#[doc = "[migration-0.5]: ../migration/index.html#upgrade-from-04-to-05\n"]
+#[doc = "[migration-0.4]: ../migration/index.html#upgrade-from-03-to-04\n"]
+#[doc = include_str!("../docs/rust-http-api.md")]
+pub mod http_api {}
+
 #[doc = "[migration-0.4]: #upgrade-from-03-to-04\n[error-handling]: crate::Error\n"]
+#[doc = "[http-api-ingest]: ../http_api/index.html#table-ingest\n"]
+#[doc = "[http-api-catalog]: ../http_api/index.html#declarative-catalog\n"]
 #[doc = include_str!("../docs/migration-0.5.md")]
 #[doc = include_str!("../docs/migration-0.4.md")]
 pub mod migration {}
@@ -82,9 +90,9 @@ pub use self::error::ErrorOperation;
 pub use self::error::WriteErrorDetails;
 pub use self::error::WriteErrorReason;
 pub use self::protocol::AppendErrorDetails;
+pub use self::protocol::AppendOutcome;
 pub use self::protocol::AppendRowError;
 pub use self::protocol::AppendRowsResult;
-pub use self::protocol::AppendState;
 pub use self::protocol::DataType;
 pub use self::protocol::StatementErrorDetails;
 pub use self::protocol::StatementEstimatedProgress;

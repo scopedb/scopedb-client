@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use scopedb_client::AppendDeliveryOutcome;
 use scopedb_client::AppendFailurePolicy;
-use scopedb_client::AppendState;
+use scopedb_client::AppendOutcome;
 use scopedb_client::AppendWriter;
 use scopedb_client::CatalogMutationOutcome;
 use scopedb_client::CatalogOptions;
@@ -70,6 +70,159 @@ async fn selected_table_is_shared_by_all_write_modes() {
         );
         assert_eq!(request.headers["authorization"], "Bearer test-key");
         assert_eq!(request.headers["content-encoding"], "zstd");
+    }
+}
+
+#[tokio::test]
+async fn append_accepts_success_before_and_after_the_protocol_upgrade() {
+    for body in [
+        json!({"status": "committed", "num_rows_inserted": 1}),
+        json!({"num_rows_inserted": 1}),
+    ] {
+        let mut server = Server::start(move |_| {
+            let body = body.clone();
+            async move { Some(Reply::json(200, body)) }
+        })
+        .await;
+        let result = server
+            .client()
+            .table("events")
+            .append(r#"{"id":1}"#)
+            .await
+            .unwrap();
+        assert_eq!(result.status, AppendOutcome::Succeeded);
+        assert_eq!(result.num_rows_inserted, 1);
+        assert_eq!(server.received().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn append_retries_only_valid_admission_refusals() {
+    for (status, body, retry, outcome) in [
+        (
+            429,
+            json!({"error": {"code": "too_many_requests", "message": "busy"}}),
+            true,
+            AppendOutcome::Failed,
+        ),
+        (
+            429,
+            json!({"error": {"code": "future_refusal", "message": "busy"}}),
+            true,
+            AppendOutcome::Failed,
+        ),
+        (
+            429,
+            json!({"code": "unavailable", "message": "busy", "details": {"status": "rejected"}}),
+            true,
+            AppendOutcome::Failed,
+        ),
+        (
+            503,
+            json!({"code": "unavailable", "message": "busy", "retryable": true, "details": {"status": "rejected"}}),
+            false,
+            AppendOutcome::Ambiguous,
+        ),
+        (
+            500,
+            json!({"error": {"code": "internal_server_error", "message": "commit response lost", "details": {"status": "rejected"}}}),
+            false,
+            AppendOutcome::Ambiguous,
+        ),
+        (
+            429,
+            json!({"error": {"message": "missing code"}}),
+            false,
+            AppendOutcome::Ambiguous,
+        ),
+        (
+            429,
+            json!({"error": {"code": "internal_server_error", "message": "inconsistent refusal"}}),
+            false,
+            AppendOutcome::Ambiguous,
+        ),
+        (
+            400,
+            json!({"error": {"code": "bad_request", "message": "invalid row", "retryable": true}}),
+            false,
+            AppendOutcome::Failed,
+        ),
+        (
+            408,
+            json!({"error": {"code": "request_timeout", "message": "body read timed out"}}),
+            false,
+            AppendOutcome::Failed,
+        ),
+    ] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut server = Server::start(move |request| {
+            let first = attempts.fetch_add(1, Ordering::SeqCst) == 0;
+            let body = body.clone();
+            async move {
+                Some(if first {
+                    Reply::json(status, body).header("X-Request-Id", "ingest-attempt")
+                } else {
+                    Reply::committed(&request)
+                })
+            }
+        })
+        .await;
+        let result = server
+            .client()
+            .table("events")
+            .append_writer()
+            .max_retries(1)
+            .initial_backoff(Duration::ZERO)
+            .build()
+            .unwrap()
+            .write(&[json!({"id": 1})])
+            .await;
+        if retry {
+            let report = result.unwrap();
+            assert_eq!(report.committed_rows(), 1);
+            assert_eq!(report.batches()[0].retries(), 1);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.append_details().unwrap().status, outcome);
+            assert_eq!(error.request_id(), Some("ingest-attempt"));
+            assert!(!error.is_retryable());
+            assert_eq!(
+                error.append_write_report().unwrap().batches()[0].retries(),
+                0
+            );
+        }
+        assert_eq!(server.received().len(), 1 + usize::from(retry));
+    }
+}
+
+#[tokio::test]
+async fn invalid_append_successes_remain_ambiguous() {
+    for body in [
+        json!({"num_rows_inserted": 0}),
+        json!({"num_rows_inserted": -1}),
+        json!({"status": "unknown", "num_rows_inserted": 1}),
+        json!({"status": "future_state", "num_rows_inserted": 1}),
+        json!({"status": null, "num_rows_inserted": 1}),
+        json!({"error": {"code": "bad_request", "message": "not a success"}}),
+    ] {
+        let mut server = Server::start(move |_| {
+            let body = body.clone();
+            async move { Some(Reply::json(200, body)) }
+        })
+        .await;
+        let error = server
+            .client()
+            .table("events")
+            .append(r#"{"id":1}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidResponse);
+        assert_eq!(
+            error.append_details().unwrap().status,
+            AppendOutcome::Ambiguous
+        );
+        assert!(!error.is_retryable());
+        assert_eq!(server.received().len(), 1);
     }
 }
 
@@ -232,27 +385,50 @@ async fn lost_submission_response_retains_a_recoverable_identity() {
 
 #[tokio::test]
 async fn catalog_updates_preserve_complete_definitions_and_versions() {
-    let changed = Arc::new(AtomicBool::new(false));
-    let definition = json!({"name": "events", "columns": [{"name": "id", "data_type": "int"}], "future_option": {"enabled": true}});
+    let current_version = Arc::new(AtomicUsize::new(41));
+    let definition = json!({
+        "name": "events",
+        "columns": [{"name": "id", "data_type": "int"}],
+        "future_option": {"enabled": true},
+    });
     let mut server = Server::start(move |request| {
-        let changed = changed.clone();
+        let current_version = current_version.clone();
         let definition = definition.clone();
         async move {
+            let version = format!("\"{}\"", current_version.load(Ordering::SeqCst));
             if request.method == "GET" {
-                return Some(Reply::json(200, definition).header("ETag", "\"v1\""));
+                return Some(Reply::json(200, definition).header("ETag", version));
             }
-            if changed.swap(true, Ordering::SeqCst) {
+            if request.headers.get("if-match") != Some(&version) {
                 return Some(Reply::json(
                     412,
-                    json!({"code": "precondition_failed", "message": "catalog changed"}),
+                    json!({"error": {
+                        "code": "precondition_failed",
+                        "message": "catalog changed",
+                    }}),
                 ));
             }
+            let dry_run = request.target.contains("dry_run=true");
+            let version = if dry_run {
+                version
+            } else {
+                format!("\"{}\"", current_version.fetch_add(1, Ordering::SeqCst) + 1)
+            };
+            let after = if request.method == "DELETE" {
+                serde_json::Value::Null
+            } else {
+                request.json()
+            };
             Some(
                 Reply::json(
                     200,
-                    json!({"before": definition, "after": request.json(), "destructive": false}),
+                    json!({
+                        "before": definition,
+                        "after": after,
+                        "destructive": request.method == "DELETE",
+                    }),
                 )
-                .header("ETag", "\"v2\""),
+                .header("ETag", version),
             )
         }
     })
@@ -265,27 +441,55 @@ async fn catalog_updates_preserve_complete_definitions_and_versions() {
     let resource = table.catalog().raw();
     let mut snapshot = resource.get().await.unwrap();
     snapshot.definition["comment"] = json!("Application events");
-    let options = CatalogOptions {
-        if_match: Some(snapshot.etag),
-        ..Default::default()
-    };
+    let preview = resource
+        .apply(
+            &snapshot.definition,
+            CatalogOptions {
+                dry_run: true,
+                expected_version: Some(snapshot.version.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.version, snapshot.version);
     let applied = resource
-        .apply(&snapshot.definition, options.clone())
+        .apply(
+            &snapshot.definition,
+            CatalogOptions {
+                expected_version: Some(preview.version),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(applied.after.unwrap()["future_option"]["enabled"], true);
     let conflict = resource
-        .apply(&snapshot.definition, options)
+        .delete(CatalogOptions {
+            expected_version: Some(snapshot.version),
+            allow_destructive: true,
+            ..Default::default()
+        })
         .await
         .unwrap_err();
     assert_eq!(conflict.kind(), ErrorKind::Conflict);
+    assert_eq!(conflict.code(), Some("precondition_failed"));
+    assert_eq!(conflict.operation(), ErrorOperation::DeleteCatalog);
+    assert!(!conflict.is_retryable());
     assert_eq!(
         conflict.catalog_outcome(),
         Some(CatalogMutationOutcome::Rejected)
     );
-    let requests = server.received();
-    assert_eq!(requests.len(), 4);
-    assert_eq!(requests[2].headers["if-match"], "\"v1\"");
+    let deleted = resource
+        .delete(CatalogOptions {
+            expected_version: Some(applied.version),
+            allow_destructive: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(deleted.after.is_none());
+    assert_eq!(server.received().len(), 6);
 }
 
 #[tokio::test]
@@ -376,33 +580,39 @@ async fn finite_write_local_failure_keeps_buffered_input_unsubmitted() {
 }
 
 #[tokio::test]
-async fn replay_policy_preserves_earlier_unknown_outcomes() {
+async fn replay_policy_preserves_earlier_ambiguous_outcomes() {
     for replay in [false, true] {
         let attempts = Arc::new(AtomicUsize::new(0));
         let mut server = Server::start(move |_| {
             let attempt = attempts.fetch_add(1, Ordering::SeqCst);
             async move {
-                if attempt == 0 { None } else {
-                    Some(Reply::json(422, json!({"code": "invalid_schema", "message": "last rejection", "details": {"status": "rejected"}})))
+                if attempt == 0 {
+                    None
+                } else {
+                    Some(Reply::json(
+                        400,
+                        json!({"error": {"code": "bad_request", "message": "last rejection"}}),
+                    ))
                 }
             }
-        }).await;
+        })
+        .await;
         let writer = server
             .client()
             .table("events")
             .append_writer()
             .max_retries(1)
             .initial_backoff(Duration::ZERO)
-            .retry_unknown(replay)
+            .retry_ambiguous(replay)
             .build()
             .unwrap();
         let error = writer.write(&[json!({"id": 1})]).await.unwrap_err();
         let report = error.append_write_report().unwrap();
-        assert_eq!(report.outcome(), AppendDeliveryOutcome::Unknown);
+        assert_eq!(report.outcome(), AppendDeliveryOutcome::Ambiguous);
         assert_eq!(report.batches()[0].retries(), usize::from(replay));
         assert!(!error.is_retryable());
         if replay {
-            assert_eq!(error.details().unwrap()["status"], "rejected");
+            assert_eq!(error.code(), Some("bad_request"));
         }
         assert_eq!(server.received().len(), 1 + usize::from(replay));
     }
@@ -433,12 +643,21 @@ async fn continue_stream_retries_transient_rejections_and_reports_losses() {
         let first = first.clone();
         async move {
             if request.json()["id"] == 1 {
-                Some(Reply::json(422, json!({"message": "bad row", "details": {"status": "rejected"}})))
+                Some(Reply::json(
+                    400,
+                    json!({"error": {"code": "bad_request", "message": "bad row"}}),
+                ))
             } else if first.swap(false, Ordering::SeqCst) {
-                Some(Reply::json(503, json!({"message": "busy", "retryable": true, "details": {"status": "rejected"}})))
-            } else { Some(Reply::committed(&request)) }
+                Some(Reply::json(
+                    429,
+                    json!({"error": {"code": "too_many_requests", "message": "busy"}}),
+                ))
+            } else {
+                Some(Reply::committed(&request))
+            }
         }
-    }).await;
+    })
+    .await;
     let stream = server
         .client()
         .table("events")
@@ -474,8 +693,8 @@ async fn stopped_stream_settles_concurrent_requests_for_all_waiters() {
             if request.json()["id"] == 0 {
                 rejected.wait_for(|ready| *ready).await.unwrap();
                 Some(Reply::json(
-                    422,
-                    json!({"message": "bad row", "details": {"status": "rejected"}}),
+                    400,
+                    json!({"error": {"code": "bad_request", "message": "bad row"}}),
                 ))
             } else {
                 committed.wait_for(|ready| *ready).await.unwrap();
@@ -528,10 +747,16 @@ async fn cancellation_while_waiting_for_http_response_stops_finite_delivery() {
         async move {
             if request.json()["id"] == 0 {
                 blocked.wait_for(|ready| *ready).await.unwrap();
-                Some(Reply::json(503, json!({"message": "busy", "retryable": true, "details": {"status": "rejected"}})))
-            } else { Some(Reply::committed(&request)) }
+                Some(Reply::json(
+                    429,
+                    json!({"error": {"code": "too_many_requests", "message": "busy"}}),
+                ))
+            } else {
+                Some(Reply::committed(&request))
+            }
         }
-    }).await;
+    })
+    .await;
     let writer = server
         .client()
         .table("events")
@@ -566,7 +791,7 @@ async fn cancellation_while_waiting_for_http_response_stops_finite_delivery() {
 }
 
 #[tokio::test]
-async fn response_body_timeout_is_unknown_and_is_not_replayed() {
+async fn response_body_timeout_is_ambiguous_and_is_not_replayed() {
     let (release, blocked) = watch::channel(false);
     let mut server = Server::start(move |request| {
         let blocked = blocked.clone();
@@ -578,13 +803,13 @@ async fn response_body_timeout_is_unknown_and_is_not_replayed() {
         .table("events")
         .append_writer()
         .attempt_timeout(Duration::from_millis(100))
-        .retry_unknown(true)
+        .retry_ambiguous(true)
         .build()
         .unwrap();
     let error = writer.write(&[json!({"id": 1})]).await.unwrap_err();
     let detail = error.write_details().unwrap();
     assert_eq!(detail.reason, WriteErrorReason::Timeout);
-    assert_eq!(detail.outcome, AppendState::Unknown);
+    assert_eq!(detail.outcome, AppendOutcome::Ambiguous);
     assert_eq!(
         error.http_status(),
         Some(scopedb_client::reqwest::StatusCode::OK)

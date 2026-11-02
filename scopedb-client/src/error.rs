@@ -23,7 +23,7 @@ use crate::AppendAdmissionResult;
 use crate::AppendDeliveryOutcome;
 use crate::AppendDeliveryReport;
 use crate::AppendErrorDetails;
-use crate::AppendState;
+use crate::AppendOutcome;
 use crate::AppendTrySendError;
 use crate::AppendWriteReport;
 use crate::CatalogMutationOutcome;
@@ -213,12 +213,12 @@ impl fmt::Display for WriteErrorReason {
 
 /// Client-side interruption details for an append request.
 ///
-/// When `outcome` is [`AppendState::Unknown`], the request may have committed on the server.
+/// When `outcome` is [`AppendOutcome::Ambiguous`], the request may have committed on the server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct WriteErrorDetails {
     pub reason: WriteErrorReason,
-    pub outcome: AppendState,
+    pub outcome: AppendOutcome,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -290,6 +290,10 @@ impl Error {
     }
 
     /// Returns the server error code, if the server supplied one.
+    ///
+    /// This is the response body's string category, such as `too_many_requests`.
+    /// Use [`http_status`](Self::http_status) for the HTTP status and
+    /// [`append_details`](Self::append_details) for an append's commit outcome.
     pub fn code(&self) -> Option<&str> {
         self.diagnostics
             .as_deref()
@@ -324,8 +328,8 @@ impl Error {
 
     /// Returns table-append failure details across all attempts of the failed request.
     ///
-    /// `status` remains [`AppendState::Unknown`] if any attempt had an unknown
-    /// commit outcome, even when a later attempt was rejected. `row_errors`
+    /// `status` remains [`AppendOutcome::Ambiguous`] if any attempt had an ambiguous
+    /// outcome, even when a later attempt failed definitely. `row_errors`
     /// come from the last failed response.
     pub fn append_details(&self) -> Option<&AppendErrorDetails> {
         match self.failure.as_deref() {
@@ -441,7 +445,7 @@ impl Error {
             || self.catalog_outcome() == Some(CatalogMutationOutcome::Unknown)
             || self
                 .append_details()
-                .is_some_and(|details| details.status == AppendState::Unknown)
+                .is_some_and(|details| details.status == AppendOutcome::Ambiguous)
         {
             return false;
         }
@@ -577,7 +581,7 @@ impl Error {
     }
 
     pub(crate) fn with_append_delivery(mut self, report: AppendDeliveryReport) -> Self {
-        if report.outcome != AppendDeliveryOutcome::Ok {
+        if report.outcome != AppendDeliveryOutcome::Succeeded {
             self.kind = ErrorKind::Incomplete;
         }
         self.progress = Some(Box::new(AppendProgress::Delivery(report)));
@@ -606,7 +610,7 @@ impl Error {
             Some(FailureDetails::Append { interruption, .. }) => {
                 *interruption = Some(WriteErrorDetails {
                     reason: WriteErrorReason::Timeout,
-                    outcome: AppendState::Unknown,
+                    outcome: AppendOutcome::Ambiguous,
                 })
             }
             _ => unreachable!("write interruption belongs to an append failure"),
@@ -762,8 +766,8 @@ impl fmt::Display for Error {
         if let Some(report) = self.append_delivery_report() {
             write!(
                 f,
-                ", committed_rows: {}, accepted_rows: {}, unknown_rows: {}, outcome: {:?}",
-                report.committed_rows, report.accepted_rows, report.unknown_rows, report.outcome
+                ", committed_rows: {}, accepted_rows: {}, ambiguous_rows: {}, outcome: {:?}",
+                report.committed_rows, report.accepted_rows, report.ambiguous_rows, report.outcome
             )?;
         }
         Ok(())

@@ -28,24 +28,27 @@ use crate::ErrorKind;
 use crate::ErrorOperation;
 use crate::ResultSet;
 
-/// Commit outcome of a table append request.
+/// Outcome certainty of a table append request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AppendState {
-    /// All rows in the request committed.
-    Committed,
-    /// The request was rejected before committing any rows.
-    Rejected,
-    /// Commit outcome could not be determined.
-    Unknown,
+pub enum AppendOutcome {
+    /// The entire request succeeded; all rows committed.
+    #[serde(rename = "committed")]
+    Succeeded,
+    /// No rows from the attempt took effect, and none can take effect later.
+    #[serde(rename = "rejected")]
+    Failed,
+    /// The attempt may have taken effect or may still take effect later.
+    #[serde(rename = "unknown")]
+    Ambiguous,
 }
 
-impl fmt::Display for AppendState {
+impl fmt::Display for AppendOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Committed => f.write_str("committed"),
-            Self::Rejected => f.write_str("rejected"),
-            Self::Unknown => f.write_str("unknown"),
+            Self::Succeeded => f.write_str("succeeded"),
+            Self::Failed => f.write_str("failed"),
+            Self::Ambiguous => f.write_str("ambiguous"),
         }
     }
 }
@@ -53,11 +56,17 @@ impl fmt::Display for AppendState {
 /// Result of a committed table append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResult {
-    pub status: AppendState,
+    /// Confirmed commit outcome: [`AppendOutcome::Succeeded`].
+    #[serde(default = "succeeded_append_outcome")]
+    pub status: AppendOutcome,
     pub num_rows_inserted: i64,
 }
 
-/// Row-level validation error within a rejected append request.
+fn succeeded_append_outcome() -> AppendOutcome {
+    AppendOutcome::Succeeded
+}
+
+/// Row-level validation diagnostic for a failed append request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowError {
     pub row_index: u64,
@@ -65,18 +74,123 @@ pub struct AppendRowError {
     pub message: String,
 }
 
-/// Failure details for a table append request.
+/// SDK outcome certainty and available row diagnostics for a table append request.
 ///
-/// On [`Error::append_details`], `status` is [`AppendState::Unknown`] if any
-/// attempt had an unknown commit outcome, while `row_errors` reflect the last
-/// failed response.
+/// On [`Error::append_details`], `status` is [`AppendOutcome::Ambiguous`] if any
+/// attempt had an ambiguous outcome. A definite failure establishes that no rows
+/// took effect or can take effect later. Row diagnostics, when available, describe
+/// the last failed response and do not determine the outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendErrorDetails {
-    pub status: AppendState,
+    pub status: AppendOutcome,
+    /// Optional row diagnostics; an empty list does not imply that every row is valid.
     #[serde(default)]
     pub row_errors: Vec<AppendRowError>,
     #[serde(default)]
     pub row_errors_truncated: bool,
+}
+
+/// Decodes outcome certainty separately from the diagnostic error category.
+pub fn decode_append_error(status: StatusCode, headers: &HeaderMap, payload: &[u8]) -> Error {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        code: String,
+        message: String,
+        details: Option<serde_json::Value>,
+        retryable: Option<bool>,
+    }
+
+    let decoded = serde_json::from_slice::<serde_json::Value>(payload).and_then(|envelope| {
+        let modern = envelope.get("error").is_some();
+        let body = envelope.get("error").unwrap_or(&envelope).clone();
+        let request_id = envelope
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        serde_json::from_value::<ErrorBody>(body).map(|body| (body, modern, request_id))
+    });
+    let ambiguous = AppendErrorDetails {
+        status: AppendOutcome::Ambiguous,
+        row_errors: Vec::new(),
+        row_errors_truncated: false,
+    };
+    let (body, modern, request_id) = match decoded {
+        Ok(decoded) => decoded,
+        Err(source) => {
+            return apply_response_metadata(
+                Error::new(
+                    ErrorKind::InvalidResponse,
+                    ErrorOperation::Append,
+                    "failed to decode table append error response",
+                )
+                .set_source(source)
+                .set_append_details(ambiguous),
+                status,
+                headers,
+            );
+        }
+    };
+    let valid = (status.is_client_error() || status.is_server_error())
+        && (!modern || valid_http_error_code(&body.code, status));
+    let mut details = if modern {
+        ambiguous
+    } else {
+        body.details
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<AppendErrorDetails>(value.clone()).ok())
+            .unwrap_or(ambiguous)
+    };
+    // Explicit rejection details never override a 5xx ambiguous outcome.
+    details.status =
+        if valid && status.is_client_error() && (modern || details.status == AppendOutcome::Failed)
+        {
+            AppendOutcome::Failed
+        } else {
+            AppendOutcome::Ambiguous
+        };
+    let kind = if valid {
+        ErrorKind::from_http(status)
+    } else {
+        ErrorKind::InvalidResponse
+    };
+    let mut error = apply_response_metadata(
+        Error::new(kind, ErrorOperation::Append, body.message)
+            .set_api_error(Some(body.code), body.details)
+            .set_server_retryable(body.retryable)
+            .with_transient_failure(
+                valid
+                    && body.retryable != Some(false)
+                    && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()),
+            )
+            .set_append_details(details),
+        status,
+        headers,
+    );
+    if !valid {
+        error = error.with_context("response", "inconsistent HTTP status and error code");
+    }
+    if let Some(request_id) = request_id {
+        error = error.set_request_id(request_id);
+    }
+    error
+}
+
+fn valid_http_error_code(code: &str, status: StatusCode) -> bool {
+    let expected = match code {
+        "bad_request" => 400,
+        "not_found" => 404,
+        "method_not_allowed" => 405,
+        "request_timeout" => 408,
+        "conflict" => 409,
+        "precondition_failed" => 412,
+        "too_many_requests" => 429,
+        "internal_server_error" => 500,
+        "service_unavailable" => 503,
+        "statement_timeout" | "invalid_request" | "unauthorized" | "payload_too_large"
+        | "timeout" | "unavailable" | "internal_error" => return false,
+        _ => return true,
+    };
+    status.as_u16() == expected
 }
 
 pub async fn decode_statement_response(
