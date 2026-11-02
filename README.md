@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md)
 - [Upgrade from 0.3 to 0.4](scopedb-client/docs/migration-0.4.md)
 - [Examples](scopedb-client/examples/README.md)
-- [HTTP wire reference](scopedb-client/docs/rust-http-api.md)
+- [HTTP protocol](scopedb-client/docs/http.md)
 - [Changelog](CHANGELOG.md)
 - [Report an issue](https://github.com/scopedb/scopedb-client/issues)
 
@@ -68,16 +68,6 @@ cargo x test --no-capture
 ```
 
 Use `cargo x lint --fix` to apply Clippy, rustfmt, Taplo, and license-header fixes. Run `cargo x --help` to list all development tasks.
-
-### Live protocol validation
-
-From a source checkout, set `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` for your test environment, then run:
-
-```sh
-cargo test -p scopedb-client --test live -- --ignored --nocapture
-```
-
-The live test runs `SELECT 1` and checks the decoded result. The regular test suite uses a local HTTP fixture to exercise request encoding, query recovery, catalog updates, partial writes, retries, and cancellation.
 
 To publish, push an annotated `vX.Y.Z` tag on the merged release commit in `main`; [release.yml](.github/workflows/release.yml) runs the checks and publishes to crates.io.
 

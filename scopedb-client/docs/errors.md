@@ -71,7 +71,7 @@ After losing a submission response or a later status-read response, use the ID f
 
 ## Diagnose the failure
 
-`http_status()` returns the HTTP status, such as 429. `code()` returns the response body's string error category, such as `too_many_requests`. `kind()` returns the SDK category, such as `ErrorKind::RateLimited`. These describe the failure; use `append_details().status` to determine the append's commit outcome. The [HTTP API reference](rust-http-api.md#table-ingest) lists the status/code pairs and their recovery guarantees. Known codes must match their HTTP status; a mismatch is `InvalidResponse` with an ambiguous append outcome. Unrecognized codes are preserved and follow the HTTP status guarantee when the error response is otherwise valid.
+`http_status()` returns the HTTP status, such as 429. `code()` returns the response body's string error category, such as `too_many_requests`. `kind()` returns the SDK category, such as `ErrorKind::RateLimited`. These describe the failure; use `append_details().status` to determine the append's commit outcome. The [HTTP protocol](http.md#table-ingest) lists the status/code pairs and their recovery guarantees. Known codes must match their HTTP status; a mismatch is `InvalidResponse` with an ambiguous append outcome. Unrecognized codes are preserved and follow the HTTP status guarantee when the error response is otherwise valid.
 
 `details()`, `request_id()`, and `retry_after()` expose structured diagnostics, the request identifier, and the server's retry delay from the last failed response. Client-side failures leave `code()` as `None`.
 

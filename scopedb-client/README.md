@@ -2,7 +2,7 @@
 
 Query ScopeDB and write rows from async Rust applications.
 
-Upgrading an existing application? See [Upgrade from 0.4 to 0.5](docs/migration-0.5.md) or [Upgrade from 0.3 to 0.4](docs/migration-0.4.md), including the move from Ingest to Append.
+Upgrading an existing application? See [Upgrade from 0.4 to 0.5][migration-0.5] or [Upgrade from 0.3 to 0.4][migration-0.4], including the move from Ingest to Append.
 
 ## Install
 
@@ -69,4 +69,8 @@ println!("Written: {} rows", report.committed_rows);
 | Set timeouts or HTTP options | [`ClientBuilder`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.ClientBuilder.html)                              |
 | Inspect a failure            | [`Error`](https://docs.rs/scopedb-client/latest/scopedb_client/struct.Error.html)                                              |
 
-For complete programs, see the [examples](examples/README.md). For ScopeQL syntax, see the [query guide](https://www.scopedb.io/docs/guides/query-events).
+For complete programs, see the [examples][examples]. For ScopeQL syntax, see the [query guide](https://www.scopedb.io/docs/guides/query-events).
+
+[migration-0.5]: docs/migration-0.5.md
+[migration-0.4]: docs/migration-0.4.md
+[examples]: examples/README.md

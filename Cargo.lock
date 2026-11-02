@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "scopedb-client"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "fastrace",
  "fastrace-reqwest",

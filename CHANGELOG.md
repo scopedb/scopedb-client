@@ -4,12 +4,15 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+## v0.5.0 (2026-11-02)
+
 ### Breaking Changes
 
 * Rename `CatalogSnapshot::etag` and `CatalogResult::etag` to `version`, and `CatalogOptions::if_match` to `expected_version`. Pass the opaque tenant catalog version unchanged to guard against concurrent catalog changes. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md#inspect-catalog-mutation-outcomes).
 * Replace `AppendState` with `AppendOutcome::{Succeeded, Failed, Ambiguous}`. Delivery reports use `Succeeded` and `Ambiguous` in place of `Ok` and `Unknown`. Use `retry_ambiguous()`, `ambiguous_rows`, and `ambiguous_batches` in append builders and reports. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md#handle-table-append-confirmations-and-retries) for replacements and serialization compatibility.
 * Limit default append retries to validated HTTP 429 admission refusals and treat all HTTP 5xx responses as ambiguous write outcomes. Handle failed batches as a whole. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md#handle-table-append-confirmations-and-retries).
 * Replace operation-specific `ErrorKind` variants with failure categories and a separate `ErrorOperation`. Use `is_retryable()` for the failed operation and inspect typed commit and progress data before replaying writes. Error construction, context mutation, and retry-state setters are internal; application-specific failures belong to application error types. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).
+* `Error`, `AppendLastFailure`, `AppendStreamStats`, and `AppendBatchFailureEvent` no longer implement `UnwindSafe` or `RefUnwindSafe`. Review closures that capture these types across panic boundaries; see [Review panic boundaries](scopedb-client/docs/migration-0.5.md#review-panic-boundaries).
 
 ### New Features
 
@@ -23,6 +26,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 * Confirm table appends from HTTP 200 responses with matching row counts, and derive definite failures from validated HTTP 4xx errors. Expose write outcomes through `AppendRowsResult::status` and `Error::append_details()`.
 * Keep transient failures, retry exhaustion, and ambiguous delivery outcomes separate when deciding retries and circuit availability, and preserve raw server codes without synthesizing client-side codes.
 * Preserve native result-cell parse errors through `std::error::Error::source()` while retaining row and column diagnostics.
+* Make migration guides, HTTP protocol documentation, error-handling guidance, and packaged examples reachable from the generated API documentation.
 
 ## v0.4.2 (2026-10-27)
 

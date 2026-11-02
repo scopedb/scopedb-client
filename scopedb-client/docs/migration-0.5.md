@@ -1,6 +1,6 @@
 # Upgrade from 0.4 to 0.5
 
-Version 0.5 makes partial stream progress available on failure. Applications upgrading from 0.3 should first follow [Upgrade from 0.3 to 0.4](migration-0.4.md).
+Update your dependency with `cargo add scopedb-client@0.5`. Version 0.5 makes partial stream progress available on failure. Applications upgrading from 0.3 should first follow [Upgrade from 0.3 to 0.4][migration-0.4].
 
 ## Match failure categories and operations
 
@@ -18,7 +18,13 @@ Version 0.5 makes partial stream progress available on failure. Applications upg
 | Diagnostic retry counts                        | `retries()` and `retry_exhausted()` on the failed request     |
 | `ErrorKind::into_static()` / string conversion | `ErrorKind::as_str()`                                         |
 
-`Error::new`, `with_context`, `set_source`, and retry-state setters are internal. Applications should represent their own failures with application-owned error types, retaining the SDK error as a cause when needed. SDK-only functions return `Result<T, Error>` without a dynamic error wrapper. See the [error-handling guide](errors.md) for recovery contracts and diagnostics.
+`Error::new`, `with_context`, `set_source`, and retry-state setters are internal. Applications should represent their own failures with application-owned error types, retaining the SDK error as a cause when needed. SDK-only functions return `Result<T, Error>` without a dynamic error wrapper. See [`Error`][error-handling] for recovery contracts and diagnostics.
+
+## Review panic boundaries
+
+`Error`, `AppendLastFailure`, `AppendStreamStats`, and `AppendBatchFailureEvent` no longer implement [`UnwindSafe`](https://doc.rust-lang.org/std/panic/trait.UnwindSafe.html) or [`RefUnwindSafe`](https://doc.rust-lang.org/std/panic/trait.RefUnwindSafe.html). Errors retain underlying causes that do not guarantee unwind safety, so closures capturing these values may no longer compile with [`catch_unwind`](https://doc.rust-lang.org/std/panic/fn.catch_unwind.html).
+
+Keep SDK errors outside the closure when they are not needed inside it, or capture owned diagnostic values such as `error.to_string()` instead. If the closure must capture an SDK error, review the state that could be observed after a panic before using [`AssertUnwindSafe`](https://doc.rust-lang.org/std/panic/struct.AssertUnwindSafe.html); it asserts unwind safety rather than establishing it.
 
 ## Inspect failed delivery reports
 
@@ -66,7 +72,7 @@ Append outcomes describe success, definite failure, and ambiguity. Update enum m
 
 `AppendRowsResult::status` is now `AppendOutcome::Succeeded` after a valid success response, including responses that omit the wire `status` field. Update matches on `AppendState::Committed` to use the new variant. Success still confirms that the entire batch committed. The SDK accepts both success formats during service upgrades.
 
-The SDK also accepts older flat error responses with explicit `details.status: rejected` on HTTP 4xx. Missing or unrecognized rejection details leave those responses ambiguous. Older row diagnostics remain available through `append_details()` when supplied; `AppendRequestResult::input_index` maps their zero-based request indexes back to the input slice. See the [HTTP API reference](rust-http-api.md#table-ingest) for the current response format and status/code correspondence.
+The SDK also accepts older flat error responses with explicit `details.status: rejected` on HTTP 4xx. Missing or unrecognized rejection details leave those responses ambiguous. Older row diagnostics remain available through `append_details()` when supplied; `AppendRequestResult::input_index` maps their zero-based request indexes back to the input slice. See the [HTTP protocol][http-ingest] for the current response format and status/code correspondence.
 
 Use `Error::append_details()` for outcome certainty instead of inspecting `details.status` in the raw server error. A valid modern 4xx error establishes `Failed`; 5xx and interrupted or invalid responses are `Ambiguous`. Only validated HTTP 429 admission refusals are retried by default. In particular, older HTTP 503 responses no longer qualify as safe retries even when they contain `status: rejected` or `retryable: true`. Keep ambiguous batches available for application reconciliation; `.retry_ambiguous(true)` explicitly accepts duplicate-write risk.
 
@@ -86,6 +92,11 @@ Rename the Catalog version fields and pass their opaque tokens unchanged:
 | `CatalogResult::etag`      | `CatalogResult::version`           |
 | `CatalogOptions::if_match` | `CatalogOptions::expected_version` |
 
-The token identifies the entire tenant catalog, including when reading or changing a single resource. Use a read or dry-run result's `version` as `expected_version` when applying a change. A stale condition returns HTTP 412 with code `precondition_failed` and `ErrorKind::Conflict`; read the resource again and revise the change. See the [HTTP API reference](rust-http-api.md#declarative-catalog) for transport details.
+The token identifies the entire tenant catalog, including when reading or changing a single resource. Use a read or dry-run result's `version` as `expected_version` when applying a change. A stale condition returns HTTP 412 with code `precondition_failed` and `ErrorKind::Conflict`; read the resource again and revise the change. See the [HTTP protocol][http-catalog] for transport details.
 
 Use `Error::catalog_outcome()` to distinguish `CatalogMutationOutcome::Rejected` from `Unknown`. `Unknown` requires reading the resource before replaying the mutation, including when a gateway supplies a structured error code. Reads, dry runs, and local validation failures return `None`. Replace checks for the client-generated `catalog_commit_outcome_unknown` code with this typed outcome. `code()`, `details()`, and HTTP metadata retain original server diagnostics without synthesizing client-side server codes.
+
+[migration-0.4]: migration-0.4.md
+[error-handling]: errors.md
+[http-ingest]: http.md#table-ingest
+[http-catalog]: http.md#declarative-catalog
