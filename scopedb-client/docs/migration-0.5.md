@@ -80,8 +80,8 @@ Every statement now carries an ID before submission. After losing a submission r
 
 Rename the Catalog version fields and pass their opaque tokens unchanged:
 
-| In 0.4                    | In 0.5                            |
-| ------------------------- | --------------------------------- |
+| In 0.4                     | In 0.5                             |
+| -------------------------- | ---------------------------------- |
 | `CatalogSnapshot::etag`    | `CatalogSnapshot::version`         |
 | `CatalogResult::etag`      | `CatalogResult::version`           |
 | `CatalogOptions::if_match` | `CatalogOptions::expected_version` |

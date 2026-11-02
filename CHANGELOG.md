@@ -7,7 +7,6 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 ### Breaking Changes
 
 * Rename `CatalogSnapshot::etag` and `CatalogResult::etag` to `version`, and `CatalogOptions::if_match` to `expected_version`. Pass the opaque tenant catalog version unchanged to guard against concurrent catalog changes. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md#inspect-catalog-mutation-outcomes).
-
 * Replace `AppendState` with `AppendOutcome::{Succeeded, Failed, Ambiguous}`. Delivery reports use `Succeeded` and `Ambiguous` in place of `Ok` and `Unknown`. Use `retry_ambiguous()`, `ambiguous_rows`, and `ambiguous_batches` in append builders and reports. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md#handle-table-append-confirmations-and-retries) for replacements and serialization compatibility.
 * Limit default append retries to validated HTTP 429 admission refusals and treat all HTTP 5xx responses as ambiguous write outcomes. Handle failed batches as a whole. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md#handle-table-append-confirmations-and-retries).
 * Replace operation-specific `ErrorKind` variants with failure categories and a separate `ErrorOperation`. Use `is_retryable()` for the failed operation and inspect typed commit and progress data before replaying writes. Error construction, context mutation, and retry-state setters are internal; application-specific failures belong to application error types. See [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md).

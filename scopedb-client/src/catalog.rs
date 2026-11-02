@@ -140,9 +140,8 @@ pub struct CatalogOptions {
     pub dry_run: bool,
     /// Authorize changes that drop data or columns (`destructive == true`).
     pub allow_destructive: bool,
-    /// Requires the tenant catalog version returned by a prior read or dry run. Pass it unchanged.
-    /// Any catalog change in the tenant can invalidate it, including changes outside this
-    /// resource.
+    /// Tenant catalog version required for this change. Pass a read or dry-run token unchanged.
+    /// Changes anywhere in the tenant catalog can invalidate it.
     pub expected_version: Option<String>,
 }
 
@@ -174,8 +173,8 @@ pub struct CatalogResult<T> {
     pub after: Option<T>,
     /// Whether the change drops existing data or schema objects.
     pub destructive: bool,
-    /// Base tenant catalog version for a dry run, or the resulting version after a committed
-    /// mutation. A mutation with no catalog changes preserves the version.
+    /// Base tenant catalog version for a dry run, or the committed version for a mutation.
+    /// Unchanged catalog definitions preserve the version.
     #[serde(skip)]
     pub version: String,
 }
