@@ -140,9 +140,9 @@ pub struct CatalogOptions {
     pub dry_run: bool,
     /// Authorize changes that drop data or columns (`destructive == true`).
     pub allow_destructive: bool,
-    /// ETag precondition from a prior [`CatalogResource::get`] or dry-run [`CatalogResult`],
-    /// including quotes.
-    pub if_match: Option<String>,
+    /// Tenant catalog version required for this change. Pass a read or dry-run token unchanged.
+    /// Changes anywhere in the tenant catalog can invalidate it.
+    pub expected_version: Option<String>,
 }
 
 /// Commit status of a failed catalog mutation, exposed via [`Error::catalog_outcome`].
@@ -156,11 +156,12 @@ pub enum CatalogMutationOutcome {
     Unknown,
 }
 
-/// Resource definition and opaque ETag returned by [`CatalogResource::get`].
+/// Resource definition and tenant catalog version returned by [`CatalogResource::get`].
 #[derive(Debug, Clone)]
 pub struct CatalogSnapshot<T> {
     pub definition: T,
-    pub etag: String,
+    /// Opaque version token. Pass it unchanged as [`CatalogOptions::expected_version`].
+    pub version: String,
 }
 
 /// Result of [`CatalogResource::apply`] or [`CatalogResource::delete`].
@@ -172,15 +173,16 @@ pub struct CatalogResult<T> {
     pub after: Option<T>,
     /// Whether the change drops existing data or schema objects.
     pub destructive: bool,
-    /// Base ETag for a dry run, or the new resource ETag after a committed mutation.
+    /// Base tenant catalog version for a dry run, or the committed version for a mutation.
+    /// Unchanged catalog definitions preserve the version.
     #[serde(skip)]
-    pub etag: String,
+    pub version: String,
 }
 
 /// Entry point for declarative catalog snapshots and updates.
 ///
 /// Select the smallest resource you need, then call [`CatalogResource::get`].
-/// Each read returns the complete definition and an ETag for conditional changes.
+/// Each read returns the complete definition and a tenant catalog version for conditional changes.
 ///
 /// ```no_run
 /// # async fn example(client: scopedb_client::Client) -> Result<(), scopedb_client::Error> {
@@ -201,7 +203,7 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Reads the complete tenant catalog and its ETag.
+    /// Reads the complete tenant catalog and its version.
     pub async fn get(&self) -> Result<CatalogSnapshot<CatalogDocument>, Error> {
         self.resource.get().await
     }
@@ -340,16 +342,16 @@ impl<T> CatalogResource<T> {
         if options.allow_destructive {
             request = request.query(&[("allow_destructive", true)]);
         }
-        if let Some(etag) = options.if_match {
-            let etag = reqwest::header::HeaderValue::from_str(&etag).map_err(|e| {
+        if let Some(version) = options.expected_version {
+            let version = reqwest::header::HeaderValue::from_str(&version).map_err(|e| {
                 Error::new(
                     ErrorKind::InvalidInput,
                     ErrorOperation::ApplyCatalog,
-                    "invalid If-Match header",
+                    "invalid expected catalog version",
                 )
                 .set_source(e)
             })?;
-            request = request.header(reqwest::header::IF_MATCH, etag);
+            request = request.header(reqwest::header::IF_MATCH, version);
         }
         if let Some(body) = body {
             request = request
@@ -434,7 +436,7 @@ impl<T> CatalogResource<T> {
                 error
             });
         }
-        let etag = headers
+        let version = headers
             .get(reqwest::header::ETAG)
             .and_then(|h| h.to_str().ok())
             .filter(|s| !s.is_empty())
@@ -493,26 +495,31 @@ impl<T> CatalogResource<T> {
                 &headers,
             )
         })?;
-        Ok((result, etag))
+        Ok((result, version))
     }
 }
 
 impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
-    /// Reads the complete definition of the selected resource and its ETag.
+    /// Reads the complete definition of the selected resource and the tenant catalog version.
     pub async fn get(&self) -> Result<CatalogSnapshot<T>, Error> {
-        let (definition, etag) = self
+        let (definition, version) = self
             .request(Method::GET, None, CatalogOptions::default())
             .await
             .map_err(|error| error.with_operation(ErrorOperation::ReadCatalog))?;
-        Ok(CatalogSnapshot { definition, etag })
+        Ok(CatalogSnapshot {
+            definition,
+            version,
+        })
     }
 
     /// Replaces the selected resource definition (`PUT`), clearing any omitted optional fields or
     /// child collections.
     ///
     /// Use [`CatalogOptions`] to preview changes with `dry_run`, guard against
-    /// concurrent edits with `if_match`, and authorize destructive changes with
+    /// concurrent edits with `expected_version`, and authorize destructive changes with
     /// `allow_destructive`.
+    /// A stale version returns [`ErrorKind::Conflict`]; read the resource again and revise the
+    /// change.
     ///
     /// ```no_run
     /// use scopedb_client::CatalogOptions;
@@ -528,7 +535,7 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
     ///         &definition,
     ///         CatalogOptions {
     ///             dry_run: true,
-    ///             if_match: Some(snapshot.etag),
+    ///             expected_version: Some(snapshot.version),
     ///             ..Default::default()
     ///         },
     ///     )
@@ -538,7 +545,7 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
     ///     .apply(
     ///         &definition,
     ///         CatalogOptions {
-    ///             if_match: Some(preview.etag),
+    ///             expected_version: Some(preview.version),
     ///             ..Default::default()
     ///         },
     ///     )
@@ -559,17 +566,18 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
             )
             .set_source(e)
         })?;
-        let (mut result, etag): (CatalogResult<T>, _) = self
+        let (mut result, version): (CatalogResult<T>, _) = self
             .request(Method::PUT, Some(body), options)
             .await
             .map_err(|error| error.with_operation(ErrorOperation::ApplyCatalog))?;
-        result.etag = etag;
+        result.version = version;
         Ok(result)
     }
 
     /// Deletes the selected database, schema, table, or view.
     ///
     /// Deleting the root catalog is not supported; apply an empty [`CatalogDocument`] instead.
+    /// Use [`CatalogOptions::expected_version`] to guard against concurrent catalog changes.
     pub async fn delete(&self, options: CatalogOptions) -> Result<CatalogResult<T>, Error> {
         if self.path.len() == 1 {
             return Err(Error::new(
@@ -578,11 +586,11 @@ impl<T: Serialize + DeserializeOwned> CatalogResource<T> {
                 "the root catalog does not support DELETE; apply an empty document instead",
             ));
         }
-        let (mut result, etag): (CatalogResult<T>, _) = self
+        let (mut result, version): (CatalogResult<T>, _) = self
             .request(Method::DELETE, None, options)
             .await
             .map_err(|error| error.with_operation(ErrorOperation::DeleteCatalog))?;
-        result.etag = etag;
+        result.version = version;
         Ok(result)
     }
 }

@@ -385,27 +385,50 @@ async fn lost_submission_response_retains_a_recoverable_identity() {
 
 #[tokio::test]
 async fn catalog_updates_preserve_complete_definitions_and_versions() {
-    let changed = Arc::new(AtomicBool::new(false));
-    let definition = json!({"name": "events", "columns": [{"name": "id", "data_type": "int"}], "future_option": {"enabled": true}});
+    let current_version = Arc::new(AtomicUsize::new(41));
+    let definition = json!({
+        "name": "events",
+        "columns": [{"name": "id", "data_type": "int"}],
+        "future_option": {"enabled": true},
+    });
     let mut server = Server::start(move |request| {
-        let changed = changed.clone();
+        let current_version = current_version.clone();
         let definition = definition.clone();
         async move {
+            let version = format!("\"{}\"", current_version.load(Ordering::SeqCst));
             if request.method == "GET" {
-                return Some(Reply::json(200, definition).header("ETag", "\"v1\""));
+                return Some(Reply::json(200, definition).header("ETag", version));
             }
-            if changed.swap(true, Ordering::SeqCst) {
+            if request.headers.get("if-match") != Some(&version) {
                 return Some(Reply::json(
                     412,
-                    json!({"code": "precondition_failed", "message": "catalog changed"}),
+                    json!({"error": {
+                        "code": "precondition_failed",
+                        "message": "catalog changed",
+                    }}),
                 ));
             }
+            let dry_run = request.target.contains("dry_run=true");
+            let version = if dry_run {
+                version
+            } else {
+                format!("\"{}\"", current_version.fetch_add(1, Ordering::SeqCst) + 1)
+            };
+            let after = if request.method == "DELETE" {
+                serde_json::Value::Null
+            } else {
+                request.json()
+            };
             Some(
                 Reply::json(
                     200,
-                    json!({"before": definition, "after": request.json(), "destructive": false}),
+                    json!({
+                        "before": definition,
+                        "after": after,
+                        "destructive": request.method == "DELETE",
+                    }),
                 )
-                .header("ETag", "\"v2\""),
+                .header("ETag", version),
             )
         }
     })
@@ -418,27 +441,55 @@ async fn catalog_updates_preserve_complete_definitions_and_versions() {
     let resource = table.catalog().raw();
     let mut snapshot = resource.get().await.unwrap();
     snapshot.definition["comment"] = json!("Application events");
-    let options = CatalogOptions {
-        if_match: Some(snapshot.etag),
-        ..Default::default()
-    };
+    let preview = resource
+        .apply(
+            &snapshot.definition,
+            CatalogOptions {
+                dry_run: true,
+                expected_version: Some(snapshot.version.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.version, snapshot.version);
     let applied = resource
-        .apply(&snapshot.definition, options.clone())
+        .apply(
+            &snapshot.definition,
+            CatalogOptions {
+                expected_version: Some(preview.version),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(applied.after.unwrap()["future_option"]["enabled"], true);
     let conflict = resource
-        .apply(&snapshot.definition, options)
+        .delete(CatalogOptions {
+            expected_version: Some(snapshot.version),
+            allow_destructive: true,
+            ..Default::default()
+        })
         .await
         .unwrap_err();
     assert_eq!(conflict.kind(), ErrorKind::Conflict);
+    assert_eq!(conflict.code(), Some("precondition_failed"));
+    assert_eq!(conflict.operation(), ErrorOperation::DeleteCatalog);
+    assert!(!conflict.is_retryable());
     assert_eq!(
         conflict.catalog_outcome(),
         Some(CatalogMutationOutcome::Rejected)
     );
-    let requests = server.received();
-    assert_eq!(requests.len(), 4);
-    assert_eq!(requests[2].headers["if-match"], "\"v1\"");
+    let deleted = resource
+        .delete(CatalogOptions {
+            expected_version: Some(applied.version),
+            allow_destructive: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(deleted.after.is_none());
+    assert_eq!(server.received().len(), 6);
 }
 
 #[tokio::test]

@@ -78,4 +78,14 @@ Every statement now carries an ID before submission. After losing a submission r
 
 ## Inspect Catalog mutation outcomes
 
+Rename the Catalog version fields and pass their opaque tokens unchanged:
+
+| In 0.4                     | In 0.5                             |
+| -------------------------- | ---------------------------------- |
+| `CatalogSnapshot::etag`    | `CatalogSnapshot::version`         |
+| `CatalogResult::etag`      | `CatalogResult::version`           |
+| `CatalogOptions::if_match` | `CatalogOptions::expected_version` |
+
+The token identifies the entire tenant catalog, including when reading or changing a single resource. Use a read or dry-run result's `version` as `expected_version` when applying a change. A stale condition returns HTTP 412 with code `precondition_failed` and `ErrorKind::Conflict`; read the resource again and revise the change. See the [HTTP API reference](rust-http-api.md#declarative-catalog) for transport details.
+
 Use `Error::catalog_outcome()` to distinguish `CatalogMutationOutcome::Rejected` from `Unknown`. `Unknown` requires reading the resource before replaying the mutation, including when a gateway supplies a structured error code. Reads, dry runs, and local validation failures return `None`. Replace checks for the client-generated `catalog_commit_outcome_unknown` code with this typed outcome. `code()`, `details()`, and HTTP metadata retain original server diagnostics without synthesizing client-side server codes.
