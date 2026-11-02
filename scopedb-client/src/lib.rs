@@ -22,15 +22,17 @@
 )]
 #![doc = include_str!("../README.md")]
 
+#[cfg(doc)]
 #[doc = "[write-rows]: ../index.html#write-rows\n[error-handling]: crate::Error\n"]
 #[doc = "[migration-0.5]: ../migration/index.html#upgrade-from-04-to-05\n"]
 #[doc = "[migration-0.4]: ../migration/index.html#upgrade-from-03-to-04\n"]
-#[doc = include_str!("../docs/rust-http-api.md")]
-pub mod http_api {}
+#[doc = include_str!("../docs/http.md")]
+pub mod http {}
 
+#[cfg(doc)]
 #[doc = "[migration-0.4]: #upgrade-from-03-to-04\n[error-handling]: crate::Error\n"]
-#[doc = "[http-api-ingest]: ../http_api/index.html#table-ingest\n"]
-#[doc = "[http-api-catalog]: ../http_api/index.html#declarative-catalog\n"]
+#[doc = "[http-ingest]: ../http/index.html#table-ingest\n"]
+#[doc = "[http-catalog]: ../http/index.html#declarative-catalog\n"]
 #[doc = include_str!("../docs/migration-0.5.md")]
 #[doc = include_str!("../docs/migration-0.4.md")]
 pub mod migration {}

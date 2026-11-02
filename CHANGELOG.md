@@ -26,7 +26,7 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 * Confirm table appends from HTTP 200 responses with matching row counts, and derive definite failures from validated HTTP 4xx errors. Expose write outcomes through `AppendRowsResult::status` and `Error::append_details()`.
 * Keep transient failures, retry exhaustion, and ambiguous delivery outcomes separate when deciding retries and circuit availability, and preserve raw server codes without synthesizing client-side codes.
 * Preserve native result-cell parse errors through `std::error::Error::source()` while retaining row and column diagnostics.
-* Make migration guides, the HTTP protocol reference, error-handling guidance, and packaged examples reachable from the generated API documentation.
+* Make migration guides, HTTP protocol documentation, error-handling guidance, and packaged examples reachable from the generated API documentation.
 
 ## v0.4.2 (2026-10-27)
 

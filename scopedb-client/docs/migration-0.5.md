@@ -72,7 +72,7 @@ Append outcomes describe success, definite failure, and ambiguity. Update enum m
 
 `AppendRowsResult::status` is now `AppendOutcome::Succeeded` after a valid success response, including responses that omit the wire `status` field. Update matches on `AppendState::Committed` to use the new variant. Success still confirms that the entire batch committed. The SDK accepts both success formats during service upgrades.
 
-The SDK also accepts older flat error responses with explicit `details.status: rejected` on HTTP 4xx. Missing or unrecognized rejection details leave those responses ambiguous. Older row diagnostics remain available through `append_details()` when supplied; `AppendRequestResult::input_index` maps their zero-based request indexes back to the input slice. See the [HTTP API reference][http-api-ingest] for the current response format and status/code correspondence.
+The SDK also accepts older flat error responses with explicit `details.status: rejected` on HTTP 4xx. Missing or unrecognized rejection details leave those responses ambiguous. Older row diagnostics remain available through `append_details()` when supplied; `AppendRequestResult::input_index` maps their zero-based request indexes back to the input slice. See the [HTTP protocol][http-ingest] for the current response format and status/code correspondence.
 
 Use `Error::append_details()` for outcome certainty instead of inspecting `details.status` in the raw server error. A valid modern 4xx error establishes `Failed`; 5xx and interrupted or invalid responses are `Ambiguous`. Only validated HTTP 429 admission refusals are retried by default. In particular, older HTTP 503 responses no longer qualify as safe retries even when they contain `status: rejected` or `retryable: true`. Keep ambiguous batches available for application reconciliation; `.retry_ambiguous(true)` explicitly accepts duplicate-write risk.
 
@@ -92,11 +92,11 @@ Rename the Catalog version fields and pass their opaque tokens unchanged:
 | `CatalogResult::etag`      | `CatalogResult::version`           |
 | `CatalogOptions::if_match` | `CatalogOptions::expected_version` |
 
-The token identifies the entire tenant catalog, including when reading or changing a single resource. Use a read or dry-run result's `version` as `expected_version` when applying a change. A stale condition returns HTTP 412 with code `precondition_failed` and `ErrorKind::Conflict`; read the resource again and revise the change. See the [HTTP API reference][http-api-catalog] for transport details.
+The token identifies the entire tenant catalog, including when reading or changing a single resource. Use a read or dry-run result's `version` as `expected_version` when applying a change. A stale condition returns HTTP 412 with code `precondition_failed` and `ErrorKind::Conflict`; read the resource again and revise the change. See the [HTTP protocol][http-catalog] for transport details.
 
 Use `Error::catalog_outcome()` to distinguish `CatalogMutationOutcome::Rejected` from `Unknown`. `Unknown` requires reading the resource before replaying the mutation, including when a gateway supplies a structured error code. Reads, dry runs, and local validation failures return `None`. Replace checks for the client-generated `catalog_commit_outcome_unknown` code with this typed outcome. `code()`, `details()`, and HTTP metadata retain original server diagnostics without synthesizing client-side server codes.
 
 [migration-0.4]: migration-0.4.md
 [error-handling]: errors.md
-[http-api-ingest]: rust-http-api.md#table-ingest
-[http-api-catalog]: rust-http-api.md#declarative-catalog
+[http-ingest]: http.md#table-ingest
+[http-catalog]: http.md#declarative-catalog

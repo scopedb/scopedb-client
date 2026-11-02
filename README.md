@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [Upgrade from 0.4 to 0.5](scopedb-client/docs/migration-0.5.md)
 - [Upgrade from 0.3 to 0.4](scopedb-client/docs/migration-0.4.md)
 - [Examples](scopedb-client/examples/README.md)
-- [HTTP wire reference](scopedb-client/docs/rust-http-api.md)
+- [HTTP protocol](scopedb-client/docs/http.md)
 - [Changelog](CHANGELOG.md)
 - [Report an issue](https://github.com/scopedb/scopedb-client/issues)
 

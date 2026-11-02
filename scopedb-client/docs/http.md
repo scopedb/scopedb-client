@@ -1,4 +1,4 @@
-# Rust HTTP API reference
+# HTTP protocol
 
 All requests identify the client through `X-ScopeDB-Client: scopedb-client`. An optional API key is sent as a Bearer token.
 
