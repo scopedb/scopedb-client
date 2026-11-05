@@ -227,9 +227,35 @@ async fn invalid_append_successes_remain_ambiguous() {
 }
 
 #[tokio::test]
+#[allow(deprecated)]
+async fn estimated_execution_limits_fail_before_submission() {
+    let mut server =
+        Server::start(|_| async { panic!("unsupported limit must not be sent") }).await;
+    let statement = server.client().statement("SELECT 1");
+    let id = statement.statement_id();
+    let error = statement
+        .with_max_estimated(Duration::from_secs(3))
+        .submit()
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert_eq!(error.statement_id(), Some(id));
+    assert!(
+        error
+            .to_string()
+            .contains("estimated execution limits are not supported")
+    );
+    assert!(server.received().is_empty());
+}
+
+#[tokio::test]
 async fn submitted_query_returns_typed_rows() {
     let mut server = Server::start(|request| async move {
         let body = if request.method == "POST" {
+            let body = request.json();
+            assert_eq!(body["timeout_seconds"], 30.0);
+            assert!(body.get("max_elapsed_seconds").is_none());
+            assert!(body.get("max_estimated_seconds").is_none());
             statement(request.json()["statement_id"].clone(), "running")
         } else {
             finished(json!(
@@ -248,7 +274,9 @@ async fn submitted_query_returns_typed_rows() {
     .await;
     let rows = server
         .client()
-        .query("SELECT id, label FROM events")
+        .statement("SELECT id, label FROM events")
+        .with_max_elapsed(Duration::from_secs(30))
+        .execute()
         .await
         .unwrap()
         .into_objects()
@@ -262,6 +290,99 @@ async fn submitted_query_returns_typed_rows() {
         .unwrap()
         .to_string();
     assert!(requests[1].target.contains(&id));
+}
+
+#[tokio::test]
+async fn malformed_results_fail_at_public_conversion_boundaries() {
+    for (rows, num_rows) in [
+        (json!([["1"]]), 2),
+        (json!([[]]), 1),
+        (json!([["1", "extra"]]), 1),
+    ] {
+        let server = Server::start(move |request| {
+            let rows = rows.clone();
+            async move {
+                let mut body = finished(request.json()["statement_id"].clone());
+                body["result_set"] = json!({"metadata": {"fields": [{"name": "id", "data_type": "int"}], "num_rows": num_rows}, "format": "json", "rows": rows});
+                Some(Reply::json(200, body))
+            }
+        }).await;
+        let result = server
+            .client()
+            .query("SELECT id FROM events")
+            .await
+            .unwrap();
+        for error in [
+            result.to_values().unwrap_err(),
+            result.clone().into_values().unwrap_err(),
+            result.to_objects().unwrap_err(),
+            result.clone().into_objects().unwrap_err(),
+            result.first().unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), ErrorKind::InvalidResponse);
+            assert_eq!(error.operation(), ErrorOperation::DecodeResult);
+        }
+    }
+}
+
+#[tokio::test]
+async fn duplicate_column_names_preserve_positional_values_but_reject_objects() {
+    let server = Server::start(|request| async move {
+        let mut body = finished(request.json()["statement_id"].clone());
+        body["result_set"] = json!({"metadata": {"fields": [{"name": "id", "data_type": "int"}, {"name": "id", "data_type": "int"}], "num_rows": 1}, "format": "json", "rows": [["1", "2"]]});
+        Some(Reply::json(200, body))
+    }).await;
+    let result = server
+        .client()
+        .query("SELECT 1 AS id, 2 AS id")
+        .await
+        .unwrap();
+    let expected = vec![vec![Value::Int(1), Value::Int(2)]];
+    assert_eq!(result.to_values().unwrap(), expected);
+    assert_eq!(result.clone().into_values().unwrap(), expected);
+    for error in [
+        result.to_objects().unwrap_err(),
+        result.clone().into_objects().unwrap_err(),
+        result.first().unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(error.operation(), ErrorOperation::DecodeResult);
+    }
+}
+
+#[tokio::test]
+async fn numeric_results_preserve_boundaries_and_reject_overflow() {
+    for (data_type, text, expected) in [
+        ("int", "-9223372036854775808", Some(Value::Int(i64::MIN))),
+        ("int", "9223372036854775807", Some(Value::Int(i64::MAX))),
+        ("uint", "18446744073709551615", Some(Value::UInt(u64::MAX))),
+        ("float", "inf", Some(Value::Float(f64::INFINITY))),
+        ("float", "-inf", Some(Value::Float(f64::NEG_INFINITY))),
+        ("float", "NaN", Some(Value::Float(f64::NAN))),
+        ("int", "9223372036854775808", None),
+        ("uint", "18446744073709551616", None),
+        ("float", "1e999", None),
+    ] {
+        let server = Server::start(move |request| async move {
+            let mut body = finished(request.json()["statement_id"].clone());
+            body["result_set"] = json!({"metadata": {"fields": [{"name": "value", "data_type": data_type}], "num_rows": 1}, "format": "json", "rows": [[text]]});
+            Some(Reply::json(200, body))
+        }).await;
+        let result = server
+            .client()
+            .query("SELECT value FROM events")
+            .await
+            .unwrap();
+        for values in [result.to_values(), result.into_values()] {
+            match &expected {
+                Some(Value::Float(value)) if value.is_nan() => {
+                    assert!(matches!(&values.unwrap()[0][0], Value::Float(value) if value.is_nan()))
+                }
+                Some(value) => assert_eq!(values.unwrap(), vec![vec![value.clone()]]),
+                None => assert_eq!(values.unwrap_err().kind(), ErrorKind::InvalidResponse),
+            }
+        }
+    }
 }
 
 #[tokio::test]

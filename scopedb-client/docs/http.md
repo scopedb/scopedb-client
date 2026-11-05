@@ -87,13 +87,12 @@ A submission request is:
 {
   "statement": "SELECT 1",
   "statement_id": "019a3998-0000-7000-8000-000000000000",
-  "max_elapsed_seconds": 30,
-  "max_estimated_seconds": 5,
+  "timeout_seconds": 30,
   "format": "json"
 }
 ```
 
-The HTTP API accepts a `statement_id`; the SDK always supplies one, allocating a UUIDv7 unless `with_statement_id()` overrides it. Submission and execution errors retain this identifier through `Error::statement_id()` so callers can inspect or resume waiting on the execution with `Client::statement_handle()`. Duration limits must be positive and finite; omitted values use server defaults. `with_max_elapsed(Duration)` includes queueing time, while `with_max_estimated(Duration)` limits estimated execution duration.
+The HTTP API accepts a `statement_id`; the SDK always supplies one, allocating a UUIDv7 unless `with_statement_id()` overrides it. Submission and execution errors retain this identifier through `Error::statement_id()` so callers can inspect or resume waiting on the execution with `Client::statement_handle()`. `with_max_elapsed(Duration)` sets the positive `timeout_seconds` deadline covering queueing, preparation, and execution; omitted values use server defaults. Estimated execution limits are unsupported: deprecated `with_max_estimated(Duration)` causes submission to return `InvalidInput` before sending a request. Remove that call, or use `with_max_elapsed(Duration)` if a total deadline is intended.
 
 All three endpoints return the same status family: `pending`, `running`, `finished`, `failed`, or `cancelled`. Each includes `statement_id`, `created_at`, and `progress` with `compute_seconds`. Finished responses contain `result_set`; failed responses contain `error: { code, message, details? }`.
 
