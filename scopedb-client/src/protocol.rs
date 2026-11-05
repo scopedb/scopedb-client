@@ -341,9 +341,7 @@ pub struct StatementRequest {
     pub statement_id: Uuid,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_elapsed_seconds: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_estimated_seconds: Option<f64>,
+    pub timeout_seconds: Option<f64>,
     pub format: &'static str,
 }
 

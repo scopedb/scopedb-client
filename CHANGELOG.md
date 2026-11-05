@@ -4,6 +4,10 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+### Bug Fixes
+
+* Send `with_max_elapsed()` as the supported `timeout_seconds` server deadline. Deprecate `with_max_estimated()`, which now makes submission return `InvalidInput` before sending a request instead of silently ignoring the limit. Remove it or use a total deadline as described in the [statement protocol](scopedb-client/docs/http.md).
+
 ## v0.5.0 (2026-11-02)
 
 ### Breaking Changes

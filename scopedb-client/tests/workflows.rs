@@ -227,9 +227,35 @@ async fn invalid_append_successes_remain_ambiguous() {
 }
 
 #[tokio::test]
+#[allow(deprecated)]
+async fn estimated_execution_limits_fail_before_submission() {
+    let mut server =
+        Server::start(|_| async { panic!("unsupported limit must not be sent") }).await;
+    let statement = server.client().statement("SELECT 1");
+    let id = statement.statement_id();
+    let error = statement
+        .with_max_estimated(Duration::from_secs(3))
+        .submit()
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert_eq!(error.statement_id(), Some(id));
+    assert!(
+        error
+            .to_string()
+            .contains("estimated execution limits are not supported")
+    );
+    assert!(server.received().is_empty());
+}
+
+#[tokio::test]
 async fn submitted_query_returns_typed_rows() {
     let mut server = Server::start(|request| async move {
         let body = if request.method == "POST" {
+            let body = request.json();
+            assert_eq!(body["timeout_seconds"], 30.0);
+            assert!(body.get("max_elapsed_seconds").is_none());
+            assert!(body.get("max_estimated_seconds").is_none());
             statement(request.json()["statement_id"].clone(), "running")
         } else {
             finished(json!(
@@ -248,7 +274,9 @@ async fn submitted_query_returns_typed_rows() {
     .await;
     let rows = server
         .client()
-        .query("SELECT id, label FROM events")
+        .statement("SELECT id, label FROM events")
+        .with_max_elapsed(Duration::from_secs(30))
+        .execute()
         .await
         .unwrap()
         .into_objects()

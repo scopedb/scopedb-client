@@ -85,7 +85,7 @@ Typed definitions reject unsupported fields. Use `raw().get()` to keep them as J
 | `handle.fetch().await`                         | `handle.wait().await`                 |
 | Handle progress/result accessors               | Inspect `snapshot()` or call `wait()` |
 
-Use `std::time::Duration` in place of `jiff::SignedDuration`. `with_max_elapsed` includes queueing time. The separate `with_max_estimated` option rejects queries whose estimated duration exceeds a limit; it does not control parallelism. Both take positive durations. Omitted limits use service defaults.
+Use `std::time::Duration` in place of `jiff::SignedDuration`. `with_max_elapsed` takes a positive duration and sends the server's `timeout_seconds` deadline, including queueing time. Estimated limits are no longer supported: remove `with_max_estimated` calls, which now cause submission to return `InvalidInput` before sending a request. Use a total deadline only if that matches the intended limit. Omitted limits use service defaults.
 
 ```rust,no_run
 use std::time::Duration;

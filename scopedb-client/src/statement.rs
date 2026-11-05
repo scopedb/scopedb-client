@@ -60,7 +60,12 @@ impl Statement {
         self
     }
 
-    /// Rejects the statement if its estimated execution time exceeds `duration`.
+    /// Configures an unsupported estimated execution limit.
+    ///
+    /// Submission fails with [`ErrorKind::InvalidInput`] before sending a request.
+    #[deprecated(
+        note = "estimated execution limits are unsupported; use with_max_elapsed for a total deadline"
+    )]
     pub fn with_max_estimated(mut self, duration: Duration) -> Self {
         self.max_estimated = Some(duration);
         self
@@ -72,9 +77,15 @@ impl Statement {
     /// inspect the execution with [`Client::statement_handle`] instead of
     /// resubmitting the SQL.
     pub async fn submit(self) -> Result<StatementHandle, Error> {
-        if self.max_elapsed.is_some_and(|d| d.is_zero())
-            || self.max_estimated.is_some_and(|d| d.is_zero())
-        {
+        if self.max_estimated.is_some() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                ErrorOperation::SubmitStatement,
+                "estimated execution limits are not supported; use with_max_elapsed",
+            )
+            .set_statement_id(self.statement_id));
+        }
+        if self.max_elapsed.is_some_and(|d| d.is_zero()) {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 ErrorOperation::SubmitStatement,
@@ -87,15 +98,14 @@ impl Statement {
             statement,
             statement_id,
             max_elapsed,
-            max_estimated,
+            max_estimated: _,
         } = self;
 
         let snapshot = client
             .submit_statement(StatementRequest {
                 statement,
                 statement_id,
-                max_elapsed_seconds: max_elapsed.map(|v| v.as_secs_f64()),
-                max_estimated_seconds: max_estimated.map(|v| v.as_secs_f64()),
+                timeout_seconds: max_elapsed.map(|v| v.as_secs_f64()),
                 format: "json",
             })
             .await
