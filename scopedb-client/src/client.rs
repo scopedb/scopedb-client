@@ -19,12 +19,12 @@ use fastrace_reqwest::traceparent_headers;
 use reqwest::IntoUrl;
 use reqwest::Method;
 use reqwest::StatusCode;
-use reqwest::Url;
 use reqwest::header::AUTHORIZATION;
 use reqwest::header::CONTENT_ENCODING;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
 use serde::Serialize;
+use url::Url;
 use uuid::Uuid;
 
 use crate::AppendErrorDetails;

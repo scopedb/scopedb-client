@@ -14,7 +14,7 @@
 
 [package]
 name = "scopedb-client"
-version = "0.5.0"
+version = "0.5.1"
 
 categories = ["database"]
 description = "The official Rust client for ScopeDB"
@@ -37,6 +37,7 @@ reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true }
 zstd = { workspace = true }
 
