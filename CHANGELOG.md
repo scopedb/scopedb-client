@@ -4,6 +4,12 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+## v0.5.1 (2026-11-23)
+
+### Bug Fixes
+
+* Require `url` 2.5.9 or later in the 2.x series so that upgrading the SDK also fixes the stack overflow in `Url::origin()` on nested `blob:` URLs. See [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592.html).
+
 ## v0.5.0 (2026-11-02)
 
 ### Breaking Changes

@@ -47,6 +47,7 @@ serde_json = { version = "1.0.154", features = [
 ] }
 tokio = { version = "1.54.1", features = ["macros", "rt", "sync", "time"] }
 ureq = { version = "3.5.0", default-features = false }
+url = { version = "2.5.9" }
 uuid = { version = "1.29.0", features = ["v7", "serde"] }
 which = { version = "8.0.6" }
 zstd = { version = "0.14.3" }
