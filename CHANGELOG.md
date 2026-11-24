@@ -4,6 +4,12 @@ All significant changes to the ScopeDB Rust SDK are documented in this file.
 
 ## Unreleased
 
+## v0.5.2 (2026-11-24)
+
+### Bug Fixes
+
+* Update `cookie` to 0.18.3 in the workspace lockfile so source checkouts pass the dependency audit for [RUSTSEC-2026-0594](https://rustsec.org/advisories/RUSTSEC-2026-0594.html). This optional dependency is specific to the repository's development tooling.
+
 ## v0.5.1 (2026-11-23)
 
 ### Bug Fixes
