@@ -150,6 +150,7 @@ pub struct AppendWriter {
 /// and cover a contiguous prefix of the input slice; [`unsubmitted`](Self::unsubmitted)
 /// covers the remaining suffix.
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct AppendWriteReport {
     input_rows: usize,
     batches: Vec<AppendRequestResult>,
