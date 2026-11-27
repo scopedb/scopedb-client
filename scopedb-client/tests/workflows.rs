@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod support;
-
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
@@ -36,10 +34,12 @@ use serde_json::json;
 use tokio::sync::Notify;
 use tokio::sync::watch;
 
-use self::support::Reply;
-use self::support::Server;
-use self::support::finished;
-use self::support::statement;
+use crate::support::Reply;
+use crate::support::Server;
+use crate::support::finished;
+use crate::support::statement;
+
+mod support;
 
 #[tokio::test]
 async fn selected_table_is_shared_by_all_write_modes() {

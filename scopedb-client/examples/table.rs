@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::env;
+
 mod common;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = common::client()?;
-    let table_name = std::env::var("SCOPEDB_TABLE").unwrap_or_else(|_| "events".to_string());
+    let table_name = env::var("SCOPEDB_TABLE").unwrap_or_else(|_| "events".to_string());
     let table = client
         .table(table_name)
         .with_database(common::database())
