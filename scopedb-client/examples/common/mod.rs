@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 
+use std::env;
 use std::io;
 
 use scopedb_client::Client;
@@ -21,23 +22,23 @@ use scopedb_client::Error;
 use scopedb_client::Table;
 
 pub fn endpoint() -> String {
-    std::env::var("SCOPEDB_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:6543".to_string())
+    env::var("SCOPEDB_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:6543".to_string())
 }
 
 pub fn database() -> String {
-    std::env::var("SCOPEDB_DATABASE").unwrap_or_else(|_| "scopedb".to_string())
+    env::var("SCOPEDB_DATABASE").unwrap_or_else(|_| "scopedb".to_string())
 }
 
 pub fn schema() -> String {
-    std::env::var("SCOPEDB_SCHEMA").unwrap_or_else(|_| "public".to_string())
+    env::var("SCOPEDB_SCHEMA").unwrap_or_else(|_| "public".to_string())
 }
 
 pub fn client() -> Result<Client, Error> {
-    let api_key = std::env::var("SCOPEDB_API_KEY")
+    let api_key = env::var("SCOPEDB_API_KEY")
         .ok()
         .filter(|value| !value.is_empty())
         .or_else(|| {
-            std::env::var("SCOPEDB_TOKEN")
+            env::var("SCOPEDB_TOKEN")
                 .ok()
                 .filter(|value| !value.is_empty())
         });
@@ -49,7 +50,7 @@ pub fn client() -> Result<Client, Error> {
 }
 
 pub fn write_table(client: &Client) -> Result<Table, io::Error> {
-    let table = std::env::var("SCOPEDB_TABLE")
+    let table = env::var("SCOPEDB_TABLE")
         .ok()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {

@@ -22,6 +22,9 @@
 )]
 #![doc = include_str!("../README.md")]
 
+/// Re-exported HTTP client crate for configuring [`ClientBuilder::http_client`].
+pub use reqwest;
+
 #[cfg(doc)]
 #[doc = "[write-rows]: ../index.html#write-rows\n[error-handling]: crate::Error\n"]
 #[doc = "[migration-0.5]: ../migration/index.html#upgrade-from-04-to-05\n"]
@@ -38,21 +41,10 @@ pub mod http {}
 pub mod migration {}
 
 mod append;
-mod append_stream;
-mod append_writer;
-mod catalog;
-mod client;
-mod error;
-mod protocol;
-mod result;
-mod statement;
-mod table;
-
-/// Re-exported HTTP client crate for configuring [`ClientBuilder::http_client`].
-pub use reqwest;
-
 pub use self::append::AppendDeliveryOutcome;
 pub use self::append::AppendFailurePolicy;
+
+mod append_stream;
 pub use self::append_stream::AppendAdmissionResult;
 pub use self::append_stream::AppendBatchFailureAction;
 pub use self::append_stream::AppendBatchFailureEvent;
@@ -66,10 +58,14 @@ pub use self::append_stream::AppendStreamBuilder;
 pub use self::append_stream::AppendStreamState;
 pub use self::append_stream::AppendStreamStats;
 pub use self::append_stream::AppendTrySendError;
+
+mod append_writer;
 pub use self::append_writer::AppendRequestResult;
 pub use self::append_writer::AppendWriteReport;
 pub use self::append_writer::AppendWriter;
 pub use self::append_writer::AppendWriterBuilder;
+
+mod catalog;
 pub use self::catalog::Catalog;
 pub use self::catalog::CatalogColumn;
 pub use self::catalog::CatalogColumnIndex;
@@ -84,13 +80,19 @@ pub use self::catalog::CatalogSchema;
 pub use self::catalog::CatalogSnapshot;
 pub use self::catalog::CatalogTable;
 pub use self::catalog::CatalogView;
+
+mod client;
 pub use self::client::Client;
 pub use self::client::ClientBuilder;
+
+mod error;
 pub use self::error::Error;
 pub use self::error::ErrorKind;
 pub use self::error::ErrorOperation;
 pub use self::error::WriteErrorDetails;
 pub use self::error::WriteErrorReason;
+
+mod protocol;
 pub use self::protocol::AppendErrorDetails;
 pub use self::protocol::AppendOutcome;
 pub use self::protocol::AppendRowError;
@@ -105,11 +107,17 @@ pub use self::protocol::StatementStatusFailed;
 pub use self::protocol::StatementStatusFinished;
 pub use self::protocol::StatementStatusPending;
 pub use self::protocol::StatementStatusRunning;
+
+mod result;
 pub use self::result::FieldSchema;
 pub use self::result::ResultObject;
 pub use self::result::ResultSet;
 pub use self::result::Schema;
 pub use self::result::Value;
+
+mod statement;
 pub use self::statement::Statement;
 pub use self::statement::StatementHandle;
+
+mod table;
 pub use self::table::Table;

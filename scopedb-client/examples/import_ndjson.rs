@@ -12,16 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
-
+use std::env;
 use std::fs::File;
-use std::io::BufRead;
+use std::io::BufRead as _;
 use std::io::BufReader;
-use std::io::Read;
+use std::io::Read as _;
+
+mod common;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::args()
+    let path = env::args()
         .nth(1)
         .ok_or("usage: import_ndjson <events.ndjson>")?;
     let mut input = BufReader::new(File::open(path)?);

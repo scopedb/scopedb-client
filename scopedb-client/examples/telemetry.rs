@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
-
 use std::time::Duration;
 
 use scopedb_client::AppendCircuitBreakerOptions;
@@ -21,6 +19,8 @@ use scopedb_client::AppendDeliveryOutcome;
 use scopedb_client::AppendFailurePolicy;
 use scopedb_client::AppendStream;
 use uuid::Uuid;
+
+mod common;
 
 fn track(stream: &AppendStream, request: u64) -> bool {
     match stream.try_send(&serde_json::json!({

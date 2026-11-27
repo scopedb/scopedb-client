@@ -18,6 +18,8 @@
 //! the endpoint and test credentials. The test creates a temporary schema and attempts cleanup
 //! even after assertion failures. CI and release workflows leave this test ignored.
 
+use std::env;
+
 use scopedb_client::AppendOutcome;
 use scopedb_client::CatalogColumn;
 use scopedb_client::CatalogMutationOutcome;
@@ -43,7 +45,7 @@ async fn live_protocol() {
         .unwrap();
     assert_eq!(rows[0]["value"], Value::Int(1));
 
-    let database = std::env::var("SCOPEDB_DATABASE").unwrap_or_else(|_| "scopedb".into());
+    let database = env::var("SCOPEDB_DATABASE").unwrap_or_else(|_| "scopedb".into());
     let schema = format!("sdk_smoke_{}", Uuid::now_v7().simple());
     eprintln!("Temporary schema: {database}.{schema}");
     let resource = client.catalog().schema(&database, &schema);
@@ -166,11 +168,11 @@ async fn check_protocol(client: Client, database: String, schema: String) {
 }
 
 fn client() -> Client {
-    let mut builder = Client::builder(std::env::var("SCOPEDB_ENDPOINT").unwrap());
-    if let Ok(api_key) = std::env::var("SCOPEDB_API_KEY") {
+    let mut builder = Client::builder(env::var("SCOPEDB_ENDPOINT").unwrap());
+    if let Ok(api_key) = env::var("SCOPEDB_API_KEY") {
         builder = builder.api_key(api_key);
     }
-    if let Ok(tenant_id) = std::env::var("SCOPEDB_TENANT_ID") {
+    if let Ok(tenant_id) = env::var("SCOPEDB_TENANT_ID") {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("X-ScopeDB-Tenant-Id", tenant_id.parse().unwrap());
         builder = builder.http_client(

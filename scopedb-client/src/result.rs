@@ -17,6 +17,10 @@ use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
+use jiff::fmt::StdFmtWrite;
+use jiff::fmt::friendly;
+use jiff::fmt::temporal;
+
 use crate::DataType;
 use crate::Error;
 use crate::ErrorKind;
@@ -446,9 +450,6 @@ impl fmt::Display for Value {
 }
 
 fn format_timestamp(f: &mut fmt::Formatter<'_>, ts: &jiff::Timestamp) -> fmt::Result {
-    use jiff::fmt::StdFmtWrite;
-    use jiff::fmt::temporal;
-
     let precision = f.precision().map(|p| u8::try_from(p).unwrap_or(u8::MAX));
     temporal::DateTimePrinter::new()
         .precision(precision)
@@ -457,9 +458,6 @@ fn format_timestamp(f: &mut fmt::Formatter<'_>, ts: &jiff::Timestamp) -> fmt::Re
 }
 
 fn format_interval(f: &mut fmt::Formatter<'_>, d: &jiff::SignedDuration) -> fmt::Result {
-    use jiff::fmt::StdFmtWrite;
-    use jiff::fmt::friendly;
-
     friendly::SpanPrinter::new()
         .spacing(friendly::Spacing::None)
         .designator(friendly::Designator::Compact)
