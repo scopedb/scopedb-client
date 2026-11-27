@@ -480,7 +480,11 @@ struct BarrierCommand {
 struct BufferedRecord {
     payload: String,
     reserved_bytes: usize,
-    _reservation: OwnedSemaphorePermit,
+    #[expect(
+        dead_code,
+        reason = "retains pending byte budget permit until the record settles"
+    )]
+    reservation: OwnedSemaphorePermit,
 }
 
 struct PendingBytesBudget {
@@ -708,7 +712,7 @@ impl AppendStream {
         permit.send(AppendCommand::Record(BufferedRecord {
             payload,
             reserved_bytes,
-            _reservation: reservation,
+            reservation,
         }));
         Ok(())
     }
@@ -800,7 +804,7 @@ impl AppendStream {
         permit.send(AppendCommand::Record(BufferedRecord {
             payload,
             reserved_bytes,
-            _reservation: reservation,
+            reservation,
         }));
         Ok(())
     }
